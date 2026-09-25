@@ -6,6 +6,8 @@ import { truceSparesContact, truceBlocksBounty } from '../../shared/truce.js';
 import type { GangwayPlan } from '../../shared/interactions.js';
 import { DOCK_DECK_RISE, toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, getShipFloorYAt, getShipHoldHalfWidth, isInsideShipHoldFootprint, countOpenHoles, getShipHoleTier, shipLocalUpY } from '../../shared/interactions.js';
 import { drawnIslandSurfaceY } from '../../shared/terrainGrid.js';
+import { HULL_SATURATION, floodListTargets, updateShipFlooding } from './FloodSystem.js';
+import { floodSettle } from '../../shared/flooding/floodModel.js';
 import {
   getBridgeDeckY,
   getIslandDistRatio,
@@ -84,27 +86,6 @@ export const HULL_IMPACT = {
   DECK_SPLASH_RADIUS: 1.5,
 } as const;
 export type HullImpactKind = 'band' | 'topside' | 'deck';
-/** A hull with every slot an OPEN breach is "shot to pieces" (liveplay-v02):
- *  a wetter shot EVICTS the driest open hole (moves it down to the new point,
- *  ties by lowest id) so a waterline hit on a saturated hull still floods, and
- *  after GRACE_SECONDS at the cap the seams work open by themselves at
- *  FORCED_INGRESS water-level/s (one open waterline hole is 0.0075/s), so a
- *  hull nobody planks founders instead of being immune. */
-export const HULL_SATURATION = {
-  GRACE_SECONDS: 20,
-  FORCED_INGRESS: 0.02,
-  /** A new point must sit at least this much LOWER than the driest open hole
-   *  to evict it — a shot at the same height lands in the existing wound. */
-  EVICT_MIN_DROP: 0.05,
-} as const;
-/** Sim time at which each hull reached the open-hole cap (server-private:
- *  keyed by the live Ship object, never on the wire). */
-const saturatedSince = new WeakMap<Ship, number>();
-/** Seconds a hull has sat at the open-hole cap (0 when below it). */
-export function hullSaturatedFor(ship: Ship, t: number): number {
-  const since = saturatedSince.get(ship);
-  return since === undefined ? 0 : Math.max(0, t - since);
-}
 type HullSweepHit =
   | { kind: HullImpactKind; point: Vec3 }
   | { kind: 'player'; point: Vec3; player: Player };
@@ -598,126 +579,8 @@ const FOUNDER_ATTITUDE_RATE = 2.5;
 /** Descent once the deck is under: masts and tops follow her down. */
 const FOUNDER_DEEP_RATE = 1.5;
 
-// ── Flooding model ───────────────────────────────────────────────────────────
-/**
- * Per-HOLE flood evaluation. Every unpatched breach is tested at its own
- * hull-local point: the hole's world Y carries ship heave (position.y), pitch
- * and roll, so a breach on the raised windward rail of a heeled ship stays dry
- * while its opposite number gushes. `depth` is metres below the LIVE Gerstner
- * surface (negative = still above it), and the leak rate scales with it, so a
- * settling hull drags its own holes deeper and floods faster — the doom spiral.
- */
-export function evaluateHoleFlood(
-  ship: Ship,
-  t: number,
-  storm = 0,
-): Array<{ hole: ShipHole; depth: number; flooding: boolean; rateFactor: number }> {
-  const sinR = Math.sin(ship.rotation);
-  const cosR = Math.cos(ship.rotation);
-  const sinPitch = Math.sin(ship.pitch ?? 0);
-  const sinRoll = Math.sin(ship.roll ?? 0);
-  const out: Array<{ hole: ShipHole; depth: number; flooding: boolean; rateFactor: number }> = [];
-  for (const hole of ship.holes ?? []) {
-    if (hole.patched) continue;
-    const worldX = ship.position.x + hole.x * cosR + hole.z * sinR;
-    const worldZ = ship.position.z + hole.z * cosR - hole.x * sinR;
-    // Positive roll lifts the +x (PORT, see sideOfLocalX) rail; positive pitch dips the bow (+z).
-    const holeY = ship.position.y + hole.y + hole.x * sinRoll - hole.z * sinPitch;
-    // Storm seas break over holes that calm water would leave dry.
-    const surfaceY = gerstnerHeight(worldX, worldZ, t, WAVE_PARAMS, storm);
-    const depth = surfaceY - holeY;
-    const flooding = depth > -FLOODING.HOLE_WATERLINE_DEPTH;
-    out.push({
-      hole,
-      depth,
-      flooding,
-      rateFactor: flooding
-        ? clamp(1 + depth, FLOODING.HOLE_DEPTH_MIN_FACTOR, FLOODING.HOLE_DEPTH_MAX_FACTOR)
-        : 0,
-    });
-  }
-  return out;
-}
-
-/** Total ingress (water-level/sec) from every open, submerged hole. A hole
- *  sitting exactly on the waterline leaks INGRESS_PER_HOLE; deeper gushes up to
- *  1.5×. A reinforced hull seeps slower (HULL_INGRESS_MULT). */
-export function shipIngressRate(ship: Ship, t: number, storm = 0): number {
-  const classScale = FLOODING.INGRESS_CLASS_SCALE[ship.type] ?? 1;
-  const reinforced = ship.upgrades.some((u) => u.type === 'hull_reinforcement')
-    ? SHIP_UPGRADES.HULL_INGRESS_MULT
-    : 1;
-  let total = 0;
-  for (const h of evaluateHoleFlood(ship, t, storm)) {
-    if (h.flooding) total += FLOODING.INGRESS_PER_HOLE * h.rateFactor;
-  }
-  return total * classScale * reinforced;
-}
-
-/**
- * SERVER-owned list. The heel and trim a hull takes from the water standing in
- * her, derived ONLY from her open breaches (which rail they are on, which end,
- * and how deep each one sits) so client and server agree without a wire field
- * and a seeded match replays the same lean.
- *
- * Conventions match the renderer and updateShipWaveAttitude: positive roll
- * LIFTS the +x (port) rail, so breaches keyed 'starboard' (= +x, the legacy
- * HullSections key) produce a NEGATIVE roll (that rail
- * goes down); positive pitch DIPS the bow, so a flooded bow trims positive.
- * evaluateHoleFlood already reads pitch/roll, which is what closes the doom
- * spiral: the list dips the holed side, the holed side then gushes harder.
- */
-export function floodListTargets(ship: Ship, t: number, storm = 0): { roll: number; trim: number } {
-  const stats = SHIP_STATS[ship.type];
-  const halfW = Math.max(0.001, stats.width * 0.5);
-  const halfL = Math.max(0.001, stats.length * 0.5);
-  let lateral = 0;
-  let longitudinal = 0;
-  for (const h of evaluateHoleFlood(ship, t, storm)) {
-    if (!h.flooding) continue;
-    lateral += h.rateFactor * clamp(h.hole.x / halfW, -1, 1);
-    longitudinal += h.rateFactor * clamp(h.hole.z / halfL, -1, 1);
-  }
-  return {
-    roll: clamp(-lateral * FLOODING.LIST_ROLL_GAIN, -FLOODING.LIST_ROLL_MAX, FLOODING.LIST_ROLL_MAX),
-    trim: clamp(longitudinal * FLOODING.LIST_TRIM_GAIN, -FLOODING.LIST_TRIM_MAX, FLOODING.LIST_TRIM_MAX),
-  };
-}
-
-/**
- * Advance a ship's bilge one step: ingress from open holes, else the passive
- * bilge pump slowly recovers a patched hull. Publishes ship.floodingRate (the
- * client gauge trend) and douses fire once a holed section goes under. Bailing
- * (player/bot) removes water separately, before this runs in the tick.
- */
-export function updateShipFlooding(ship: Ship, t: number, dt: number, storm = 0): void {
-  const water = ship.waterLevel ?? 0;
-  let ingress = shipIngressRate(ship, t, storm);
-  // Shot to pieces: at the cap for longer than the grace the seams open.
-  if (countOpenHoles(ship) >= FLOODING.MAX_HOLES_PER_SHIP) {
-    if (!saturatedSince.has(ship)) saturatedSince.set(ship, t);
-    if (hullSaturatedFor(ship, t) > HULL_SATURATION.GRACE_SECONDS) ingress += HULL_SATURATION.FORCED_INGRESS;
-  } else if (saturatedSince.has(ship)) {
-    saturatedSince.delete(ship);
-  }
-  if (ingress > 0) {
-    ship.waterLevel = clamp(water + ingress * dt, 0, 1);
-    ship.floodingRate = ingress;
-    // Water pouring through a submerged hole douses a deck fire.
-    if (ship.onFire) {
-      ship.onFire = false;
-      ship.fireTimer = 0;
-      ship.fireDamageAccum = 0;
-    }
-  } else {
-    const pumpMult = ship.upgrades.some((u) => u.type === 'hull_reinforcement')
-      ? SHIP_UPGRADES.HULL_PUMP_MULT
-      : 1;
-    const pump = FLOODING.BAIL_RATE * FLOODING.PASSIVE_PUMP_FACTOR * pumpMult;
-    ship.waterLevel = clamp(water - pump * dt, 0, 1);
-    ship.floodingRate = (ship.waterLevel ?? 0) > 0 ? -pump : 0;
-  }
-}
+// ── Flooding model: extracted to FloodSystem (b2.2a); names re-exported. ──
+export { HULL_SATURATION, hullSaturatedFor, evaluateHoleFlood, shipIngressRate, floodListTargets, updateShipFlooding } from './FloodSystem.js';
 
 type PhysicsCombatEvent =
   | {
@@ -3404,7 +3267,7 @@ export class PhysicsSystem {
     // the list follows the holed rail and the flooded end (SINK-01), and the
     // bilge water pushes her down by up to FREEBOARD_DROP.
     const list = floodListTargets(ship, t, seaState);
-    const floodSink = clamp(ship.waterLevel ?? 0, 0, 1) * FLOODING.FREEBOARD_DROP;
+    const floodSink = floodSettle(ship.type, ship.waterLevel ?? 0);
     const calm = ship.anchored ? ANCHOR_SLOPE_SHARE : 1;
     const turnHeel = shipTurnHeel(ship.angularVelocity, speedFrac);
     // The turn's heeling moment builds with the drift angle, not in one tick:

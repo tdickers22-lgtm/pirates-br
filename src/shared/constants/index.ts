@@ -513,25 +513,26 @@ export const FLOODING = {
    *  the planking. ~0.06 m/s takes a fresh char from 1.05 m to the waterline in
    *  ~16 s — the length of an untended blaze. */
   FIRE_BURN_DOWN_RATE: 0.06,
-  /** Water-level/sec that ONE open, submerged hole lets in (sloop reference).
-   *  One bailer (BAIL_RATE 0.014) beats a single hole but loses to two, so a
-   *  gushing hull must be planked, not just bailed. ~67 s to founder a sloop on
-   *  two open holes, faster with more; a reinforced hull seeps slower still. */
-  INGRESS_PER_HOLE: 0.0075,
-  /** Ingress scales with how DEEP a hole sits under the live surface:
-   *  factor = clamp(1 + depthMetres, MIN, MAX), depth = surfaceY − holeWorldY.
-   *  A hole exactly ON the waterline (depth 0) is the INGRESS_PER_HOLE
-   *  reference; one washed by wave crests only (depth −0.3 … 0) weeps at
-   *  0.7–1×; one dragged half a metre under by the settling bilge gushes at
-   *  the 1.5× cap — that is the doom spiral, in one line. The bail-race
-   *  relations hold across the whole range (one bailer beats one hole even at
-   *  max depth: 0.014 > 0.01125; two holes beat one bailer even at min:
-   *  0.0105 ≈ 0.014 only until the hull settles). */
-  HOLE_DEPTH_MIN_FACTOR: 0.7,
-  HOLE_DEPTH_MAX_FACTOR: 1.5,
-  /** Per hull-class scale on ingress — bigger hull, slower to fill.
-   *  sloop 50 s / brigantine ~60 s / galleon ~71 s to fill on 2 open sections. */
-  INGRESS_CLASS_SCALE: { sloop: 1.0, brigantine: 0.84, galleon: 0.70 } as Record<ShipType, number>,
+  /** Torricelli ingress (D15, src/shared/flooding/floodModel.ts):
+   *  Q = K_REF x INGRESS_CLASS_SCALE[class] x HOLE_SIZE_AREA[size-1] x sqrt(2 g h_eff)
+   *  in fill fraction per second. K is calibrated (test-flood-model) so the
+   *  section-7 windows hold: two waterline holes founder an untended sloop in
+   *  55-80 s and a galleon in 82-115 s, with the settle closing the loop. */
+  K_REF: 0.0080,
+  /** Area factor per hole size 1 / 2 / 3 (b2.2b adds the size field). */
+  HOLE_SIZE_AREA: [1, 1.8, 2.8] as readonly number[],
+  /** Calm-sea wash margin (m): a hole up to this far ABOVE the live surface
+   *  still takes wash, fading linearly to 0 at the margin. */
+  WASH_MARGIN: 0.15,
+  /** Head (m) added under water so a waterline hole flows (sqrt law floor). */
+  WASH_HEAD: 0.05,
+  /** Depth cap (m) on the head. */
+  MAX_HEAD: 2.5,
+  /** Cap on one hole's weight in the flood list (b2.2c replaces the list with
+   *  the water centroid). */
+  LIST_WEIGHT_MAX: 1.5,
+  /** Per hull-class scale on K (bigger hull, slower to fill). */
+  INGRESS_CLASS_SCALE: { sloop: 1.0, brigantine: 0.83, galleon: 0.70 } as Record<ShipType, number>,
   /** One player bails this much water-level/sec (beats one open hole, loses to two). */
   BAIL_RATE: 0.014,
   /** Physical bucket bailing is a SCOOP → CARRY → HEAVE cycle: press once to
@@ -543,13 +544,12 @@ export const FLOODING = {
    *  BAIL_RATE + the code comment; the old 0.03 let one bailer out-drain two holes). */
   BAIL_SCOOP_TIME: 0.6,
   BAIL_SCOOP_VOLUME: 0.017,
-  /** Passive bilge pump drain (× BAIL_RATE) when NOTHING is holed-below-waterline. */
-  PASSIVE_PUMP_FACTOR: 0.25,
+  /** Passive bilge pump drain (x BAIL_RATE) on a STOCK hull: none. Water
+   *  stays until someone bails it (D15, holes-10); hull_reinforcement keeps
+   *  SHIP_UPGRADES.REINFORCED_PUMP_FACTOR. */
+  PASSIVE_PUMP_FACTOR: 0,
   /** Bots start bailing once standing water exceeds this. */
   BOT_BAIL_THRESHOLD: 0.35,
-  /** A hole starts weeping while it sits within this many metres ABOVE the local
-   *  surface (wave wash over a near-waterline breach); anything lower floods. */
-  HOLE_WATERLINE_DEPTH: 0.30,
   /** Full bilge lowers the buoyancy/heave target this many metres (freeboard loss →
    *  more sections dip under → the doom spiral). */
   FREEBOARD_DROP: 0.8,
@@ -825,8 +825,8 @@ export const UPGRADE_COSTS: Record<'hull_reinforcement' | 'charged_cannons' | 's
 export const SHIP_UPGRADES = {
   /** Reinforced hull: open holes flood at this fraction of the base rate. */
   HULL_INGRESS_MULT: 0.6,
-  /** Reinforced hull: passive bilge pump runs this much faster. */
-  HULL_PUMP_MULT: 1.6,
+  /** Reinforced hull: the only passive bilge pump (x BAIL_RATE) left (D15). */
+  REINFORCED_PUMP_FACTOR: 0.25,
   /** Heavy shot: extra holes punched per cannon hit on the struck section. */
   CHARGED_EXTRA_HOLES: 1,
   /** Heavy shot: anti-personnel cannonball blast multiplier (unchanged). */

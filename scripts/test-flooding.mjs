@@ -30,6 +30,7 @@ import {
   toShipLocalPoint,
 } from '../src/shared/interactions.ts';
 import { angleWrap, sampleWind, gerstnerHeight, WAVE_PARAMS } from '../src/shared/utils/index.ts';
+import { floodSettle, holeIngress, waterlineHoleIngress } from '../src/shared/flooding/floodModel.ts';
 
 // THIS SUITE PINS THE WORLD. Every block below that builds a real `new Match()`
 // (the founder scene, the pump, the sealed hold) inherits `this.rng` from
@@ -68,7 +69,9 @@ function makeShip(type = 'sloop', overrides = {}) {
     type,
     ownerId: 'owner',
     crewIds: [],
-    position: { x: 0, y: 0, z: 0 },
+    // Riding the frozen surface at the origin (the design waterline), so a
+    // breach placed with onCalmLine is on the water, not 0.18 m above it.
+    position: { x: 0, y: gerstnerHeight(0, 0, 0, WAVE_PARAMS), z: 0 },
     rotation: 0,
     velocity: { x: 0, y: 0, z: 0 },
     angularVelocity: 0,
@@ -108,7 +111,16 @@ function makeShip(type = 'sloop', overrides = {}) {
  *  waterline from both sides" state the ingress balance is tuned around. */
 function waterlineHoles(type) {
   const stats = SHIP_STATS[type];
-  return [hole(stats.width * 0.5, 0, 0), hole(-stats.width * 0.5, 0, 0)];
+  return [hole(stats.width * 0.5, onCalmLine(stats.width * 0.5, 0), 0), hole(-stats.width * 0.5, onCalmLine(-stats.width * 0.5, 0), 0)];
+}
+
+/** Hull-local y that puts a breach at (x, z) exactly on the frozen t=0 surface
+ *  when the hull rides at CALM_Y. The t=0 swell varies +-0.2 m across a beam;
+ *  with the D15 wash margin (0.15 m) "on the waterline" has to mean the LOCAL
+ *  waterline, or one rail's hole is dry and the other gushes 0.25 m under. */
+const CALM_Y = gerstnerHeight(0, 0, 0, WAVE_PARAMS);
+function onCalmLine(x, z) {
+  return gerstnerHeight(x, z, 0, WAVE_PARAMS) - CALM_Y;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -117,12 +129,17 @@ console.log('Ingress: two waterline breaches sink an untended ship');
 /** Untended fill time (seconds) for a level ship with two lateral breaches. */
 function untendedFillTime(type) {
   const ship = makeShip(type, { holes: waterlineHoles(type) });
-  // This fixture freezes time and does not run buoyancy. Put the design
-  // waterline at the actual frozen surface, not the mean sea-level datum.
-  ship.position.y = gerstnerHeight(0, 0, 0, WAVE_PARAMS);
+  // This fixture freezes time. Put the design waterline at the actual frozen
+  // surface, not the mean sea-level datum, and close the loop with the
+  // server's own settle (floodSettle, what PhysicsSystem's heave target reads):
+  // the inside head (D15) pushes back as the hold fills, the settle drags the
+  // holes down, and the pair is what founders her.
+  const s0 = gerstnerHeight(0, 0, 0, WAVE_PARAMS);
+  ship.position.y = s0;
   const flooding = evaluateHoleFlood(ship, 0).filter((h) => h.flooding);
   let t = 0;
   for (let i = 0; i < 200 * 60 && (ship.waterLevel ?? 0) < 1; i++) {
+    ship.position.y = s0 - floodSettle(type, ship.waterLevel ?? 0);
     updateShipFlooding(ship, 0, DT);
     t += DT;
   }
@@ -164,23 +181,20 @@ console.log('\nMore holes flood faster; a reinforced hull seeps slower');
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-console.log('\nIngress scales with how DEEP a breach sits (the doom spiral)');
+console.log('\nIngress follows Torricelli: sqrt of how DEEP a breach sits (the doom spiral)');
 
 {
   const ship = makeShip('sloop', { holes: [hole(2.5, 0, 0)] });
-  const atLine = shipIngressRate(ship, 0);
-  const shallow = evaluateHoleFlood(ship, 0)[0];
-  ship.position.y = -0.9; // the bilge has settled her: same breach, well under
-  const deep = evaluateHoleFlood(ship, 0)[0];
-  const submerged = shipIngressRate(ship, 0);
-  expect('a breach ON the waterline leaks the reference rate',
-    Math.abs(atLine - FLOODING.INGRESS_PER_HOLE * shallow.rateFactor * FLOODING.INGRESS_CLASS_SCALE.sloop) < 1e-12);
-  expect('the SAME breach dragged under leaks strictly harder',
-    submerged > atLine * 1.3, `line=${atLine.toFixed(5)} deep=${submerged.toFixed(5)}`);
-  expect('the depth factor is capped so a swamped hull cannot gush infinitely',
-    deep.rateFactor === FLOODING.HOLE_DEPTH_MAX_FACTOR, `factor=${deep.rateFactor}`);
-  expect('depth reads as metres below the live surface',
-    deep.depth > shallow.depth + 0.85, `shallow=${shallow.depth.toFixed(3)} deep=${deep.depth.toFixed(3)}`);
+  const s0 = gerstnerHeight(2.5, 0, 0, WAVE_PARAMS);
+  const at = (depth) => { ship.position.y = s0 - depth; return evaluateHoleFlood(ship, 0)[0]; };
+  const q02 = at(0.2).ingress;
+  const q1 = at(1.0).ingress;
+  expect('Q(1 m) / Q(0.2 m) is the sqrt law (1.9-2.3), not the old linear 1.5x cap',
+    q1 / q02 >= 1.9 && q1 / q02 <= 2.3, `ratio=${(q1 / q02).toFixed(3)}`);
+  expect('the SAME breach dragged under leaks strictly harder', q1 > q02 * 1.3);
+  expect('FloodSystem uses the shared law exactly',
+    Math.abs(at(0.6).ingress - holeIngress('sloop', 1, at(0.6).depth, 0)) < 1e-12);
+  expect('depth reads as metres below the live surface', Math.abs(at(0.6).depth - 0.6) < 1e-9, `depth=${at(0.6).depth}`);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -195,7 +209,7 @@ console.log('\nHeeled ship: the raised windward breach does NOT flood');
   expect('windward (raised starboard) breach stays above the waterline — no flood',
     !stbd.flooding && stbd.rateFactor === 0, `depth=${stbd.depth.toFixed(3)}`);
   expect('leeward (dipped port) breach floods', port.flooding && port.rateFactor > 0);
-  const expectedLowSideRate = FLOODING.INGRESS_PER_HOLE * port.rateFactor * FLOODING.INGRESS_CLASS_SCALE.sloop;
+  const expectedLowSideRate = port.ingress;
   expect('a heeled ship only takes water on the low side',
     Math.abs(shipIngressRate(ship, 0) - expectedLowSideRate) < 1e-12,
     `rate=${shipIngressRate(ship, 0)}`);
@@ -224,8 +238,9 @@ function simulateBail({ holes, bailers, seconds, start = 0.5 }) {
   const shipHoles = [];
   for (let i = 0; i < holes; i++) shipHoles.push(hole(...spots[i % spots.length]));
   const ship = makeShip('sloop', { holes: shipHoles, waterLevel: start });
-  ship.position.y = gerstnerHeight(0, 0, 0, WAVE_PARAMS);
+  const s0 = gerstnerHeight(0, 0, 0, WAVE_PARAMS);
   for (let i = 0; i < seconds * 60; i++) {
+    ship.position.y = s0 - floodSettle('sloop', ship.waterLevel);
     // Bailers act first (mirrors Match applying input before physics).
     ship.waterLevel = Math.max(0, ship.waterLevel - bailers * FLOODING.BAIL_RATE * DT);
     updateShipFlooding(ship, 0, DT);
@@ -235,8 +250,8 @@ function simulateBail({ holes, bailers, seconds, start = 0.5 }) {
 
 {
   expect('one bailer bails faster than one waterline hole floods',
-    FLOODING.BAIL_RATE > FLOODING.INGRESS_PER_HOLE,
-    `bail=${FLOODING.BAIL_RATE} perHole=${FLOODING.INGRESS_PER_HOLE}`);
+    FLOODING.BAIL_RATE > waterlineHoleIngress('sloop'),
+    `bail=${FLOODING.BAIL_RATE} perHole=${waterlineHoleIngress('sloop')}`);
   const oneVsOne = simulateBail({ holes: 1, bailers: 1, seconds: 20 });
   expect('one bailer net-drains against one hole', oneVsOne < 0.5, `water=${oneVsOne.toFixed(3)}`);
 
@@ -248,15 +263,15 @@ function simulateBail({ holes, bailers, seconds, start = 0.5 }) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-console.log('\nPatching ONE breach stops THAT breach; a whole hull pumps dry');
+console.log('\nPatching ONE breach stops THAT breach; the water STAYS until bailed (D15)');
 
 {
   const physics = new PhysicsSystem();
   const ship = makeShip('sloop', { holes: waterlineHoles('sloop'), waterLevel: 0.5 });
+  ship.position.y = CALM_Y - floodSettle('sloop', 0.5); // half full, she has settled
   const [stbd, port] = ship.holes;
   const both = shipIngressRate(ship, 0);
-  const stbdShare = evaluateHoleFlood(ship, 0).find((h) => h.hole.id === stbd.id).rateFactor
-    * FLOODING.INGRESS_PER_HOLE * FLOODING.INGRESS_CLASS_SCALE.sloop;
+  const stbdShare = evaluateHoleFlood(ship, 0).find((h) => h.hole.id === stbd.id).ingress;
   expect('holed hull is taking on water', both > 0);
 
   expect('patching an id that is not open reports failure', physics.patchHole(ship, 99999) === false);
@@ -271,16 +286,18 @@ console.log('\nPatching ONE breach stops THAT breach; a whole hull pumps dry');
 
   physics.patchHole(ship, port.id);
   expect('every breach patched -> zero ingress', shipIngressRate(ship, 0) === 0);
-  const before = ship.waterLevel;
-  const expectedPump = FLOODING.BAIL_RATE * FLOODING.PASSIVE_PUMP_FACTOR;
-  for (let i = 0; i < 5 * 60; i++) updateShipFlooding(ship, 0, DT);
-  expect('passive bilge pump drains a patched hull', ship.waterLevel < before, `water=${ship.waterLevel.toFixed(3)}`);
-  expect('pump trend is reported and negative',
-    ship.floodingRate < 0 && Math.abs(ship.floodingRate + expectedPump) < 1e-9,
-    `rate=${ship.floodingRate}`);
-  const drained = before - ship.waterLevel;
-  expect('pump drains at 0.25× bail rate',
-    Math.abs(drained - expectedPump * 5) < 1e-6, `drained=${drained.toFixed(4)} over 5s`);
+  // holes-10: a stock hull has NO passive pump. SoT water stays until bailed.
+  for (let i = 0; i < 60 * 60; i++) updateShipFlooding(ship, 0, DT);
+  expect('a stock patched hull at 0.5 is still >= 0.5 after 60 s', ship.waterLevel >= 0.5, `water=${ship.waterLevel.toFixed(3)}`);
+  expect('no pump trend on a stock hull', ship.floodingRate === 0, `rate=${ship.floodingRate}`);
+  const reinforced = makeShip('sloop', { holes: [], waterLevel: 0.5, upgrades: [{ type: 'hull_reinforcement' }] });
+  const expectedPump = FLOODING.BAIL_RATE * SHIP_UPGRADES.REINFORCED_PUMP_FACTOR;
+  for (let i = 0; i < 5 * 60; i++) updateShipFlooding(reinforced, 0, DT);
+  expect('a reinforced hull drains (its slow passive pump)', reinforced.waterLevel < 0.5, `water=${reinforced.waterLevel.toFixed(3)}`);
+  expect('reinforced pump trend is reported and negative',
+    reinforced.floodingRate < 0 && Math.abs(reinforced.floodingRate + expectedPump) < 1e-9, `rate=${reinforced.floodingRate}`);
+  expect('reinforced pump drains at 0.25x bail rate',
+    Math.abs((0.5 - reinforced.waterLevel) - expectedPump * 5) < 1e-6, `drained=${(0.5 - reinforced.waterLevel).toFixed(4)} over 5s`);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -484,10 +501,13 @@ console.log('\nShot to pieces: a saturated hull is never immune (HULL-01 slice c
   expect('eight open holes at 1.3 m take no water', countOpenHoles(ship) === 8 && shipIngressRate(ship, 0) === 0,
     `open=${countOpenHoles(ship)} ingress=${shipIngressRate(ship, 0)}`);
   const before = ship.holes.map((h) => h.y);
-  const [moved] = physics.openHoleAt(ship, { x: 2.4, y: 0.3, z: 0.5 }, 1, 'cannon');
+  // D15: a hole 0.3 m above calm water is dry on a level hull, so the
+  // waterline shot lands ON the local waterline (0.15 m wash margin).
+  const lineY = onCalmLine(2.4, 0.5) + 0.05;
+  const [moved] = physics.openHoleAt(ship, { x: 2.4, y: lineY, z: 0.5 }, 1, 'cannon');
   const lowered = ship.holes.filter((h, i) => h.y < before[i] - 0.5);
-  expect('a waterline shot on the saturated hull moves exactly ONE hole down to 0.3 m',
-    lowered.length === 1 && Math.abs(moved.y - 0.3) < 0.01 && ship.holes.length === 8,
+  expect('a waterline shot on the saturated hull moves exactly ONE hole down to the waterline',
+    lowered.length === 1 && Math.abs(moved.y - lineY) < 0.01 && ship.holes.length === 8,
     `moved=${lowered.length} y=${moved?.y} holes=${ship.holes.length}`);
   expect('...and the hull now takes water', shipIngressRate(ship, 0) > 0, `ingress=${shipIngressRate(ship, 0)}`);
   const again = physics.openHoleAt(ship, { x: -2.4, y: 1.25, z: 2 }, 1, 'cannon')[0];
@@ -516,7 +536,8 @@ console.log('\nShot to pieces: a saturated hull is never immune (HULL-01 slice c
   physics.patchHole(ship, ship.holes[0].id);
   const w = ship.waterLevel;
   run(5);
-  expect('planking ONE hole ends the forced ingress (and the pump starts gaining)', (ship.waterLevel ?? 0) < w, `${w.toFixed(3)} -> ${(ship.waterLevel ?? 0).toFixed(3)}`);
+  // Stock hulls have no passive pump (D15, holes-10): the rise stops, the water stays until bailed.
+  expect('planking ONE hole ends the forced ingress (the water stops rising, and stays)', Math.abs((ship.waterLevel ?? 0) - w) < 1e-9, `${w.toFixed(3)} -> ${(ship.waterLevel ?? 0).toFixed(3)}`);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -552,7 +573,7 @@ console.log('\nChainshot is a rigging weapon: no hull holes, sets chainshottedUn
   expect('chainshot ship_hit carries an empty breach list', chainEvent.holes.length === 0);
 
   // Control: a cannonball DOES open a breach, at the point it struck.
-  const ball = makeShip('sloop');
+  const ball = makeShip('sloop', { position: { x: 0, y: 0, z: 0 } });
   physics.onProjectileHitShip({
     id: 'ball-1', type: 'cannonball', ownerId: 'attacker', ownerShipId: 'other',
     position: { x: 0.4, y: 0.22, z: 5 }, velocity: { x: 0, y: 0, z: 0 },
@@ -602,9 +623,10 @@ console.log('\nThe SERVER owns the list: she leans on her holed side and settles
 
 {
   // Pure targets first — no wave noise, so the SIGN is unambiguous.
-  const stbd = makeShip('sloop', { holes: [hole(2.5, 0, 0), hole(2.5, 0, 2)] });
-  const port = makeShip('sloop', { holes: [hole(-2.5, 0, 0), hole(-2.5, 0, 2)] });
-  const bow = makeShip('sloop', { holes: [hole(0.5, 0, 5.5), hole(-0.5, 0, 5.5)] });
+  const on = (x, z) => hole(x, onCalmLine(x, z), z);
+  const stbd = makeShip('sloop', { holes: [on(2.5, 0), on(2.5, 2)] });
+  const port = makeShip('sloop', { holes: [on(-2.5, 0), on(-2.5, 2)] });
+  const bow = makeShip('sloop', { holes: [on(0.5, 5.5), on(-0.5, 5.5)] });
   const st = floodListTargets(stbd, 0);
   const pt = floodListTargets(port, 0);
   const bt = floodListTargets(bow, 0);
@@ -705,7 +727,16 @@ console.log('\nThe founder is a SCENE: crew ride the deck down, no anchor, down 
   fwd.position = { x: ship.position.x, y: deckY, z: ship.position.z + stats.length * 0.18 };
 
   ship.waterLevel = 1;
+  // A full hold has settled her (the heave target reads floodSettle): the
+  // fixture jumps the water, so it takes the settle too, or the D15 inside
+  // head reads the breach as pushed back by a hold she has not sunk into.
+  // The descent profile is still paced from the design datum (b2.2g re-paces
+  // the founder from the settled hull), so the settle is lifted again once the
+  // founder has captured her list.
+  const settle = floodSettle(ship.type, 1);
+  ship.position.y -= settle;
   match.evaluateShipSinking(ship);
+  ship.position.y += settle;
   expect('she founders', ship.sinking === true);
   expect('a foundering hull does NOT let go her anchor', ship.anchored === false,
     `anchored=${ship.anchored}`);
@@ -934,7 +965,9 @@ console.log('\nThe bilge pump is a station in the hold: it beats ONE open breach
     }
     expect(`the ${holeCount}-breach fixture is actually flooding`, shipIngressRate(ship, 0, 0) > 0);
     ship.waterLevel = 0.5;
+    const riding = ship.position.y;
     for (let i = 0; i < 20 * 60; i += 1) {
+      ship.position.y = riding - floodSettle(ship.type, ship.waterLevel); // she settles as she fills
       match.applyBilgePump(hand, ship, DT);
       updateShipFlooding(ship, 0, DT);
     }
