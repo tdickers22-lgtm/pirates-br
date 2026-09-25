@@ -1,0 +1,759 @@
+{
+  "$comment": "The ONLY way audio enters public/assets/audio (D31). Edit this file, run `node scripts/audio/build-audio.mjs`, commit the outputs. Every source needs a licence from allowedLicenses; CC-BY-* also needs a shipped credit (credits.json). Kinds set loudness: oneshot -18, bed -26, ui -24 LUFS (+-1 LU). Tiers: boot <= 1.5 MB, match <= 3.5 MB, music <= 1.0 MB (reserved for b3.5g), zones <= 2.0 MB, total <= 8 MB. frequent:true keys need >= 3 variants. Variants: src + member (archive path) | start/dur (s) | split (index of the n-th non-silent segment) | semitones (derived pitch variant) ; beds are cut as seamless loops of loopLen s with a crossfade of xfade s.",
+  "allowedLicenses": [
+    "CC0-1.0",
+    "PD",
+    "CC-BY-3.0",
+    "CC-BY-4.0"
+  ],
+  "creditRequired": [
+    "CC-BY-3.0",
+    "CC-BY-4.0"
+  ],
+  "kinds": {
+    "oneshot": {
+      "lufs": -18,
+      "bitrate": 80,
+      "maxDur": 3.0
+    },
+    "ui": {
+      "lufs": -24,
+      "bitrate": 64,
+      "maxDur": 3.0
+    },
+    "bed": {
+      "lufs": -26,
+      "bitrate": 64,
+      "stereoBitrate": 96,
+      "loopLen": 10,
+      "xfade": 0.6
+    }
+  },
+  "sources": {
+    "kenneyUi": {
+      "url": "https://kenney.nl/media/pages/assets/ui-audio/490d233f68-1677590494/kenney_ui-audio.zip",
+      "page": "https://kenney.nl/assets/ui-audio",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0"
+    },
+    "kenneyImpact": {
+      "url": "https://kenney.nl/media/pages/assets/impact-sounds/87b4ddecda-1677589768/kenney_impact-sounds.zip",
+      "page": "https://kenney.nl/assets/impact-sounds",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0"
+    },
+    "kenneyRpg": {
+      "url": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "page": "https://kenney.nl/assets/rpg-audio",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0"
+    },
+    "rdWater": {
+      "url": "https://opengameart.org/sites/default/files/water-splash-slime-sfx.zip",
+      "page": "https://opengameart.org/content/40-cc0-water-splash-slime-sfx",
+      "author": "rubberduck",
+      "license": "CC0-1.0"
+    },
+    "rdWoodMetal": {
+      "url": "https://opengameart.org/sites/default/files/100-CC0-wood-metal-SFX.zip",
+      "page": "https://opengameart.org/content/100-cc0-metal-and-wood-sfx",
+      "author": "rubberduck",
+      "license": "CC0-1.0"
+    },
+    "rdLoops": {
+      "url": "https://opengameart.org/sites/default/files/sfx_loops.zip",
+      "page": "https://opengameart.org/content/30-cc0-sfx-loops",
+      "author": "rubberduck",
+      "license": "CC0-1.0"
+    },
+    "swords": {
+      "url": "https://opengameart.org/sites/default/files/sword_clash_-_starninjas_0.zip",
+      "page": "https://opengameart.org/content/20-sword-sound-effects-attacks-and-clashes",
+      "author": "starninjas",
+      "license": "CC0-1.0"
+    },
+    "birds": {
+      "url": "https://opengameart.org/sites/default/files/birdsCrickets.zip",
+      "page": "https://opengameart.org/content/birdcricketfrog-and-mosquito-sounds",
+      "author": "aj-0",
+      "license": "CC0-1.0"
+    },
+    "steam": {
+      "url": "https://opengameart.org/sites/default/files/steam_hisses.zip",
+      "page": "https://opengameart.org/content/steam-release-sounds",
+      "author": "bart",
+      "license": "CC0-1.0"
+    },
+    "cannonFire": {
+      "url": "https://opengameart.org/sites/default/files/cannon_fire_1.ogg",
+      "page": "https://opengameart.org/content/battle-at-sea",
+      "author": "thimras",
+      "license": "CC0-1.0"
+    },
+    "cannonHitShip": {
+      "url": "https://opengameart.org/sites/default/files/cannon_hit_ship_short.ogg",
+      "page": "https://opengameart.org/content/battle-at-sea",
+      "author": "thimras",
+      "license": "CC0-1.0"
+    },
+    "cannonHit1": {
+      "url": "https://opengameart.org/sites/default/files/cannon_hit_1.ogg",
+      "page": "https://opengameart.org/content/battle-at-sea",
+      "author": "thimras",
+      "license": "CC0-1.0"
+    },
+    "cannonHitCannon": {
+      "url": "https://opengameart.org/sites/default/files/cannon_hit_cannon_1.ogg",
+      "page": "https://opengameart.org/content/battle-at-sea",
+      "author": "thimras",
+      "license": "CC0-1.0"
+    },
+    "cannonHitWall": {
+      "url": "https://opengameart.org/sites/default/files/cannon_hit_wall_1.ogg",
+      "page": "https://opengameart.org/content/battle-at-sea",
+      "author": "thimras",
+      "license": "CC0-1.0"
+    },
+    "cannonHitWallDry": {
+      "url": "https://opengameart.org/sites/default/files/cannon_hit_wall_no_splash.ogg",
+      "page": "https://opengameart.org/content/battle-at-sea",
+      "author": "thimras",
+      "license": "CC0-1.0"
+    },
+    "cannonMiss": {
+      "url": "https://opengameart.org/sites/default/files/cannon_miss_1.ogg",
+      "page": "https://opengameart.org/content/battle-at-sea",
+      "author": "thimras",
+      "license": "CC0-1.0"
+    },
+    "shipDestroyed": {
+      "url": "https://opengameart.org/sites/default/files/ship_destroyed_short.ogg",
+      "page": "https://opengameart.org/content/battle-at-sea",
+      "author": "thimras",
+      "license": "CC0-1.0"
+    },
+    "rainLoop": {
+      "url": "https://opengameart.org/sites/default/files/amb_rain_loop_1.ogg",
+      "page": "https://opengameart.org/content/amb-rain-loop-1",
+      "author": "kresiek-the-furry",
+      "license": "CC0-1.0"
+    },
+    "gulls": {
+      "url": "https://opengameart.org/sites/default/files/Seagull%20Ambient%201.wav",
+      "page": "https://opengameart.org/content/solo-seagull-sound-effects",
+      "author": "rango-mango",
+      "license": "CC0-1.0"
+    },
+    "bsbSeaWaves": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/0266.mp3",
+      "page": "https://bigsoundbank.com/detail-0266-sea-waves.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbSurf": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/0698.mp3",
+      "page": "https://bigsoundbank.com/detail-0698.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbBoat": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/0694.mp3",
+      "page": "https://bigsoundbank.com/detail-0694.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbWind": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/0595.mp3",
+      "page": "https://bigsoundbank.com/detail-0595.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbWaterfall": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/0507.mp3",
+      "page": "https://bigsoundbank.com/detail-0507.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbRifle": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/2853.mp3",
+      "page": "https://bigsoundbank.com/sound-2853-rifle-shot-1.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbShots": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/0532.mp3",
+      "page": "https://bigsoundbank.com/detail-0532-shotgun-shots.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbFlooding": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/0542.mp3",
+      "page": "https://bigsoundbank.com/detail-0542.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "gulls2": {
+      "url": "https://opengameart.org/sites/default/files/Seagull%20Ambient%202.wav",
+      "page": "https://opengameart.org/content/solo-seagull-sound-effects",
+      "author": "rango-mango",
+      "license": "CC0-1.0"
+    },
+    "gulls3": {
+      "url": "https://opengameart.org/sites/default/files/Seagull%20Ambient%203.wav",
+      "page": "https://opengameart.org/content/solo-seagull-sound-effects",
+      "author": "rango-mango",
+      "license": "CC0-1.0"
+    }
+  },
+  "keys": {
+    "ui.click": {
+      "tier": "boot",
+      "kind": "ui",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "kenneyUi",
+          "member": "Audio/click1.ogg"
+        },
+        {
+          "src": "kenneyUi",
+          "member": "Audio/click2.ogg"
+        },
+        {
+          "src": "kenneyUi",
+          "member": "Audio/click3.ogg"
+        }
+      ]
+    },
+    "ui.hover": {
+      "tier": "boot",
+      "kind": "ui",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "kenneyUi",
+          "member": "Audio/rollover1.ogg"
+        },
+        {
+          "src": "kenneyUi",
+          "member": "Audio/rollover2.ogg"
+        },
+        {
+          "src": "kenneyUi",
+          "member": "Audio/rollover3.ogg"
+        }
+      ]
+    },
+    "ui.toggle": {
+      "tier": "boot",
+      "kind": "ui",
+      "variants": [
+        {
+          "src": "kenneyUi",
+          "member": "Audio/switch2.ogg"
+        },
+        {
+          "src": "kenneyUi",
+          "member": "Audio/switch3.ogg"
+        }
+      ]
+    },
+    "bed.ocean": {
+      "tier": "boot",
+      "kind": "bed",
+      "channels": 2,
+      "variants": [
+        {
+          "src": "bsbSeaWaves",
+          "start": 4
+        }
+      ]
+    },
+    "bed.wind": {
+      "tier": "boot",
+      "kind": "bed",
+      "variants": [
+        {
+          "src": "bsbWind",
+          "start": 10
+        }
+      ]
+    },
+    "cannon.fire": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "cannonFire",
+          "dur": 2.8
+        },
+        {
+          "src": "cannonFire",
+          "dur": 2.8,
+          "semitones": -1.3
+        },
+        {
+          "src": "cannonFire",
+          "dur": 2.8,
+          "semitones": 1.0
+        }
+      ]
+    },
+    "cannon.hitWood": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "cannonHitShip"
+        },
+        {
+          "src": "cannonHit1"
+        },
+        {
+          "src": "cannonHitCannon"
+        }
+      ]
+    },
+    "cannon.hitRock": {
+      "tier": "match",
+      "kind": "oneshot",
+      "variants": [
+        {
+          "src": "cannonHitWall"
+        },
+        {
+          "src": "cannonHitWallDry"
+        }
+      ]
+    },
+    "splash.cannon": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "cannonMiss"
+        },
+        {
+          "src": "rdWater",
+          "member": "splash_01.ogg"
+        },
+        {
+          "src": "rdWater",
+          "member": "splash_02.ogg"
+        }
+      ]
+    },
+    "splash.small": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "rdWater",
+          "member": "splash_05.ogg"
+        },
+        {
+          "src": "rdWater",
+          "member": "splash_06.ogg"
+        },
+        {
+          "src": "rdWater",
+          "member": "splash_07.ogg"
+        }
+      ]
+    },
+    "wood.hit": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/impactWood_medium_000.ogg"
+        },
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/impactWood_medium_001.ogg"
+        },
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/impactWood_medium_002.ogg"
+        }
+      ]
+    },
+    "wood.plank": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/impactPlank_medium_000.ogg"
+        },
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/impactPlank_medium_001.ogg"
+        },
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/impactPlank_medium_002.ogg"
+        }
+      ]
+    },
+    "wood.crack": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "rdWoodMetal",
+          "member": "wood_cracking_01.ogg"
+        },
+        {
+          "src": "rdWoodMetal",
+          "member": "wood_cracking_02.ogg"
+        },
+        {
+          "src": "rdWoodMetal",
+          "member": "wood_cracking_03.ogg"
+        }
+      ]
+    },
+    "wood.break": {
+      "tier": "match",
+      "kind": "oneshot",
+      "variants": [
+        {
+          "src": "rdWoodMetal",
+          "member": "wood_breaking_01.ogg"
+        },
+        {
+          "src": "rdWoodMetal",
+          "member": "wood_breaking_02.ogg"
+        }
+      ]
+    },
+    "hammer.hit": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "rdWoodMetal",
+          "member": "wood_hammer_01.ogg"
+        },
+        {
+          "src": "rdWoodMetal",
+          "member": "wood_hammer_02.ogg"
+        },
+        {
+          "src": "rdWoodMetal",
+          "member": "hammer_01.ogg"
+        }
+      ]
+    },
+    "metal.hit": {
+      "tier": "match",
+      "kind": "oneshot",
+      "variants": [
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/impactMetal_medium_000.ogg"
+        },
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/impactMetal_medium_001.ogg"
+        }
+      ]
+    },
+    "sword.clash": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "swords",
+          "member": "sword_clash.1.ogg"
+        },
+        {
+          "src": "swords",
+          "member": "sword_clash.2.ogg"
+        },
+        {
+          "src": "swords",
+          "member": "sword_clash.3.ogg"
+        }
+      ]
+    },
+    "gun.shot": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "bsbRifle"
+        },
+        {
+          "src": "bsbShots",
+          "split": 0,
+          "dur": 1.6
+        },
+        {
+          "src": "bsbShots",
+          "split": 1,
+          "dur": 1.6
+        }
+      ]
+    },
+    "ship.creak": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/creak1.ogg"
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/creak2.ogg"
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/creak3.ogg"
+        }
+      ]
+    },
+    "ship.breakUp": {
+      "tier": "match",
+      "kind": "oneshot",
+      "variants": [
+        {
+          "src": "shipDestroyed",
+          "dur": 3.0
+        }
+      ]
+    },
+    "footstep.wood": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/footstep_wood_000.ogg"
+        },
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/footstep_wood_001.ogg"
+        },
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/footstep_wood_002.ogg"
+        },
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/footstep_wood_003.ogg"
+        }
+      ]
+    },
+    "footstep.grass": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/footstep_grass_000.ogg"
+        },
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/footstep_grass_001.ogg"
+        },
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/footstep_grass_002.ogg"
+        },
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/footstep_grass_003.ogg"
+        }
+      ]
+    },
+    "footstep.stone": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/footstep_concrete_000.ogg"
+        },
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/footstep_concrete_001.ogg"
+        },
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/footstep_concrete_002.ogg"
+        },
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/footstep_concrete_003.ogg"
+        }
+      ]
+    },
+    "foley.cloth": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/cloth1.ogg"
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/cloth2.ogg"
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/cloth3.ogg"
+        }
+      ]
+    },
+    "foley.drawBlade": {
+      "tier": "match",
+      "kind": "oneshot",
+      "variants": [
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/drawKnife1.ogg"
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/drawKnife2.ogg"
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/drawKnife3.ogg"
+        }
+      ]
+    },
+    "bed.floodGush": {
+      "tier": "match",
+      "kind": "bed",
+      "loopLen": 8,
+      "variants": [
+        {
+          "src": "bsbFlooding",
+          "start": 3
+        }
+      ]
+    },
+    "bed.hullRush": {
+      "tier": "match",
+      "kind": "bed",
+      "variants": [
+        {
+          "src": "bsbBoat",
+          "start": 20
+        }
+      ]
+    },
+    "bed.surf": {
+      "tier": "zones",
+      "kind": "bed",
+      "channels": 2,
+      "variants": [
+        {
+          "src": "bsbSurf",
+          "start": 30
+        }
+      ]
+    },
+    "bed.rain": {
+      "tier": "zones",
+      "kind": "bed",
+      "channels": 2,
+      "variants": [
+        {
+          "src": "rainLoop",
+          "start": 5
+        }
+      ]
+    },
+    "bed.waterfall": {
+      "tier": "zones",
+      "kind": "bed",
+      "variants": [
+        {
+          "src": "bsbWaterfall",
+          "start": 2
+        }
+      ]
+    },
+    "steam.hiss": {
+      "tier": "zones",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "steam",
+          "member": "steam hisses - Marker #1.wav"
+        },
+        {
+          "src": "steam",
+          "member": "steam hisses - Marker #2.wav"
+        },
+        {
+          "src": "steam",
+          "member": "steam hisses - Marker #3.wav"
+        }
+      ]
+    },
+    "bird.gull": {
+      "tier": "zones",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "gulls"
+        },
+        {
+          "src": "gulls2"
+        },
+        {
+          "src": "gulls3"
+        }
+      ]
+    },
+    "bird.day": {
+      "tier": "zones",
+      "kind": "oneshot",
+      "variants": [
+        {
+          "src": "birds",
+          "member": "birdsCrickets/bird.wav"
+        },
+        {
+          "src": "birds",
+          "member": "birdsCrickets/bird2.wav"
+        }
+      ]
+    },
+    "creature.frog": {
+      "tier": "zones",
+      "kind": "oneshot",
+      "variants": [
+        {
+          "src": "birds",
+          "member": "birdsCrickets/frog.wav"
+        }
+      ]
+    }
+  }
+}

@@ -546,6 +546,12 @@ export const LOGIC = [
   //                                 audioSession 'playback', hidden -> suspend once, 'interrupted' re-arms the
   //                                 unlock; static: Game arms the lifecycle (audio-08, crossdevice-12, D14, b1.1c)
   quick(tsx('test-audio-lifecycle.mjs')),
+  //   test-audio-manifest         — D31 sample contract (b2.4a; audio-01/14/03, vm:audio:5): manifest keys have
+  //                                 files (frequent >= 3), MP3, LICENSES row + allowed licence, CC-BY in credits,
+  //                                 tier budgets boot 1.5 / match 3.5 / zones 2.0 / music 1.0 / total 8 MB, no
+  //                                 orphans, every file re-measured +-1 LU; one writer per bed; creak 0 ashore.
+  //                                 Not quick: ffmpeg re-measures ~80 files (~10 s). Needs ffmpeg on PATH.
+  tsx('test-audio-manifest.mjs'),
   //   test-connect-supervisor     — real NetworkClient, fake socket Worker, virtual clock: cold start 7 s -> connect()
   //                                 resolves once, one live transport, no resume from a fresh page; drop -> one resume
   //                                 with this page's token; 60 s give-up + retryNow; offline/online; silent background

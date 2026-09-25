@@ -1,0 +1,1137 @@
+{
+  "version": 1,
+  "generatedBy": "scripts/audio/build-audio.mjs from scripts/audio/sources.json",
+  "format": "mp3",
+  "sampleRate": 44100,
+  "targetsLufs": {
+    "oneshot": -18,
+    "ui": -24,
+    "bed": -26
+  },
+  "tierBytes": {
+    "boot": 215546,
+    "match": 702482,
+    "zones": 461841
+  },
+  "keys": {
+    "ui.click": {
+      "tier": "boot",
+      "kind": "ui",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -24,
+      "files": [
+        {
+          "file": "boot/ui.click.1.mp3",
+          "source": "kenneyUi",
+          "member": "Audio/click1.ogg",
+          "bytes": 1252,
+          "duration": 0.091,
+          "channels": 1,
+          "lufs": -24.4,
+          "peakDb": -3.5
+        },
+        {
+          "file": "boot/ui.click.2.mp3",
+          "source": "kenneyUi",
+          "member": "Audio/click2.ogg",
+          "bytes": 1043,
+          "duration": 0.053,
+          "channels": 1,
+          "lufs": -24.3,
+          "peakDb": -7.9
+        },
+        {
+          "file": "boot/ui.click.3.mp3",
+          "source": "kenneyUi",
+          "member": "Audio/click3.ogg",
+          "bytes": 1252,
+          "duration": 0.083,
+          "channels": 1,
+          "lufs": -24.7,
+          "peakDb": -1.8
+        }
+      ]
+    },
+    "ui.hover": {
+      "tier": "boot",
+      "kind": "ui",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -24,
+      "files": [
+        {
+          "file": "boot/ui.hover.1.mp3",
+          "source": "kenneyUi",
+          "member": "Audio/rollover1.ogg",
+          "bytes": 2297,
+          "duration": 0.224,
+          "channels": 1,
+          "lufs": -23.7,
+          "peakDb": -1.3
+        },
+        {
+          "file": "boot/ui.hover.2.mp3",
+          "source": "kenneyUi",
+          "member": "Audio/rollover2.ogg",
+          "bytes": 1043,
+          "duration": 0.054,
+          "channels": 1,
+          "lufs": -24.6,
+          "peakDb": -3.7
+        },
+        {
+          "file": "boot/ui.hover.3.mp3",
+          "source": "kenneyUi",
+          "member": "Audio/rollover3.ogg",
+          "bytes": 1043,
+          "duration": 0.066,
+          "channels": 1,
+          "lufs": -24.1,
+          "peakDb": -12.9
+        }
+      ]
+    },
+    "ui.toggle": {
+      "tier": "boot",
+      "kind": "ui",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -24,
+      "files": [
+        {
+          "file": "boot/ui.toggle.1.mp3",
+          "source": "kenneyUi",
+          "member": "Audio/switch2.ogg",
+          "bytes": 3133,
+          "duration": 0.318,
+          "channels": 1,
+          "lufs": -24.7,
+          "peakDb": -2.1
+        },
+        {
+          "file": "boot/ui.toggle.2.mp3",
+          "source": "kenneyUi",
+          "member": "Audio/switch3.ogg",
+          "bytes": 3342,
+          "duration": 0.364,
+          "channels": 1,
+          "lufs": -24.7,
+          "peakDb": -1.2
+        }
+      ]
+    },
+    "bed.ocean": {
+      "tier": "boot",
+      "kind": "bed",
+      "loop": true,
+      "frequent": false,
+      "targetLufs": -26,
+      "files": [
+        {
+          "file": "boot/bed.ocean.1.mp3",
+          "source": "bsbSeaWaves",
+          "bytes": 120685,
+          "duration": 10,
+          "channels": 2,
+          "lufs": -26.4,
+          "peakDb": -10.1,
+          "loopStart": 0,
+          "loopEnd": 10
+        }
+      ]
+    },
+    "bed.wind": {
+      "tier": "boot",
+      "kind": "bed",
+      "loop": true,
+      "frequent": false,
+      "targetLufs": -26,
+      "files": [
+        {
+          "file": "boot/bed.wind.1.mp3",
+          "source": "bsbWind",
+          "bytes": 80456,
+          "duration": 10,
+          "channels": 1,
+          "lufs": -26.4,
+          "peakDb": -10.7,
+          "loopStart": 0,
+          "loopEnd": 10
+        }
+      ]
+    },
+    "cannon.fire": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/cannon.fire.1.mp3",
+          "source": "cannonFire",
+          "bytes": 28735,
+          "duration": 2.8,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -1.7
+        },
+        {
+          "file": "match/cannon.fire.2.mp3",
+          "source": "cannonFire",
+          "derived": "pitch -1.3 st of variant source",
+          "bytes": 30563,
+          "duration": 3,
+          "channels": 1,
+          "lufs": -18.3,
+          "peakDb": -1.6
+        },
+        {
+          "file": "match/cannon.fire.3.mp3",
+          "source": "cannonFire",
+          "derived": "pitch +1 st of variant source",
+          "bytes": 27167,
+          "duration": 2.643,
+          "channels": 1,
+          "lufs": -18.4,
+          "peakDb": -1.7
+        }
+      ]
+    },
+    "cannon.hitWood": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/cannon.hitWood.1.mp3",
+          "source": "cannonHitShip",
+          "bytes": 30563,
+          "duration": 3,
+          "channels": 1,
+          "lufs": -18.4,
+          "peakDb": -3.7
+        },
+        {
+          "file": "match/cannon.hitWood.2.mp3",
+          "source": "cannonHit1",
+          "bytes": 30563,
+          "duration": 3,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -2.7
+        },
+        {
+          "file": "match/cannon.hitWood.3.mp3",
+          "source": "cannonHitCannon",
+          "bytes": 28735,
+          "duration": 2.808,
+          "channels": 1,
+          "lufs": -18.3,
+          "peakDb": -1.2
+        }
+      ]
+    },
+    "cannon.hitRock": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/cannon.hitRock.1.mp3",
+          "source": "cannonHitWall",
+          "bytes": 30563,
+          "duration": 3,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -0.9
+        },
+        {
+          "file": "match/cannon.hitRock.2.mp3",
+          "source": "cannonHitWallDry",
+          "bytes": 16980,
+          "duration": 1.638,
+          "channels": 1,
+          "lufs": -18.6,
+          "peakDb": -1.6
+        }
+      ]
+    },
+    "splash.cannon": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/splash.cannon.1.mp3",
+          "source": "cannonMiss",
+          "bytes": 17241,
+          "duration": 1.648,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -2
+        },
+        {
+          "file": "match/splash.cannon.2.mp3",
+          "source": "rdWater",
+          "member": "splash_01.ogg",
+          "bytes": 14367,
+          "duration": 1.381,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -1.4
+        },
+        {
+          "file": "match/splash.cannon.3.mp3",
+          "source": "rdWater",
+          "member": "splash_02.ogg",
+          "bytes": 7837,
+          "duration": 0.718,
+          "channels": 1,
+          "lufs": -18.3,
+          "peakDb": -1.6
+        }
+      ]
+    },
+    "splash.small": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/splash.small.1.mp3",
+          "source": "rdWater",
+          "member": "splash_05.ogg",
+          "bytes": 12539,
+          "duration": 1.177,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -2.2
+        },
+        {
+          "file": "match/splash.small.2.mp3",
+          "source": "rdWater",
+          "member": "splash_06.ogg",
+          "bytes": 5225,
+          "duration": 0.457,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -1.7
+        },
+        {
+          "file": "match/splash.small.3.mp3",
+          "source": "rdWater",
+          "member": "splash_07.ogg",
+          "bytes": 13322,
+          "duration": 1.26,
+          "channels": 1,
+          "lufs": -18.6,
+          "peakDb": -1.1
+        }
+      ]
+    },
+    "wood.hit": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/wood.hit.1.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/impactWood_medium_000.ogg",
+          "bytes": 3918,
+          "duration": 0.33,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -1.9
+        },
+        {
+          "file": "match/wood.hit.2.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/impactWood_medium_001.ogg",
+          "bytes": 3918,
+          "duration": 0.33,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -1.9
+        },
+        {
+          "file": "match/wood.hit.3.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/impactWood_medium_002.ogg",
+          "bytes": 3918,
+          "duration": 0.33,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -1.9
+        }
+      ]
+    },
+    "wood.plank": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/wood.plank.1.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/impactPlank_medium_000.ogg",
+          "bytes": 8359,
+          "duration": 0.779,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -1.7
+        },
+        {
+          "file": "match/wood.plank.2.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/impactPlank_medium_001.ogg",
+          "bytes": 8359,
+          "duration": 0.779,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -1.3
+        },
+        {
+          "file": "match/wood.plank.3.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/impactPlank_medium_002.ogg",
+          "bytes": 8359,
+          "duration": 0.779,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -1.6
+        }
+      ]
+    },
+    "wood.crack": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/wood.crack.1.mp3",
+          "source": "rdWoodMetal",
+          "member": "wood_cracking_01.ogg",
+          "bytes": 2612,
+          "duration": 0.185,
+          "channels": 1,
+          "lufs": -18.6,
+          "peakDb": -1.5
+        },
+        {
+          "file": "match/wood.crack.2.mp3",
+          "source": "rdWoodMetal",
+          "member": "wood_cracking_02.ogg",
+          "bytes": 3135,
+          "duration": 0.251,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -1.8
+        },
+        {
+          "file": "match/wood.crack.3.mp3",
+          "source": "rdWoodMetal",
+          "member": "wood_cracking_03.ogg",
+          "bytes": 3918,
+          "duration": 0.315,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -1.8
+        }
+      ]
+    },
+    "wood.break": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/wood.break.1.mp3",
+          "source": "rdWoodMetal",
+          "member": "wood_breaking_01.ogg",
+          "bytes": 6269,
+          "duration": 0.565,
+          "channels": 1,
+          "lufs": -18.6,
+          "peakDb": -1.2
+        },
+        {
+          "file": "match/wood.break.2.mp3",
+          "source": "rdWoodMetal",
+          "member": "wood_breaking_02.ogg",
+          "bytes": 6269,
+          "duration": 0.568,
+          "channels": 1,
+          "lufs": -18.6,
+          "peakDb": -1.7
+        }
+      ]
+    },
+    "hammer.hit": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/hammer.hit.1.mp3",
+          "source": "rdWoodMetal",
+          "member": "wood_hammer_01.ogg",
+          "bytes": 3657,
+          "duration": 0.313,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -1.6
+        },
+        {
+          "file": "match/hammer.hit.2.mp3",
+          "source": "rdWoodMetal",
+          "member": "wood_hammer_02.ogg",
+          "bytes": 2874,
+          "duration": 0.232,
+          "channels": 1,
+          "lufs": -18.6,
+          "peakDb": -1.6
+        },
+        {
+          "file": "match/hammer.hit.3.mp3",
+          "source": "rdWoodMetal",
+          "member": "hammer_01.ogg",
+          "bytes": 5747,
+          "duration": 0.504,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -1.6
+        }
+      ]
+    },
+    "metal.hit": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/metal.hit.1.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/impactMetal_medium_000.ogg",
+          "bytes": 3396,
+          "duration": 0.269,
+          "channels": 1,
+          "lufs": -18.6,
+          "peakDb": -1.5
+        },
+        {
+          "file": "match/metal.hit.2.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/impactMetal_medium_001.ogg",
+          "bytes": 2090,
+          "duration": 0.141,
+          "channels": 1,
+          "lufs": -18.6,
+          "peakDb": -1.8
+        }
+      ]
+    },
+    "sword.clash": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/sword.clash.1.mp3",
+          "source": "swords",
+          "member": "sword_clash.1.ogg",
+          "bytes": 10971,
+          "duration": 1.033,
+          "channels": 1,
+          "lufs": -18.3,
+          "peakDb": -2.2
+        },
+        {
+          "file": "match/sword.clash.2.mp3",
+          "source": "swords",
+          "member": "sword_clash.2.ogg",
+          "bytes": 8620,
+          "duration": 0.801,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -1.6
+        },
+        {
+          "file": "match/sword.clash.3.mp3",
+          "source": "swords",
+          "member": "sword_clash.3.ogg",
+          "bytes": 9927,
+          "duration": 0.929,
+          "channels": 1,
+          "lufs": -18.2,
+          "peakDb": -2.3
+        }
+      ]
+    },
+    "gun.shot": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/gun.shot.1.mp3",
+          "source": "bsbRifle",
+          "bytes": 12539,
+          "duration": 1.2,
+          "channels": 1,
+          "lufs": -18.2,
+          "peakDb": -1.7
+        },
+        {
+          "file": "match/gun.shot.2.mp3",
+          "source": "bsbShots",
+          "bytes": 5225,
+          "duration": 0.453,
+          "channels": 1,
+          "lufs": -18.3,
+          "peakDb": -1.4
+        },
+        {
+          "file": "match/gun.shot.3.mp3",
+          "source": "bsbShots",
+          "bytes": 4963,
+          "duration": 0.441,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -1.3
+        }
+      ]
+    },
+    "ship.creak": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/ship.creak.1.mp3",
+          "source": "kenneyRpg",
+          "member": "Audio/creak1.ogg",
+          "bytes": 7314,
+          "duration": 0.661,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -4.1
+        },
+        {
+          "file": "match/ship.creak.2.mp3",
+          "source": "kenneyRpg",
+          "member": "Audio/creak2.ogg",
+          "bytes": 8882,
+          "duration": 0.83,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -2.9
+        },
+        {
+          "file": "match/ship.creak.3.mp3",
+          "source": "kenneyRpg",
+          "member": "Audio/creak3.ogg",
+          "bytes": 3918,
+          "duration": 0.338,
+          "channels": 1,
+          "lufs": -18.4,
+          "peakDb": -4.8
+        }
+      ]
+    },
+    "ship.breakUp": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/ship.breakUp.1.mp3",
+          "source": "shipDestroyed",
+          "bytes": 30563,
+          "duration": 3,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -5.3
+        }
+      ]
+    },
+    "footstep.wood": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/footstep.wood.1.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/footstep_wood_000.ogg",
+          "bytes": 3396,
+          "duration": 0.271,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -1.9
+        },
+        {
+          "file": "match/footstep.wood.2.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/footstep_wood_001.ogg",
+          "bytes": 3135,
+          "duration": 0.249,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -1.9
+        },
+        {
+          "file": "match/footstep.wood.3.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/footstep_wood_002.ogg",
+          "bytes": 3135,
+          "duration": 0.248,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -1.9
+        },
+        {
+          "file": "match/footstep.wood.4.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/footstep_wood_003.ogg",
+          "bytes": 3135,
+          "duration": 0.249,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -1.9
+        }
+      ]
+    },
+    "footstep.grass": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/footstep.grass.1.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/footstep_grass_000.ogg",
+          "bytes": 8359,
+          "duration": 0.775,
+          "channels": 1,
+          "lufs": -18.3,
+          "peakDb": -1.7
+        },
+        {
+          "file": "match/footstep.grass.2.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/footstep_grass_001.ogg",
+          "bytes": 7314,
+          "duration": 0.671,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -1.6
+        },
+        {
+          "file": "match/footstep.grass.3.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/footstep_grass_002.ogg",
+          "bytes": 7576,
+          "duration": 0.69,
+          "channels": 1,
+          "lufs": -18.4,
+          "peakDb": -1.4
+        },
+        {
+          "file": "match/footstep.grass.4.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/footstep_grass_003.ogg",
+          "bytes": 7314,
+          "duration": 0.666,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -1.5
+        }
+      ]
+    },
+    "footstep.stone": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/footstep.stone.1.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/footstep_concrete_000.ogg",
+          "bytes": 1567,
+          "duration": 0.103,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -1.9
+        },
+        {
+          "file": "match/footstep.stone.2.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/footstep_concrete_001.ogg",
+          "bytes": 1829,
+          "duration": 0.106,
+          "channels": 1,
+          "lufs": -18.6,
+          "peakDb": -1.9
+        },
+        {
+          "file": "match/footstep.stone.3.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/footstep_concrete_002.ogg",
+          "bytes": 1829,
+          "duration": 0.11,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -1.8
+        },
+        {
+          "file": "match/footstep.stone.4.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/footstep_concrete_003.ogg",
+          "bytes": 1829,
+          "duration": 0.108,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -1.9
+        }
+      ]
+    },
+    "foley.cloth": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/foley.cloth.1.mp3",
+          "source": "kenneyRpg",
+          "member": "Audio/cloth1.ogg",
+          "bytes": 7314,
+          "duration": 0.661,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -1.2
+        },
+        {
+          "file": "match/foley.cloth.2.mp3",
+          "source": "kenneyRpg",
+          "member": "Audio/cloth2.ogg",
+          "bytes": 4702,
+          "duration": 0.415,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -1.6
+        },
+        {
+          "file": "match/foley.cloth.3.mp3",
+          "source": "kenneyRpg",
+          "member": "Audio/cloth3.ogg",
+          "bytes": 5486,
+          "duration": 0.477,
+          "channels": 1,
+          "lufs": -18.6,
+          "peakDb": -1.8
+        }
+      ]
+    },
+    "foley.drawBlade": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/foley.drawBlade.1.mp3",
+          "source": "kenneyRpg",
+          "member": "Audio/drawKnife1.ogg",
+          "bytes": 4702,
+          "duration": 0.4,
+          "channels": 1,
+          "lufs": -18.2,
+          "peakDb": -3.8
+        },
+        {
+          "file": "match/foley.drawBlade.2.mp3",
+          "source": "kenneyRpg",
+          "member": "Audio/drawKnife2.ogg",
+          "bytes": 5225,
+          "duration": 0.446,
+          "channels": 1,
+          "lufs": -18.3,
+          "peakDb": -2.1
+        },
+        {
+          "file": "match/foley.drawBlade.3.mp3",
+          "source": "kenneyRpg",
+          "member": "Audio/drawKnife3.ogg",
+          "bytes": 5486,
+          "duration": 0.477,
+          "channels": 1,
+          "lufs": -18.6,
+          "peakDb": -1.8
+        }
+      ]
+    },
+    "bed.floodGush": {
+      "tier": "match",
+      "kind": "bed",
+      "loop": true,
+      "frequent": false,
+      "targetLufs": -26,
+      "files": [
+        {
+          "file": "match/bed.floodGush.1.mp3",
+          "source": "bsbFlooding",
+          "bytes": 64573,
+          "duration": 8,
+          "channels": 1,
+          "lufs": -26.4,
+          "peakDb": -1.6,
+          "loopStart": 0,
+          "loopEnd": 8
+        }
+      ]
+    },
+    "bed.hullRush": {
+      "tier": "match",
+      "kind": "bed",
+      "loop": true,
+      "frequent": false,
+      "targetLufs": -26,
+      "files": [
+        {
+          "file": "match/bed.hullRush.1.mp3",
+          "source": "bsbBoat",
+          "bytes": 80456,
+          "duration": 10,
+          "channels": 1,
+          "lufs": -26.4,
+          "peakDb": -10.3,
+          "loopStart": 0,
+          "loopEnd": 10
+        }
+      ]
+    },
+    "bed.surf": {
+      "tier": "zones",
+      "kind": "bed",
+      "loop": true,
+      "frequent": false,
+      "targetLufs": -26,
+      "files": [
+        {
+          "file": "zones/bed.surf.1.mp3",
+          "source": "bsbSurf",
+          "bytes": 120685,
+          "duration": 10,
+          "channels": 2,
+          "lufs": -26.4,
+          "peakDb": -13.2,
+          "loopStart": 0,
+          "loopEnd": 10
+        }
+      ]
+    },
+    "bed.rain": {
+      "tier": "zones",
+      "kind": "bed",
+      "loop": true,
+      "frequent": false,
+      "targetLufs": -26,
+      "files": [
+        {
+          "file": "zones/bed.rain.1.mp3",
+          "source": "rainLoop",
+          "bytes": 120685,
+          "duration": 10,
+          "channels": 2,
+          "lufs": -26.2,
+          "peakDb": -13.8,
+          "loopStart": 0,
+          "loopEnd": 10
+        }
+      ]
+    },
+    "bed.waterfall": {
+      "tier": "zones",
+      "kind": "bed",
+      "loop": true,
+      "frequent": false,
+      "targetLufs": -26,
+      "files": [
+        {
+          "file": "zones/bed.waterfall.1.mp3",
+          "source": "bsbWaterfall",
+          "bytes": 80456,
+          "duration": 10,
+          "channels": 1,
+          "lufs": -26.1,
+          "peakDb": -13.9,
+          "loopStart": 0,
+          "loopEnd": 10
+        }
+      ]
+    },
+    "steam.hiss": {
+      "tier": "zones",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "zones/steam.hiss.1.mp3",
+          "source": "steam",
+          "member": "steam hisses - Marker #1.wav",
+          "bytes": 19069,
+          "duration": 1.846,
+          "channels": 1,
+          "lufs": -18.1,
+          "peakDb": -3.5
+        },
+        {
+          "file": "zones/steam.hiss.2.mp3",
+          "source": "steam",
+          "member": "steam hisses - Marker #2.wav",
+          "bytes": 19069,
+          "duration": 1.846,
+          "channels": 1,
+          "lufs": -18.4,
+          "peakDb": -3.6
+        },
+        {
+          "file": "zones/steam.hiss.3.mp3",
+          "source": "steam",
+          "member": "steam hisses - Marker #3.wav",
+          "bytes": 19069,
+          "duration": 1.846,
+          "channels": 1,
+          "lufs": -17.9,
+          "peakDb": -2.8
+        }
+      ]
+    },
+    "bird.gull": {
+      "tier": "zones",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "zones/bird.gull.1.mp3",
+          "source": "gulls",
+          "bytes": 30563,
+          "duration": 3,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -1.7
+        },
+        {
+          "file": "zones/bird.gull.2.mp3",
+          "source": "gulls2",
+          "bytes": 16196,
+          "duration": 1.556,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -1.7
+        },
+        {
+          "file": "zones/bird.gull.3.mp3",
+          "source": "gulls3",
+          "bytes": 12016,
+          "duration": 1.127,
+          "channels": 1,
+          "lufs": -18.4,
+          "peakDb": -9
+        }
+      ]
+    },
+    "bird.day": {
+      "tier": "zones",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "zones/bird.day.1.mp3",
+          "source": "birds",
+          "member": "birdsCrickets/bird.wav",
+          "bytes": 7837,
+          "duration": 0.726,
+          "channels": 1,
+          "lufs": -18.4,
+          "peakDb": -8.5
+        },
+        {
+          "file": "zones/bird.day.2.mp3",
+          "source": "birds",
+          "member": "birdsCrickets/bird2.wav",
+          "bytes": 12539,
+          "duration": 1.182,
+          "channels": 1,
+          "lufs": -18.6,
+          "peakDb": -7.5
+        }
+      ]
+    },
+    "creature.frog": {
+      "tier": "zones",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "zones/creature.frog.1.mp3",
+          "source": "birds",
+          "member": "birdsCrickets/frog.wav",
+          "bytes": 3657,
+          "duration": 0.292,
+          "channels": 1,
+          "lufs": -18.4,
+          "peakDb": -5.3
+        }
+      ]
+    }
+  }
+}

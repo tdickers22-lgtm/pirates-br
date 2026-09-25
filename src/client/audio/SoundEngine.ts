@@ -398,6 +398,21 @@ export function scheduleCaveDrips(
   }
 }
 
+/** Hull-creak strain 0..1 (audio-03, section 3.8): exactly 0 unless the listener is aboard or
+ *  within 15 m of a hull, so timber never creaks on an island 300 m from your anchored ship.
+ *  Aboard: 0.14 idle + heel + roughness. Beside a hull (swimming, on a dock) it fades linearly
+ *  to 0 at 15 m. Pure so test-audio-manifest can grade it without an AudioContext. */
+export const HULL_CREAK_RANGE_M = 15;
+export function hullCreakStrain(s: { aboard: boolean; nearHullM?: number; heel01: number; rough01: number }): number {
+  const heel = finiteClamp(s.heel01, 0, 1, 0);
+  const rough = finiteClamp(s.rough01, 0, 1, 0);
+  const base = Math.min(1, 0.14 + heel * 0.6 + rough * 0.34);
+  if (s.aboard) return base;
+  const d = s.nearHullM;
+  if (d === undefined || !Number.isFinite(d) || d >= HULL_CREAK_RANGE_M) return 0;
+  return base * (1 - Math.max(0, d) / HULL_CREAK_RANGE_M);
+}
+
 export class SoundEngine {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
@@ -2271,7 +2286,7 @@ export class SoundEngine {
    * @param state.aboard set true while the listener is standing on the ship (drives
    *   rain-on-deck droplets); optional so existing callers keep working.
    */
-  setSailingState(state: { speed01: number; roughness01: number; heel01: number; luffing: boolean; aboard?: boolean }): void {
+  setSailingState(state: { speed01: number; roughness01: number; heel01: number; luffing: boolean; aboard?: boolean; nearHullM?: number }): void {
     const ctx = this.ctx;
     const bed = this.busBed;
     if (!ctx || !bed || !this.noise) return;
@@ -2282,8 +2297,10 @@ export class SoundEngine {
     if (!this.sailingRush) this.sailingRush = this.makeNoiseLoop('bandpass', 900, 0.7, bed);
     this.ramp(this.sailingRush.gain.gain, speed * speed * 0.13, 0.3);
     this.ramp(this.sailingRush.filter.frequency, 480 + speed * 1500 + rough * 380, 0.3);
-    // Hull creak bed follows heel + roughness + speed…
-    const strain = THREE.MathUtils.clamp(0.14 + heel * 0.6 + rough * 0.34, 0, 1);
+    // Hull creak bed follows heel + roughness + speed, and is SILENT unless the listener is
+    // aboard or within 15 m of a hull (audio-03). This is the bed's only writer.
+    const aboard = state.aboard ?? (speed > 0.02 || heel > 0.02);
+    const strain = hullCreakStrain({ aboard, nearHullM: state.nearHullM, heel01: heel, rough01: rough });
     this.setHullCreakIntensity(
       strain,
       THREE.MathUtils.clamp(heel * 0.6 + speed * 0.4 + rough * 0.5, 0, 1),
@@ -2311,7 +2328,7 @@ export class SoundEngine {
     }
     // Luffing adds irregular canvas flap.
     this.setCanvasFlap(state.luffing ? THREE.MathUtils.clamp(0.4 + speed * 0.5, 0, 1) : 0);
-    this.aboardShip = state.aboard ?? (speed > 0.02 || heel > 0.02);
+    this.aboardShip = aboard;
     // "Under way" for the idle whistle: aboard AND actually making way.
     this.underway01 = this.aboardShip ? speed : 0;
   }
@@ -2339,7 +2356,7 @@ export class SoundEngine {
    * @param a.rain01 rain intensity; defaults to a storminess proxy so rain is
    *   audible even before the call site forwards the real value.
    */
-  setAmbience(a: { nightFactor: number; storminess: number; nearShore01: number; rain01?: number }): void {
+  setAmbience(a: { nightFactor: number; storminess: number; nearShore01: number; rain01?: number; swimming?: boolean }): void {
     const ctx = this.ctx;
     const bed = this.busBed;
     if (!ctx || !bed || !this.noise) return;
@@ -2353,8 +2370,11 @@ export class SoundEngine {
     this.nearShore01 = shore;
     // Bed 1: storm wind.
     this.setWindIntensity(storm);
-    // Bed 2: ocean wave bed — gentler "lap" at night, swells in a storm.
-    this.setWaveBed(THREE.MathUtils.clamp(THREE.MathUtils.lerp(0.6, 0.32, night) + storm * 0.4, 0, 1));
+    // Bed 2: ocean wave bed — gentler "lap" at night, swells in a storm, closer in the water
+    // and louder under way (underway01 from setSailingState). The ONLY writer of this bed
+    // (audio-03: Game.ts used to write a second target every frame and the level zig-zagged).
+    const swim = a.swimming ? 0.26 : 0;
+    this.setWaveBed(THREE.MathUtils.clamp(THREE.MathUtils.lerp(0.6, 0.32, night) + storm * 0.4 + swim + this.underway01 * 0.32, 0, 1));
     // Bed 3: night crickets (hushed in a storm) — scheduled chirps, not a hiss loop.
     this.setCrickets(night * (1 - storm * 0.7));
     // Bed 4: near-shore breaker wash.
