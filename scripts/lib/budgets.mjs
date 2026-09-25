@@ -239,6 +239,28 @@ export const MID_TIER_MAX_RATIO = { draws: 0.80, tris: 0.80 };
  *  Lane 2.6 (PERF-01) re-pins from four runs and deletes this map. */
 export const MID_TIER_MAX_RATIO_BY_SCENE = { 'dock-vista': { draws: 0.90, tris: 0.90 } };
 export const midRatioFor = (scene) => MID_TIER_MAX_RATIO_BY_SCENE[scene] ?? MID_TIER_MAX_RATIO;
+
+/** SHADOW PASS SHARE (b3.1h, performance-11). The sun's depth pass may cost at
+ *  most this fraction of the MAIN pass's triangles, per graded scene, per tier
+ *  that has a shadow map. Casters render one LOD coarser than the mesh they
+ *  shadow (ShadowProxy.ts): a prop batch drawing its near mesh casts its far
+ *  sibling, a batch drawing far casts nothing, and only the hull you stand on
+ *  keeps LOD0 casting. Without that policy every LOD0 triangle is paid twice;
+ *  the rebuild's 3-6x hero LOD0s would land in the depth map at full cost.
+ *  Balanced shares the rule through its 1536 map; high is the graded row.
+ *
+ *  0.30, not the spec's 0.45: measured (SwiftShader, seed 20260801, high) the
+ *  policy reads 13.7-14.9% dock-vista / 10.3-21.6% deck-aft (its main pass
+ *  swings 924k-1751k with the drifting hull's framing) / 0% open-sea /
+ *  15.3-16.1% waterfall-deck / 9.3-9.5% cave-interior over two runs, and the
+ *  pre-policy build 33.1 / 18.2 / 0 / 35.5 / 18.9%. 0.45 would pass the build
+ *  without the policy on every row; 0.30 fails it at the vista and the
+ *  waterfall and leaves 1.4x over the worst policy reading. */
+export const SHADOW_PASS_MAX_SHARE = { high: 0.30 };
+/** The policy's own saving, summed over the tier's graded scenes: depth-pass
+ *  triangles as shipped <= this fraction of the same frames with the policy
+ *  off. Measured 861k / 1795k = 0.48 at high (b3.1h). */
+export const SHADOW_POLICY_MAX_KEEP = { high: 0.70 };
 // ═══ test-fill-budget: stencil census at the low tier (layers of overdraw per pixel) ═══════════════
 // sky <= 0.55 of a layer, whole frame and blended-only ceilings per scene (desktop, phone, iPad).
 export const FILL_BUDGET = {
@@ -391,6 +413,8 @@ export const ALL_BUDGETS = {
   perfLowTierMaxRatio: LOW_TIER_MAX_RATIO,
   perfMidTierMaxRatio: MID_TIER_MAX_RATIO,
   perfMidTierMaxRatioByScene: MID_TIER_MAX_RATIO_BY_SCENE,
+  perfShadowPassMaxShare: SHADOW_PASS_MAX_SHARE,
+  perfShadowPolicyMaxKeep: SHADOW_POLICY_MAX_KEEP,
   fill: FILL_BUDGET,
   firstDrawAllowance: FIRST_DRAW_ALLOWANCE,
   oceanFragOps: OCEAN_FRAG_OPS,
