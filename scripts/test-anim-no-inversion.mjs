@@ -54,7 +54,7 @@ const src = (p) => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8');
 // ── 1. HELM WHEEL: the top peg moves across the screen the way the bow does ──
 console.log('Helm wheel vs the turn');
 function steerRightOmega() {
-  const ship = { type: 'sloop', velocity: { x: 0, z: 8 }, rudderAngle: 0, angularVelocity: 0, waterLevel: 0 };
+  const ship = { type: 'sloop', rotation: 0, velocity: { x: 0, z: 8 }, rudderAngle: 0, angularVelocity: 0, waterLevel: 0 };
   for (let i = 0; i < 40; i++) applyShipRudderSteering(ship, 1 / 30, +1);
   return ship;
 }
