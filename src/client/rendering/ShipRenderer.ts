@@ -2887,7 +2887,15 @@ export class ShipRenderer {
       innerNormal.set(-side, 0, 0);
       return { hasSeat: true, belowSole: false, onBoard: false };
     }
-    inner.set(side * Math.max(0.2, half - FLOODING.HOLE_VISUAL_RADIUS * 0.9), HOLD_FLOOR_Y + 0.004, point.z);
+    // Below the sole the opening wells up through the sole in FRONT of the
+    // bilge board: the board's foot crosses the sole ~0.39 m inboard of the
+    // lining, so a seat at the lining edge hid all but a crescent of the
+    // welling behind it (b2.3e hold-water-probe, breach-below 0.0%).
+    const reach = FLOODING.HOLE_VISUAL_RADIUS * 0.9;
+    const foot = Math.abs(point.z) < mesh.holdHalfLen * BILGE_BOARD_LEN_F
+      ? mesh.bilgeFaceAt(side, HOLD_FLOOR_Y + 0.004) : null;
+    const clear = foot ? Math.min(half, Math.abs(foot.x)) : half;
+    inner.set(side * Math.max(0.2, clear - reach), HOLD_FLOOR_Y + 0.004, point.z);
     innerNormal.set(0, 1, 0);
     return { hasSeat: true, belowSole: true, onBoard: false };
   }
