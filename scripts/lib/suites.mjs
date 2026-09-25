@@ -142,6 +142,10 @@ export const LOGIC = [
   quick(tsx('test-flora-density.mjs')),
   quick(tsx('test-island-props.mjs')),
   quick(tsx('test-asset-merge.mjs')),
+  // b3.1a: every shipped GLB is the meshopt+KHR_mesh_quantization packed sibling of today's source
+  // (srcSha256), same nodes/TRS/materials/tris/bounds, brotli per set boot<=0.6 world<=6 lazy<=12
+  // far<=1 MB; --mutate (one raw GLB shipped) must FAIL. ~1.9 s, so logic tier, not quick.
+  tsx('test-model-transport.mjs'),
   quick(tsx('test-ship-dynamics.mjs')),
   quick(tsx('test-ship-ladder.mjs')),
   quick(tsx('test-server-fixes.mjs')),
