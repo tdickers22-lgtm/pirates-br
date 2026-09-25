@@ -44,6 +44,7 @@ import { makeLoftedSlabGeometry, makeSheerRunGeometry, sheerHalfWidthAt, makeBil
 import { applyFlagWave, FLAG_DROP, FLAG_FLY, flagPhaseFromId, flagTexture, makeBarrel, makeCylinderBetween, makeFigurehead, makeHatchGrating, makeLanternFixture, makeRopeCoil, makeWindowFrame } from './ship/dressing.js';
 import type { FlagUniforms, ShipFlag } from './ship/dressing.js';
 import { makeHoldCargoStacks, makeShipInterior } from './ship/interior.js';
+import { createHoldWater, disposeHoldWater, updateHoldWater, type HoldWaterHandle } from './ship/holdWater.js';
 // ─────────────────────────────────────────────────────────────────────────────
 // Lofted hull construction
 //
@@ -211,9 +212,8 @@ interface ShipMeshGroup {
   lanternGlassMats: THREE.MeshStandardMaterial[];
   /** One warm PointLight per ship (budgeted: only the nearest few get lit at night). */
   nightLight: THREE.PointLight | null;
-  /** Dark water plane inside the hold, raised by (ship as any).waterLevel. */
-  holdWater: THREE.Mesh | null;
-  holdWaterBase: Float32Array | null;
+  /** The hold water (ship/holdWater.ts): world-level, clipped, sloshing. */
+  holdWater: HoldWaterHandle | null;
   /** Cumulative cargo-stack variants, index 0 = tier 1 … index 3 = tier 4.
    *  Exactly one (or none) is visible; see ship.cargoGold. */
   holdCargoTiers: THREE.Object3D[];
@@ -315,6 +315,9 @@ export class ShipRenderer {
   private readonly waveMotion = { pitch: 0, roll: 0, surfaceY: 0 };
   /** 0 = day, 1 = night. Drives lantern glass emissive + per-ship PointLights. */
   private nightFactor = 0;
+  /** Probe-only pin of every hull's hold water and attitude (hold-water-probe). */
+  private holdWaterDebug: { fill: number; roll?: number; pitch?: number } | null = null;
+  private readonly holdWaterDebugHeld = new Map<string, { pos: THREE.Vector3; yaw: number }>();
   /** Frame counter for throttling per-vertex work (sail-cloth normals). */
   private frameIndex = 0;
   /** Island docks, for boarding gangways. Game feeds these from the snapshot;
@@ -361,6 +364,17 @@ export class ShipRenderer {
   /** Day↔night lantern control. 0 = day (glass barely emissive, ship lights off),
    *  1 = night (warm glass glow + one warm PointLight on the nearest few ships).
    *  Game.ts should call this every frame with the sky's night factor (0–1). */
+  /** Debug hook (hold-water-probe): pin the drawn fill (and roll/pitch) of every hull; null releases. */
+  setHoldWaterDebug(pin: { fill: number; roll?: number; pitch?: number } | null) {
+    this.holdWaterDebug = pin && Number.isFinite(pin.fill) ? { ...pin, fill: Math.min(1, Math.max(0, pin.fill)) } : null;
+    if (!this.holdWaterDebug) this.holdWaterDebugHeld.clear();
+  }
+
+  /** The hold-water state of a hull (probes, b2.3f underwater tint). */
+  getHoldWater(shipId: string): HoldWaterHandle | null {
+    return this.shipMeshes.get(shipId)?.holdWater ?? null;
+  }
+
   setNightFactor(nf: number) {
     this.nightFactor = THREE.MathUtils.clamp(nf, 0, 1);
   }
@@ -369,6 +383,7 @@ export class ShipRenderer {
     for (const mesh of this.shipMeshes.values()) {
       this.scene.remove(mesh.root);
       this.scene.remove(mesh.wake.group);
+      if (mesh.holdWater) disposeHoldWater(mesh.holdWater);
       // Dispose per-ship GPU buffers (lofted hulls, rigging, decals are unique
       // per ship) or every match restart leaks them all. Materials are mostly
       // shared palette/canvas singletons — leave those alive.
@@ -974,48 +989,13 @@ export class ShipRenderer {
     );
     group.add(holdCargo.group);
 
-    // ── Water-in-hull plane ──────────────────────────────────
-    // Dark flooding water inside the hold, visible from above through the open
-    // companionway / hatch grating. Hidden until ship.waterLevel > 0.02;
-    // its Y rises with the flood level and a few verts ripple in update().
-    // The plane is FITTED to the interior footprint: each z-row is scaled to
-    // the loft's waterline half-width at that station, so the rising sheet
-    // stays inside the hull silhouette instead of poking through the tapered
-    // bow/stern planking. (Above local y=0 the hull only gets wider toward the
-    // wale, so the waterline half-width is a safe inner bound at every fill.)
-    const holdWaterGeo = new THREE.PlaneGeometry(1, 1, 6, 8);
-    holdWaterGeo.rotateX(-Math.PI * 0.5);
-    {
-      const pos = holdWaterGeo.attributes.position as THREE.BufferAttribute;
-      for (let i = 0; i < pos.count; i++) {
-        const zLocal = pos.getZ(i) * L * 0.9; // rows span ±0.45 L
-        const half = Math.max(0.16, hullSurfacePointAt(profile, zLocal, 0).x * 0.92);
-        pos.setX(i, pos.getX(i) * 2 * half); // ±0.5 → ±half at this station
-        pos.setZ(i, zLocal);
-      }
-      pos.needsUpdate = true;
-      holdWaterGeo.computeVertexNormals();
-    }
-    const holdWater = new THREE.Mesh(
-      holdWaterGeo,
-      new THREE.MeshStandardMaterial({
-        color: 0x0a2028,
-        roughness: 0.18,
-        metalness: 0.35,
-        emissive: 0x03141c,
-        emissiveIntensity: 0.4,
-        transparent: true,
-        opacity: 0.9,
-        side: THREE.DoubleSide,
-      }),
-    );
-    holdWater.position.set(0, 0.42, 0);
-    holdWater.visible = false;
-    holdWater.renderOrder = 1;
-    const holdWaterBase = Float32Array.from(
-      (holdWaterGeo.attributes.position as THREE.BufferAttribute).array as Float32Array,
-    );
-    group.add(holdWater);
+    // ── Hold water (b2.3a) ───────────────────────────────────
+    // World-level free surface from the shared fill table, tilted in the hull
+    // frame by the drawn attitude plus the client slosh re-sim, clipped per
+    // fragment to the loft. See ship/holdWater.ts.
+    const holdWater = createHoldWater(ship.type, this.quality);
+    group.add(holdWater.mesh);
+    group.add(holdWater.shaft);
 
     // ── Weather deck (split around stairwell — no hatch lids; open companionway like Sea of Thieves)
 
@@ -2579,7 +2559,8 @@ export class ShipRenderer {
       compassNeedle,
       anchor,
       anchorCapstan,
-      holdWater,
+      holdWater.mesh,
+      holdWater.shaft,
     ]);
     // perf-15: the static hull is identical across every ship of a class —
     // team colour is a material, breaches a uniform, sails/flags/upgrades/patches
@@ -2636,7 +2617,6 @@ export class ShipRenderer {
       lanternGlassMats,
       nightLight,
       holdWater,
-      holdWaterBase,
       holdCargoTiers: holdCargo.tiers,
       wake,
       hullHoleUniform,
@@ -3466,47 +3446,32 @@ export class ShipRenderer {
         }
       }
 
-      // Water-in-hull: a dark plane rises with the flood level, visible from above
-      // through the open companionway / hatch grating. `waterLevel` is a naval-track
-      // field (read defensively). Past 0.55 the surface sloshes harder as a spill
-      // hint; streaming-water particle FX at the holes is left for the CombatFx pass.
-      if (mesh.holdWater && mesh.holdWaterBase) {
-        const waterLevel = THREE.MathUtils.clamp(
+      // Hold water (b2.3a): the fill table sets the height (full exactly at
+      // 1.0), the DRAWN attitude tilts it world-level, the client slosh
+      // re-sim adds the dynamic slope. Foundering keeps it full.
+      if (mesh.holdWater) {
+        const dbg = this.holdWaterDebug;
+        if (dbg) {
+          if (dbg.roll !== undefined) mesh.root.rotation.z = dbg.roll;
+          if (dbg.pitch !== undefined) mesh.root.rotation.x = dbg.pitch;
+          // Freeze the drawn hull where the pin found it, so a probe camera
+          // parked in the hold is not heaved out through the deck by the swell.
+          const held = this.holdWaterDebugHeld.get(ship.id);
+          if (held) { mesh.root.position.copy(held.pos); mesh.root.rotation.y = held.yaw; }
+          else this.holdWaterDebugHeld.set(ship.id, { pos: mesh.root.position.clone(), yaw: mesh.root.rotation.y });
+        }
+        const level = dbg ? dbg.fill : THREE.MathUtils.clamp(
           (ship as unknown as { waterLevel?: number }).waterLevel ?? 0, 0, 1,
         );
-        // The rising water IS the drama: keep it visible through the founder
-        // (it used to vanish the instant sinking started), let it climb past
-        // the hold and wash OVER the deck planks in the final stage, and
-        // slosh harder the fuller the hull gets.
-        const sinkLevel = ship.sinking ? 1 : waterLevel;
-        const show = sinkLevel > 0.02;
-        mesh.holdWater.visible = show;
-        if (show) {
-          const floorY = 0.5;
-          const holdTopY = stats.height - 0.12;
-          // 0 → 0.8: fill the hold. 0.8 → 1: break over the deck (deck slab
-          // top sits at H + 0.025; +0.09 reads as a sheet of water on deck).
-          const awash = THREE.MathUtils.clamp((sinkLevel - 0.8) / 0.2, 0, 1);
-          const topY = awash > 0
-            ? holdTopY + (stats.height + 0.09 - holdTopY) * awash
-            : holdTopY;
-          const fillT = Math.min(1, sinkLevel / 0.8);
-          mesh.holdWater.position.y = awash > 0 ? topY : floorY + (holdTopY - floorY) * fillT;
-          const agitation = 1 + sinkLevel * 1.6 + (ship.sinking ? 0.8 : 0);
-          const base = mesh.holdWaterBase;
-          const posAttr = mesh.holdWater.geometry.attributes.position as THREE.BufferAttribute;
-          const arr = posAttr.array as Float32Array;
-          const amp = 0.03 * agitation;
-          for (let i = 0; i < posAttr.count; i++) {
-            const i3 = i * 3;
-            arr[i3 + 1] = base[i3 + 1] + Math.sin(t * (1.8 + agitation) + base[i3] * 1.3 + base[i3 + 2] * 0.9) * amp;
-          }
-          posAttr.needsUpdate = true;
-          const mat = mesh.holdWater.material as THREE.MeshStandardMaterial;
-          mat.opacity = 0.82 + 0.12 * Math.min(1, sinkLevel * 1.4);
-          // Awash water flashes brighter foam-green so the overwhelm reads at a glance.
-          mat.emissiveIntensity = 0.4 + awash * 0.5;
-        }
+        updateHoldWater(mesh.holdWater, {
+          fill: ship.sinking ? 1 : level,
+          roll: mesh.root.rotation.z,
+          pitch: mesh.root.rotation.x,
+          t,
+          dt,
+          sinking: !!ship.sinking,
+          night: this.nightFactor,
+        });
       }
 
       // Fire visual
