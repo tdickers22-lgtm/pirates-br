@@ -92,16 +92,17 @@ await page.evaluate(() => {
   window.__music = {};
   /**
    * An OfflineAudioContext dressed up as a live one: `state` reads 'running'
-   * (so the engine's "don't schedule into a suspended context" guard opens) and
-   * `currentTime` is a value WE drive, which is how a 60-second tune gets
-   * scheduled in a synchronous loop.
+   * (so the engine's "don't schedule into a suspended context" guard opens).
+   * The clock is the context's OWN: render() steps it with suspend()/resume(),
+   * so every tick sees a real currentTime and real AudioParam values. (Driving
+   * a fake clock and scheduling the whole tune before rendering stopped working
+   * when the engine's ramp() began anchoring at param.value, 465e7ef5: with
+   * nothing rendered yet that read the bus's initial 0 on every tick, so the
+   * music bus never left 0 in the harness while it did in a live context.)
    */
   window.__music.makeCtx = (seconds, sampleRate = 44100) => {
     const ctx = new OfflineAudioContext(2, Math.ceil(sampleRate * seconds), sampleRate);
-    let clock = 0;
     Object.defineProperty(ctx, 'state', { get: () => 'running', configurable: true });
-    Object.defineProperty(ctx, 'currentTime', { get: () => clock, configurable: true });
-    ctx.__setClock = (t) => { clock = t; };
     return ctx;
   };
   window.__music.newEngine = async (ctx) => {
@@ -243,21 +244,33 @@ async function render({ seconds, sampleRate = 44100, setup = '', during = '', st
     // Music-only renders: unhook the world's own buses from the master chain so
     // what lands in the buffer is the SCORE and nothing else. (The one-shots
     // still fire and still duck — they just aren't audible in the measurement.)
-    if (isolate !== 'none') { engine.busDry.disconnect(); engine.busBed.disconnect(); }
+    // Since b2.4 (AudioCore) not every bed rides busBed: the inside/hearth bus and the
+    // sampled weather beds join at the ambience LEVEL, so that is unhooked too. The
+    // music level and the reverb returns (levels.sfx) stay.
+    if (isolate !== 'none') {
+      engine.busDry.disconnect(); engine.busBed.disconnect(); engine.core.levels.ambience.disconnect();
+    }
     if (isolate === 'dry') engine.busReverb.disconnect();
     // eslint-disable-next-line no-new-func
     const setupFn = new Function('engine', 'ctx', setup);
     // eslint-disable-next-line no-new-func
     const duringFn = new Function('engine', 'ctx', 't', during);
     setupFn(engine, ctx);
-    for (let t = 0; t <= seconds; t += step) {
-      ctx.__setClock(t);
-      duringFn(engine, ctx, t);
-      engine.tickMusic();
+    // The harness is the only clock: the engine's 200 ms interval would tick at
+    // wall-clock moments of the render and make the score depend on host speed.
+    engine.stopMusicTimer();
+    const tick = (t) => { duringFn(engine, ctx, t); engine.tickMusic(); };
+    tick(0);
+    // Step the render: suspend at every tick, schedule the next batch against
+    // the real clock and the real param values, resume. Suspends must fall
+    // before the end of the buffer, so the last tick is one step short of it.
+    const quantum = 128 / sampleRate;
+    for (let i = 1; i * step < seconds - quantum; i++) {
+      const t = i * step;
+      ctx.suspend(t).then(() => { tick(t); return ctx.resume(); });
     }
-    engine.setMusicContext('none');
-    ctx.__setClock(0);
     const buffer = await ctx.startRendering();
+    engine.setMusicContext('none');
     return { analysis: window.__music.analyse(buffer), wav: window.__music.toWav(buffer) };
   }, { seconds, sampleRate, setup, during, step, isolate });
 }
