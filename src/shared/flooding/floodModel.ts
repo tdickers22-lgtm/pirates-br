@@ -41,10 +41,15 @@ export function floodK(type: ShipType): number {
   return FLOODING.K_REF * (FLOODING.INGRESS_CLASS_SCALE[type] ?? 1);
 }
 
-/** Metres the hull settles at a full hold. b2.2c moves this to a per-class
- *  SETTLE table; until then every class reads FREEBOARD_DROP. */
-export function floodSettleDepth(_type: ShipType): number {
-  return FLOODING.FREEBOARD_DROP;
+/** Metres each class settles at a full hold (b2.2c, PLAN 4: sloop 0.70 /
+ *  brig 0.85 / galleon 1.00). The water's weight is this displacement: the
+ *  server's water mass is rho x A_wp x floodSettle (FloodSystem.floodWaterMass),
+ *  so the sink, the list and the trim all read one number. */
+export const FLOOD_SETTLE_DEPTH: Readonly<Record<ShipType, number>> = { sloop: 0.7, brigantine: 0.85, galleon: 1.0 };
+
+/** Metres the hull settles at a full hold. */
+export function floodSettleDepth(type: ShipType): number {
+  return FLOOD_SETTLE_DEPTH[type] ?? FLOODING.FREEBOARD_DROP;
 }
 
 /** Hull-local sink (metres) at a fill: the displacement of the water aboard. */

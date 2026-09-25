@@ -7,9 +7,10 @@ import type { Ship, ShipHole, ShipHoleSize, ShipHoleSource } from '../../shared/
 import { FLOODING, SHIP, SHIP_STATS, SHIP_UPGRADES } from '../../shared/constants/index.js';
 import { countOpenHoles, getShipHoleTier } from '../../shared/interactions.js';
 // Circular with PhysicsSystem, read only at call time (never at module eval).
-import { HULL_IMPACT } from './PhysicsSystem.js';
+import { HULL_IMPACT, SEAKEEPING } from './PhysicsSystem.js';
 import { clamp, gerstnerHeight, WAVE_PARAMS } from '../../shared/utils/index.js';
-import { holeIngress, holeInsideHead, holeSize, holeSizeArea, waterlineHoleIngress } from '../../shared/flooding/floodModel.js';
+import { floodSettle, holeIngress, holeInsideHead, holeSize, holeSizeArea, waterlineHoleIngress } from '../../shared/flooding/floodModel.js';
+import { newSloshState, sloshGeometry, sloshTargetX, sloshTargetZ, stepSlosh, type SloshState } from '../../shared/flooding/slosh.js';
 
 /** A hull with every slot an OPEN breach is "shot to pieces" (liveplay-v02):
  *  a wetter shot EVICTS the driest open hole (moves it down to the new point,
@@ -97,16 +98,72 @@ export function shipIngressRate(ship: Ship, t: number, storm = 0): number {
   return total * reinforced;
 }
 
+const SEA_RHO = 1025;
+const SEA_G = 9.81;
+/** Server-private slosh state per live hull (b2.2c). Never on the wire: the
+ *  client reads the roll / pitch it produces. */
+const sloshByShip = new WeakMap<Ship, SloshState>();
+
+/** The water aboard as a MASS (kg): the displacement of the class settle,
+ *  rho x A_wp x floodSettle(fill), the same number the heave sink reads. */
+export function floodWaterMass(ship: Ship): number {
+  const sk = SEAKEEPING[ship.type];
+  if (!sk) return 0;
+  return SEA_RHO * sk.waterplaneArea * floodSettle(ship.type, ship.waterLevel ?? 0);
+}
+
+/** The water as a point load for PhysicsSystem.applyPointLoad: its mass at the
+ *  slosh centroid (hull-local, x port +, z bow +). Also the added mass the
+ *  surge / yaw integration should carry (handoff to b2.1). */
+export function floodWaterLoad(ship: Ship): { local: { x: number; y: number; z: number }; mass: number } {
+  const st = sloshByShip.get(ship);
+  return { local: { x: st?.x ?? 0, y: 0, z: st?.z ?? 0 }, mass: floodWaterMass(ship) };
+}
+
+/** The hull's slosh state, created the first time she is seen with water in
+ *  her. Water already aboard with no history came in through her breaches
+ *  (planked or not), so the memory is seeded at their mean position and the
+ *  centroid starts where that memory allows: a fixture, a respawned snapshot
+ *  or a founder capture lists toward her holed side from the first tick. */
+function sloshStateFor(ship: Ship): SloshState | undefined {
+  const existing = sloshByShip.get(ship);
+  if (existing) return existing;
+  const fill = clamp(ship.waterLevel ?? 0, 0, 1);
+  if (!(fill > 1e-4)) return undefined;
+  const st = newSloshState();
+  const holes = ship.holes ?? [];
+  if (holes.length > 0) {
+    for (const h of holes) { st.memX += h.x; st.memZ += h.z; }
+    st.memX /= holes.length; st.memZ /= holes.length;
+    const sk = SEAKEEPING[ship.type];
+    const hull = { type: ship.type, fill, mass: floodWaterMass(ship), kRoll: sk?.kRoll ?? 0, roll: 0, pitch: 0 };
+    const geom = sloshGeometry(ship.type, fill);
+    st.x = sloshTargetX(geom, hull, st.memX);
+    st.z = sloshTargetZ(geom, hull, st.memZ);
+  }
+  sloshByShip.set(ship, st);
+  return st;
+}
+
+/** Read-only view of a hull's slosh state (suites, the founder capture). */
+export function floodSloshState(ship: Ship): Readonly<SloshState> | undefined {
+  return sloshByShip.get(ship);
+}
+
 /**
- * SERVER-owned list. The heel and trim a hull takes from the water standing in
- * her, derived ONLY from her open breaches (which rail they are on, which end,
- * and how hard each one runs) so a seeded match replays the same lean. b2.2c
- * replaces this with the slosh water centroid.
+ * SERVER-owned list. The heel and trim a hull takes from the water in her:
+ *
+ *  - the WATER MASS at its slosh centroid (b2.2c), converted exactly as
+ *    applyPointLoad converts a load (moment over the righting stiffness), so
+ *    the list follows the water and PERSISTS after the last hole is planked;
+ *  - plus the INFLOW still arriving: water gushing through a breach piles
+ *    against that rail before it spreads (weighted by how hard each hole runs),
+ *    which is also what tips a fresh hull toward her holed side.
  *
  * Conventions match the renderer and updateShipWaveAttitude: positive roll
- * LIFTS the +x (port) rail, so breaches keyed 'starboard' (= +x, the legacy
- * HullSections key) produce a NEGATIVE roll (that rail goes down); positive
- * pitch DIPS the bow, so a flooded bow trims positive.
+ * LIFTS the +x (port) rail, so water or breaches at +x produce a NEGATIVE roll
+ * (that rail goes down); positive pitch DIPS the bow, so a flooded bow trims
+ * positive.
  */
 export function floodListTargets(ship: Ship, t: number, storm = 0): { roll: number; trim: number } {
   const stats = SHIP_STATS[ship.type];
@@ -119,10 +176,38 @@ export function floodListTargets(ship: Ship, t: number, storm = 0): { roll: numb
     lateral += h.rateFactor * clamp(h.hole.x / halfW, -1, 1);
     longitudinal += h.rateFactor * clamp(h.hole.z / halfL, -1, 1);
   }
+  let roll = -lateral * FLOODING.LIST_ROLL_GAIN;
+  let trim = longitudinal * FLOODING.LIST_TRIM_GAIN;
+  const st = sloshStateFor(ship);
+  const sk = SEAKEEPING[ship.type];
+  if (st && sk) {
+    const m = floodWaterMass(ship);
+    roll += -(m * st.x * SEA_G) / sk.kRoll;
+    trim += (m * st.z * SEA_G) / sk.kPitch;
+  }
   return {
-    roll: clamp(-lateral * FLOODING.LIST_ROLL_GAIN, -FLOODING.LIST_ROLL_MAX, FLOODING.LIST_ROLL_MAX),
-    trim: clamp(longitudinal * FLOODING.LIST_TRIM_GAIN, -FLOODING.LIST_TRIM_MAX, FLOODING.LIST_TRIM_MAX),
+    roll: clamp(roll, -FLOODING.LIST_ROLL_MAX, FLOODING.LIST_ROLL_MAX),
+    trim: clamp(trim, -FLOODING.LIST_TRIM_MAX, FLOODING.LIST_TRIM_MAX),
   };
+}
+
+/** Step the hold water's slosh (b2.2c): called once per tick by
+ *  updateShipFlooding with the inflow of this tick. */
+function updateShipSlosh(ship: Ship, dt: number, prevFill: number, floods: HoleFlood[], ingressScale: number): void {
+  const fill = clamp(ship.waterLevel ?? 0, 0, 1);
+  // A hull first seen with water (fixture, founder) seeds from her breaches;
+  // one that floods from dry starts empty and learns from the inflow below.
+  const st = prevFill > 1e-4 ? sloshStateFor(ship) : (sloshByShip.get(ship) ?? newSloshState());
+  if (!st) return;
+  sloshByShip.set(ship, st);
+  const sk = SEAKEEPING[ship.type];
+  const inflow = floods
+    .filter((h) => h.ingress > 0)
+    .map((h) => ({ amount: h.ingress * ingressScale * dt, x: h.hole.x, z: h.hole.z }));
+  stepSlosh(st, {
+    type: ship.type, fill, mass: floodWaterMass(ship), kRoll: sk?.kRoll ?? 0,
+    roll: ship.roll ?? 0, pitch: ship.pitch ?? 0,
+  }, dt, prevFill, inflow);
 }
 
 /**
@@ -134,7 +219,13 @@ export function floodListTargets(ship: Ship, t: number, storm = 0): { roll: numb
  */
 export function updateShipFlooding(ship: Ship, t: number, dt: number, storm = 0): void {
   const water = ship.waterLevel ?? 0;
-  let ingress = shipIngressRate(ship, t, storm);
+  const reinforced = ship.upgrades.some((u) => u.type === 'hull_reinforcement')
+    ? SHIP_UPGRADES.HULL_INGRESS_MULT
+    : 1;
+  const floods = evaluateHoleFlood(ship, t, storm);
+  let ingress = 0;
+  for (const h of floods) ingress += h.ingress;
+  ingress *= reinforced;
   // Shot to pieces: at the cap for longer than the grace the seams open.
   if (countOpenHoles(ship) >= FLOODING.MAX_HOLES_PER_SHIP) {
     if (!saturatedSince.has(ship)) saturatedSince.set(ship, t);
@@ -151,6 +242,7 @@ export function updateShipFlooding(ship: Ship, t: number, dt: number, storm = 0)
       ship.fireTimer = 0;
       ship.fireDamageAccum = 0;
     }
+    updateShipSlosh(ship, dt, water, floods, reinforced);
     return;
   }
   const pumpFactor = ship.upgrades.some((u) => u.type === 'hull_reinforcement')
@@ -159,6 +251,7 @@ export function updateShipFlooding(ship: Ship, t: number, dt: number, storm = 0)
   const pump = FLOODING.BAIL_RATE * pumpFactor;
   ship.waterLevel = clamp(water - pump * dt, 0, 1);
   ship.floodingRate = pump > 0 && (ship.waterLevel ?? 0) > 0 ? -pump : 0;
+  updateShipSlosh(ship, dt, water, floods, reinforced);
 }
 
 /**
