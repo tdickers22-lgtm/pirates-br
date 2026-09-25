@@ -84,6 +84,9 @@ function finite(n: number | undefined, d = 0): number {
 }
 
 export class FloodAudio {
+  /** The listener's space applied to its OWN hull (b2.4g): +4 dB below deck, 1.2 kHz / -6 dB heard
+   *  from the weather deck. Other hulls keep FLOOD_HULL_OCCLUSION (never both). SoundEngine sets it. */
+  ownSpace: { gain: number; cutoff: number } = { gain: 1, cutoff: Infinity };
   private readonly tracks = new Map<string, ShipTrack>();
   private repairT = -1;
   private prevRepair = 0;
@@ -151,7 +154,7 @@ export class FloodAudio {
       tr = { gush: new Map(), slosh: null, gurgle: null, holes: new Map(), prevRoll: roll, prevPitch: pitch, prevSink: -1, seen: false };
       this.tracks.set(ship.id, tr);
     }
-    const occl = own ? 1 : FLOOD_HULL_OCCLUSION;
+    const occl = own ? this.ownSpace.gain : FLOOD_HULL_OCCLUSION;
     const holeSize = new Map<number, number | undefined>();
     const holePos = (h: ShipHole): FloodVec => ({ x: h.x, y: h.y, z: h.z });
     // ── edges on the hole list: punched, patched, plank knocked off ──
@@ -184,7 +187,7 @@ export class FloodAudio {
     const gains: number[] = [];
     for (const e of picked) {
       const g = gushFromSpeed(e.v, holeSize.get(e.holeId), e.submergedInside, e.strength);
-      const gain = g.level * floodDistanceGain(dist(L, e.worldPos), own);
+      const gain = g.level * floodDistanceGain(dist(L, e.worldPos), own) * (own ? this.ownSpace.gain : 1);
       let h = tr.gush.get(e.holeId);
       if (!h && gain > 1e-4) {
         h = this.host.openLoop('gush', e.worldPos) ?? undefined;
@@ -193,7 +196,7 @@ export class FloodAudio {
       if (!h) continue;
       live.add(e.holeId);
       gains.push(gain);
-      const cutoff = own ? g.cutoff : Math.min(g.cutoff, FLOOD_HULL_OCCLUSION_CUTOFF);
+      const cutoff = own ? Math.min(g.cutoff, this.ownSpace.cutoff) : Math.min(g.cutoff, FLOOD_HULL_OCCLUSION_CUTOFF);
       // A releasing (patched) jet follows its 300 ms fade; a live one glides.
       h.set({ gain, cutoff, rate: g.rate, pos: e.worldPos }, e.v <= 0 ? 0.05 : 0.12);
     }
@@ -209,10 +212,10 @@ export class FloodAudio {
     const pitchRate = dt > 0 ? (pitch - tr.prevPitch) / dt : 0;
     tr.prevRoll = roll;
     tr.prevPitch = pitch;
-    const dg = floodDistanceGain(dist(L, ship.position), own);
+    const dg = floodDistanceGain(dist(L, ship.position), own) * (own ? this.ownSpace.gain : 1);
     const s = sloshLevel(fill, rollRate, pitchRate);
     const sloshGain = s.level * dg;
-    tr.slosh = this.loopTo(tr.slosh, 'slosh', ship.position, sloshGain, own ? s.cutoff : Math.min(s.cutoff, FLOOD_HULL_OCCLUSION_CUTOFF), s.rate);
+    tr.slosh = this.loopTo(tr.slosh, 'slosh', ship.position, sloshGain, own ? Math.min(s.cutoff, this.ownSpace.cutoff) : Math.min(s.cutoff, FLOOD_HULL_OCCLUSION_CUTOFF), s.rate);
     const gg = gurgleLevel(fill) * 0.6 * dg;
     tr.gurgle = this.loopTo(tr.gurgle, 'gurgle', ship.position, gg, 520, 0.5);
     this.lastGains.set(ship.id, { gush: gains, slosh: sloshGain, gurgle: gg });

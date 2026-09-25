@@ -10,6 +10,7 @@ import {
   makeWorldPanner, panningModelFor, rearShade, type SpatialCategory,
 } from './Spatial.js';
 import { CANNON_MUZZLE_SPEED } from '../../shared/ballistics.js';
+import { REVERB_SPACES, dbToGain, generateImpulse, occlusionFor, type ListenerSpace, type Occlusion, type ReverbSpaceName } from './reverb.js';
 import { oceanLayers, windBedLevels, type AmbienceBeds, type WindBedLevels } from './AudioDirector.js';
 import {
   FloodAudio, type FloodAudioFrame, type FloodAudioHost, type FloodLoopHandle, type FloodLoopKind, type FloodOneShotKind,
@@ -58,8 +59,26 @@ type SpatialKind =
   | 'kegExplosion'
   | 'bodyThud';
 
-/** Ground material under a footstep. */
-export type FootstepSurface = 'deck' | 'sand' | 'stone' | 'grass';
+/** Ground material under a footstep (b2.4g, audio-13): ship deck, dock planking over water, beach
+ *  sand, rock, turf, ankle-deep water, a ladder rung, a rope (rigging climb). */
+export const FOOTSTEP_SURFACES = ['deck', 'dock', 'sand', 'stone', 'grass', 'water_shallow', 'ladder', 'rope'] as const;
+export type FootstepSurface = typeof FOOTSTEP_SURFACES[number];
+/** Sample per surface (every key >= 3 recorded variants; test-audio-events). Levels sit against the
+ *  -18 LUFS one-shot normalisation, well under the combat mix. */
+export const FOOTSTEP_SAMPLE: Readonly<Record<FootstepSurface, { key: string; level: number; rate: number }>> = {
+  deck: { key: 'footstep.wood', level: 0.4, rate: 1 },
+  dock: { key: 'footstep.dock', level: 0.42, rate: 0.94 },
+  sand: { key: 'footstep.sand', level: 0.34, rate: 1 },
+  stone: { key: 'footstep.stone', level: 0.36, rate: 1 },
+  grass: { key: 'footstep.grass', level: 0.34, rate: 1 },
+  water_shallow: { key: 'footstep.water', level: 0.3, rate: 1.05 },
+  ladder: { key: 'footstep.ladder', level: 0.36, rate: 1 },
+  rope: { key: 'footstep.rope', level: 0.24, rate: 1 },
+};
+/** A landing reads as a landing (both boots + body weight) only above this fall speed. */
+export const LANDING_MIN_VY = 3;
+const isFootstepSurface = (v: unknown): v is FootstepSurface =>
+  typeof v === 'string' && Object.prototype.hasOwnProperty.call(FOOTSTEP_SAMPLE, v);
 
 /** Black-powder firearm families (each gets its own crack/body/tail balance). */
 export type GunshotKind = 'flintlock' | 'blunderbuss' | 'flintknock' | 'longRifle';
@@ -480,6 +499,19 @@ export class SoundEngine {
   private worldFilter: BiquadFilterNode | null = null;
   private convolver: ConvolverNode | null = null;
   private convolverCave: ConvolverNode | null = null;
+  /** b2.4g spaces: the 0.5 s hold IR, the outside-world occlusion stage (busBed -> occFilter ->
+   *  occGain -> ambience) and busInside (own hull creak, bypasses the occlusion, +6 dB below). */
+  private convolverHold: ConvolverNode | null = null;
+  private wetHold: GainNode | null = null;
+  private occFilter: BiquadFilterNode | null = null;
+  private occGain: GainNode | null = null;
+  private busInside: GainNode | null = null;
+  private spaceIn: { inHold: boolean; aboard: boolean } = { inHold: false, aboard: false };
+  private space: Occlusion = occlusionFor({});
+  /** Voices sourced INSIDE the listener's hull (flood one-shots) skip the outside occlusion. */
+  private insideVoice = false;
+  private caveTone: LoopVoice | null = null;
+  private footLeft = false;
   private wetOutdoor: GainNode | null = null;
   private wetCave: GainNode | null = null;
   private noise: AudioBuffer | null = null;
@@ -706,9 +738,13 @@ export class SoundEngine {
       // Wet (reverb) bus — two parallel convolvers so the space can crossfade
       // between open air and cave without swapping a live buffer (which clicks).
       this.convolver = ctx.createConvolver();
-      this.convolver.buffer = this.createReverbImpulse(ctx, 1.6, 2.6);
+      this.convolver.buffer = this.makeImpulse(ctx, 'outdoor');
       this.convolverCave = ctx.createConvolver();
-      this.convolverCave.buffer = this.createReverbImpulse(ctx, 2.8, 3.5);
+      this.convolverCave.buffer = this.makeImpulse(ctx, 'cave');
+      this.convolverHold = ctx.createConvolver();
+      this.convolverHold.buffer = this.makeImpulse(ctx, 'hold');
+      this.wetHold = ctx.createGain();
+      safeSet(this.wetHold.gain, 'value', 0);
       this.wetOutdoor = ctx.createGain();
       safeSet(this.wetOutdoor.gain, 'value', 1);
       this.wetCave = ctx.createGain();
@@ -719,6 +755,9 @@ export class SoundEngine {
       this.busReverb.connect(this.wetCave);
       this.wetOutdoor.connect(this.convolver);
       this.wetCave.connect(this.convolverCave);
+      this.busReverb.connect(this.wetHold);
+      this.wetHold.connect(this.convolverHold);
+      this.convolverHold.connect(core.levels.sfx);
       this.convolver.connect(core.levels.sfx);
       this.convolverCave.connect(core.levels.sfx);
 
@@ -729,7 +768,19 @@ export class SoundEngine {
       // Ambient bed bus — looped ambience routes through here so booms can duck it.
       this.busBed = ctx.createGain();
       safeSet(this.busBed.gain, 'value', 1);
-      this.busBed.connect(core.levels.ambience);
+      // Outside-world occlusion stage (b2.4g): open at 20 kHz / 0 dB until the listener goes below.
+      this.occFilter = ctx.createBiquadFilter();
+      this.occFilter.type = 'lowpass';
+      safeSet(this.occFilter.frequency, 'value', this.space.outsideCutoffHz);
+      safeSet(this.occFilter.Q, 'value', 0.707);
+      this.occGain = ctx.createGain();
+      safeSet(this.occGain.gain, 'value', dbToGain(this.space.outsideGainDb));
+      this.busBed.connect(this.occFilter);
+      this.occFilter.connect(this.occGain);
+      this.occGain.connect(core.levels.ambience);
+      this.busInside = ctx.createGain();
+      safeSet(this.busInside.gain, 'value', dbToGain(this.space.ownCreakDb));
+      this.busInside.connect(core.levels.ambience);
 
       // Music bus. It sits BEHIND the world (post-worldFilter, so it muffles
       // when you go under) and behind its own duck node, which combat and
@@ -978,7 +1029,7 @@ export class SoundEngine {
     const under = target > 0.05;
     const cutoff = under ? THREE.MathUtils.lerp(620, 300, target) : 20000;
     this.ramp(this.worldFilter.frequency, cutoff, 0.12);
-    this.ramp(this.busReverb.gain, under ? 0.04 : 0.22 + this.caveAmount * 0.23, 0.14);
+    this.ramp(this.busReverb.gain, under ? 0.04 : this.reverbSendLevel(), 0.14);
     this.setSubmergedBed(under ? THREE.MathUtils.clamp(0.4 + target * 0.6, 0, 1) : 0);
     // The surfacing splash belongs to the swim code that owns the stroke cadence —
     // firing one here too would double it.
@@ -992,10 +1043,53 @@ export class SoundEngine {
   setReverbSpace(space: ReverbSpace, amount = 1): void {
     const cave = THREE.MathUtils.clamp(space === 'cave' ? amount : 1 - amount, 0, 1);
     this.caveAmount = cave;
+    this.applySpaceMix(0.5);
+    this.setCaveRoomTone(cave);
+  }
+
+  /**
+   * Where the listener stands relative to a hull (b2.4g, audio-05). Below deck the outside world
+   * (ambience bed + distant one-shots) closes to 900 Hz / -8 dB over 250 ms, the own-hull creak
+   * lifts +6 dB, the hold IR takes the reverb, and FloodAudio lifts the own hull's water +4 dB; on
+   * the weather deck the own hold's water comes through the planks at 1.2 kHz / -6 dB. Per-frame
+   * safe (re-automates only on a change). Driven by AudioDirector (shared isStandingInShipHold).
+   */
+  setListenerSpace(s: ListenerSpace | null | undefined): void {
+    const inHold = !!s?.inHold;
+    const aboard = inHold || !!s?.aboard;
+    if (inHold === this.spaceIn.inHold && aboard === this.spaceIn.aboard) return;
+    this.spaceIn = { inHold, aboard };
+    const o = occlusionFor({ inHold, aboard, cave: this.caveAmount });
+    this.space = o;
+    if (this.occFilter) this.ramp(this.occFilter.frequency, o.outsideCutoffHz, o.rampS);
+    if (this.occGain) this.ramp(this.occGain.gain, dbToGain(o.outsideGainDb), o.rampS);
+    if (this.busInside) this.ramp(this.busInside.gain, dbToGain(o.ownCreakDb), o.rampS);
+    this.applySpaceMix(o.rampS);
+  }
+
+  private reverbSendLevel(): number {
+    return 0.22 + this.caveAmount * 0.23 + (this.space.space === 'hold' ? 0.12 : 0);
+  }
+
+  /** Crossfade the three convolvers: the hold wins below deck, else cave vs open air. */
+  private applySpaceMix(t: number): void {
     if (!this.ctx || !this.wetCave || !this.wetOutdoor || !this.busReverb) return;
-    this.ramp(this.wetCave.gain, cave, 0.5);
-    this.ramp(this.wetOutdoor.gain, 1 - cave, 0.5);
-    if (this.submerged01 <= 0.05) this.ramp(this.busReverb.gain, 0.22 + cave * 0.23, 0.5);
+    const hold = this.space.space === 'hold' ? 1 : 0;
+    const cave = this.caveAmount * (1 - hold);
+    this.ramp(this.wetCave.gain, cave, t);
+    this.ramp(this.wetOutdoor.gain, Math.max(0, 1 - cave - hold), t);
+    if (this.wetHold) this.ramp(this.wetHold.gain, hold, t);
+    if (this.submerged01 <= 0.05) this.ramp(this.busReverb.gain, this.reverbSendLevel(), t);
+  }
+
+  /** Cave room tone: a low air-mass rumble under the drips, so a cave is never a silent box with
+   *  an echo. Rides busBed (a broadside ducks it). Built on the first cave visit only. */
+  private setCaveRoomTone(amount: number): void {
+    const bed = this.busBed;
+    if (!this.ctx || !bed || !this.noise) return;
+    if (amount <= 0.01 && !this.caveTone) return;
+    if (!this.caveTone) this.caveTone = this.makeNoiseLoop('lowpass', 150, 0.8, bed);
+    this.ramp(this.caveTone.gain.gain, 0.05 * amount, 1.2);
   }
 
   // ── Pocket use (fruit / wood) ────────────────────────────────────
@@ -1830,17 +1924,34 @@ export class SoundEngine {
     const now = this.ctx.currentTime;
     const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.14, 'footstep');
     const v = (running ? 1 : 0.72) * g;
+    const surf: FootstepSurface = isFootstepSurface(surface) ? surface : 'deck';
+    const s = FOOTSTEP_SAMPLE[surf];
+    // L/R: two feet never land the same; the left sits a touch lower and softer (b2.4g).
+    this.footLeft = !this.footLeft;
+    const side = this.footLeft ? { rate: 0.975, lvl: 0.9 } : { rate: 1, lvl: 1 };
+    if (this.sampleLayer(s.key, dest, s.level * v * side.lvl, {
+      rate: s.rate * side.rate * (running ? 1.04 : 1), semis: 0.4, db: 2, priority: VOICE_PRIORITY.foley,
+    })) return;
+    // Procedural fallback (sample not decoded yet).
     const j = (): number => 0.88 + Math.random() * 0.24; // ±12% per step
-    switch (surface) {
+    switch (surf) {
       case 'deck':
-        this.playTone(now, 100 * j(), 62, 0.06, 0.14 * v, 'triangle', 0.002, dest);
+      case 'dock':
+      case 'ladder': {
+        const body = surf === 'dock' ? 84 : surf === 'ladder' ? 150 : 100;
+        this.playTone(now, body * j(), body * 0.62, 0.06, 0.14 * v, 'triangle', 0.002, dest);
         this.playNoise(now, 0.07, 320 * j(), 0.8, 0.12 * v, 'lowpass', dest);
         // Every few steps a plank answers back.
         if (Math.random() < 0.25) this.playNoise(now + 0.008, 0.05, 720 * j(), 7, 0.03 * v, 'bandpass', dest);
         break;
+      }
       case 'sand':
         this.playNoise(now, 0.09, 950 * j(), 0.8, 0.1 * v, 'bandpass', dest);
         this.playNoise(now + 0.005, 0.08, 260 * j(), 0.7, 0.08 * v, 'lowpass', dest);
+        break;
+      case 'water_shallow':
+        this.playNoise(now, 0.16, 700 * j(), 0.9, 0.11 * v, 'bandpass', dest);
+        this.playNoise(now + 0.04, 0.2, 2400 * j(), 0.7, 0.05 * v, 'highpass', dest);
         break;
       case 'stone':
         this.playNoise(now, 0.04, 1700 * j(), 1.2, 0.09 * v, 'bandpass', dest);
@@ -1852,6 +1963,28 @@ export class SoundEngine {
         this.playNoise(now + 0.025, 0.06, 1200 * j(), 0.7, 0.05 * v, 'bandpass', dest);
         break;
     }
+  }
+
+  /**
+   * Both boots and the body's weight arriving after a jump or a drop (b2.4g, audio-13). Silent at
+   * or below LANDING_MIN_VY (3 m/s: a normal step-down); harder and lower with the fall speed.
+   * @param impactVy vertical speed at touchdown, m/s (sign ignored)
+   */
+  playFootLanding(surface: FootstepSurface, impactVy: number, distance = 0, pos?: SoundPos): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.busDry) return;
+    const vy = Math.abs(finiteClamp(impactVy, -80, 80, 0));
+    if (!(vy > LANDING_MIN_VY) || !(finiteDistance(distance) <= 30)) return;
+    const hard = THREE.MathUtils.clamp((vy - LANDING_MIN_VY) / 6, 0, 1);
+    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.16, 'footstep');
+    const s = FOOTSTEP_SAMPLE[isFootstepSurface(surface) ? surface : 'deck'];
+    const now = ctx.currentTime;
+    const lvl = s.level * g * (0.9 + hard * 0.7);
+    this.sampleLayer(s.key, dest, lvl, { rate: s.rate * 0.84, semis: 0.3, priority: VOICE_PRIORITY.own });
+    const played = this.sampleLayer(s.key, dest, lvl * 0.8, { rate: s.rate * 0.9, semis: 0.3, priority: VOICE_PRIORITY.own, when: now + 0.02 + hard * 0.015 });
+    // Body weight under the boots (the only procedural layer when the samples play).
+    this.playTone(now, 110 - hard * 30, 42, 0.12 + hard * 0.06, (played ? 0.08 : 0.16) * (0.5 + hard) * g, 'sine', 0.004, dest);
+    if (!played) this.playNoise(now, 0.08, 380, 0.8, 0.12 * (0.5 + hard) * g, 'lowpass', dest);
   }
 
   // ── Match flow ───────────────────────────────────────────────────
@@ -2234,7 +2367,7 @@ export class SoundEngine {
       lfoGain.connect(filter.frequency);
       source.connect(filter);
       filter.connect(gain);
-      gain.connect(bed);
+      gain.connect(this.busInside ?? bed); // own hull: skips the below-deck occlusion, +6 dB there
       const wetGain = ctx.createGain();
       safeSet(wetGain.gain, 'value', 0.18);
       gain.connect(wetGain);
@@ -2380,6 +2513,12 @@ export class SoundEngine {
       const shade = rearShade(listenerRelative(this.listenerPos, this.listenerFwd, p).cosFront);
       gain *= shade.gainMul;
       cutoff *= shade.cutoffMul;
+    }
+    // Below deck the outside world comes through the planking (b2.4g); your own feet, hands and
+    // blade, and voices sourced inside the hull, do not.
+    if (this.space.outsideGainDb < 0 && !this.insideVoice && category !== 'footstep' && category !== 'melee' && category !== 'foley') {
+      cutoff = Math.min(cutoff, this.space.outsideCutoffHz);
+      gain *= dbToGain(this.space.outsideGainDb);
     }
     const delay = delayFor(d);
     const filter = ctx.createBiquadFilter();
@@ -2763,6 +2902,7 @@ export class SoundEngine {
     if (!this.ctx || !frame || !finitePos(frame.listener)) return;
     try {
       if (!this.floodAudio) this.floodAudio = new FloodAudio(this.floodHost());
+      this.floodAudio.ownSpace = { gain: dbToGain(this.space.ownFloodDb), cutoff: this.space.ownFloodCutoffHz };
       this.floodAudio.update(frame);
     } catch (err) {
       this.backstopFaults += 1;
@@ -2872,7 +3012,15 @@ export class SoundEngine {
     const e = table[kind];
     if (!e) return;
     const vol = finiteClamp(volume, 0, 2, 1);
-    if (this.playSample(e.key, { pos: at, volume: vol, rate: e.rate * finiteClamp(rate, 0.25, 4, 1), priority: e.pri, category: e.cat })) return;
+    // Sourced inside a hull: FloodAudio's volume already carries the space, skip outside occlusion.
+    this.insideVoice = true;
+    let played = false;
+    try {
+      played = this.playSample(e.key, { pos: at, volume: vol, rate: e.rate * finiteClamp(rate, 0.25, 4, 1), priority: e.pri, category: e.cat });
+    } finally {
+      this.insideVoice = false;
+    }
+    if (played) return;
     // Procedural fallback, scaled by the same distance law the sample would get.
     const d = at && this.listenerKnown ? Math.hypot(at.x - this.listenerPos.x, at.y - this.listenerPos.y, at.z - this.listenerPos.z) : 0;
     const g = vol * gainFor(e.cat, d);
@@ -4295,18 +4443,15 @@ export class SoundEngine {
     return buffer;
   }
 
-  /** Cheap procedural reverb — exponentially-decaying noise impulse. */
-  private createReverbImpulse(ctx: AudioContext, durationSeconds: number, decay: number): AudioBuffer {
-    const length = Math.max(1, Math.floor(ctx.sampleRate * durationSeconds));
-    const buffer = ctx.createBuffer(2, length, ctx.sampleRate);
-    for (let channel = 0; channel < 2; channel++) {
-      const data = buffer.getChannelData(channel);
-      for (let i = 0; i < length; i++) {
-        const t = i / length;
-        // Random sign with exponential decay envelope
-        data[i] = (Math.random() * 2 - 1) * Math.pow(1 - t, decay);
-      }
-    }
+  /** Room impulse for a space (reverb.ts: early reflections + HF damping; audio-12). */
+  private makeImpulse(ctx: AudioContext, space: ReverbSpaceName): AudioBuffer {
+    const spec = REVERB_SPACES[space];
+    const [l, r] = generateImpulse(ctx.sampleRate, spec, space === 'cave' ? 3 : space === 'hold' ? 5 : 1);
+    const buffer = ctx.createBuffer(2, l.length, ctx.sampleRate);
+    [l, r].forEach((src, c) => {
+      const dst = buffer.getChannelData(c);
+      dst.set(src.length > dst.length ? src.subarray(0, dst.length) : src);
+    });
     return buffer;
   }
 }

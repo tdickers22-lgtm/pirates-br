@@ -118,7 +118,7 @@ for (const tier of ['high', 'balanced', 'low']) {
 // ── fake Web Audio graph ────────────────────────────────────────────────────
 const created = [];
 function fakeParam(v = 0) {
-  return { value: v, setValueAtTime() {}, linearRampToValueAtTime() {}, exponentialRampToValueAtTime() {},
+  return { value: v, setValueAtTime() {}, linearRampToValueAtTime(v, at) { this.ramped = v; this.rampAt = at; }, exponentialRampToValueAtTime() {},
     setTargetAtTime() {}, cancelScheduledValues() {}, cancelAndHoldAtTime() {},
     setValueCurveAtTime(curve, at, dur) { this.curve = Array.from(curve); this.curveAt = at; this.curveDur = dur; } };
 }
@@ -154,6 +154,11 @@ class FakeCtx {
     });
   }
   resume() { return Promise.resolve(); }
+  // Real sample storage, so the gate can grade the impulses the engine actually builds (b2.4g).
+  createBuffer(ch, len, sr) {
+    const data = Array.from({ length: ch }, () => new Float32Array(len));
+    return { numberOfChannels: ch, length: len, sampleRate: sr, duration: len / sr, getChannelData: (c) => data[c] };
+  }
 }
 /** Every node reachable downstream of `from`. */
 function downstream(from) {
@@ -573,6 +578,111 @@ async function drain(bank) { for (let i = 0; i < 2000 && (bank.decodesInFlight >
   engine.playAnchorChange(true, { x: 0, y: 0, z: -30 }, 30);
   const pan = created.slice(before).find((n) => n.kind === 'Panner');
   check('engine: station foley is positioned (anchor at z=-30 gets a world panner there)', !!pan && pan.positionZ.value === -30);
+}
+
+// ── 7. Spaces: below-deck occlusion + damped IRs (b2.4g; audio-05, audio-12) ─────────────
+{
+  const R = await import('../src/client/audio/reverb.ts');
+  const hold = R.occlusionFor({ inHold: true, aboard: true });
+  const open = R.occlusionFor({});
+  const top = R.occlusionFor({ aboard: true });
+  check('space: occlusionFor({inHold}) cutoff <= 1000 Hz, gain <= -6 dB over ~250 ms; own creak +6, own flood +4',
+    hold.outsideCutoffHz <= 1000 && hold.outsideGainDb <= -6 && Math.abs(hold.rampS - 0.25) < 1e-9 && hold.ownCreakDb === 6 && hold.ownFloodDb === 4 && hold.space === 'hold',
+    JSON.stringify(hold));
+  check('space: outdoor is open (20 kHz, 0 dB); topside hears its own hold at 1.2 kHz -6 dB',
+    open.outsideCutoffHz >= 20000 && open.outsideGainDb === 0 && open.ownFloodDb === 0
+      && top.outsideCutoffHz >= 20000 && top.ownFloodCutoffHz === 1200 && top.ownFloodDb === -6,
+    `open ${JSON.stringify(open)} topside ${JSON.stringify(top)}`);
+
+  // Band energies of the LAST half of an IR (radix-2 FFT, zero-padded).
+  const bands = (data, sr) => {
+    const half = data.subarray(Math.floor(data.length / 2));
+    let n = 1; while (n < half.length) n <<= 1;
+    const re = new Float64Array(n), im = new Float64Array(n);
+    re.set(half);
+    for (let i = 1, j = 0; i < n; i++) { let bit = n >> 1; for (; j & bit; bit >>= 1) j ^= bit; j ^= bit; if (i < j) { [re[i], re[j]] = [re[j], re[i]]; } }
+    for (let len = 2; len <= n; len <<= 1) {
+      const a = (-2 * Math.PI) / len, wr = Math.cos(a), wi = Math.sin(a);
+      for (let i = 0; i < n; i += len) {
+        let cr = 1, ci = 0;
+        for (let k = 0; k < len / 2; k++) {
+          const ur = re[i + k], ui = im[i + k];
+          const vr = re[i + k + len / 2] * cr - im[i + k + len / 2] * ci, vi = re[i + k + len / 2] * ci + im[i + k + len / 2] * cr;
+          re[i + k] = ur + vr; im[i + k] = ui + vi; re[i + k + len / 2] = ur - vr; im[i + k + len / 2] = ui - vi;
+          const t = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = t;
+        }
+      }
+    }
+    let lo = 0, hi = 0;
+    for (let k = 1; k < n / 2; k++) { const f = (k * sr) / n, e = re[k] * re[k] + im[k] * im[k]; if (f < 1000) lo += e; else if (f > 4000) hi += e; }
+    return { lo, hi, ratio: lo > 0 ? hi / lo : Infinity };
+  };
+  const rows = [];
+  let pureOk = true;
+  for (const [name, spec] of Object.entries(R.REVERB_SPACES)) {
+    const [l] = R.generateImpulse(48000, spec, 1);
+    const b = bands(l, 48000);
+    // Early reflections: distinct taps inside the early window stand out of the tail.
+    // Early reflections: the same seed without taps must carry clearly less energy in the early window.
+    const ew = Math.ceil((spec.predelay + spec.earlyWindow) * 48000);
+    const share = (x) => { let e = 0, t = 0; for (let i = 0; i < x.length; i++) { t += x[i] * x[i]; if (i < ew) e += x[i] * x[i]; } return t > 0 ? e / t : 0; };
+    const [bare] = R.generateImpulse(48000, { ...spec, earlyTaps: 0 }, 1);
+    const lift = share(l) / Math.max(1e-12, share(bare));
+    rows.push(`${name} ${(l.length / 48000).toFixed(2)}s hf/lf ${(b.ratio * 100).toFixed(2)}% early x${lift.toFixed(2)} (${spec.earlyTaps} taps)`);
+    if (!(b.ratio < 0.2) || !(spec.earlyTaps >= 6 && spec.earlyTaps <= 10) || !(lift > 1.5)) pureOk = false;
+  }
+  const holdLen = R.REVERB_SPACES.hold.duration;
+  check('space: every generated IR has HF damping (energy > 4 kHz in the last half < 20% of < 1 kHz) and 6-10 early taps that lift the early window > 1.5x; hold IR 0.5 s',
+    pureOk && Math.abs(holdLen - 0.5) < 1e-9, rows.join(' | '));
+
+  // The engine's REAL convolver buffers (not just the law): outdoor, cave and hold all damped.
+  const engine = new SoundEngine();
+  const c0 = created.length;
+  engine.unlock();
+  const convs = created.slice(c0).filter((n) => n.kind === 'Convolver' && n.buffer?.getChannelData);
+  const er = convs.map((c) => ({ dur: c.buffer.duration, ...bands(c.buffer.getChannelData(0), c.buffer.sampleRate) }));
+  check('engine: >= 3 convolvers (outdoor, cave, hold) and every impulse passes the HF-damping bound; one is the 0.5 s hold',
+    convs.length >= 3 && er.every((e) => e.ratio < 0.2) && er.some((e) => Math.abs(e.dur - 0.5) < 0.02),
+    er.map((e) => `${e.dur.toFixed(2)}s ${(e.ratio * 100).toFixed(1)}%`).join(', ') || 'no convolver buffers');
+
+  // Occlusion stage on the engine: the bed passes through it; a hold listener closes it.
+  engine.setListenerPose({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: -1 });
+  engine.setListenerSpace?.({ inHold: true, aboard: true });
+  const occF = engine.occFilter, occG = engine.occGain;
+  const bedThrough = !!occF && downstream(engine.busBed).has(occF) && downstream(occF).has(engine.core?.levels?.ambience);
+  const shut = { f: occF?.frequency?.ramped, g: occG?.gain?.ramped, at: (occF?.frequency?.rampAt ?? 0) - engine.ctx.currentTime };
+  check('engine: setListenerSpace({inHold}) ramps the bed occlusion to <= 1000 Hz and <= -6 dB over 0.25 s',
+    bedThrough && shut.f <= 1000 && shut.g <= 10 ** (-6 / 20) && Math.abs(shut.at - 0.25) < 0.01, JSON.stringify({ bedThrough, ...shut }));
+  // A distant cannon heard from the hold is muffled too; your own footstep is not.
+  const c1 = created.length;
+  engine.playCannonFire(40, { x: 0, y: 0, z: -40 });
+  const cannonLp = created.slice(c1).find((n) => n.kind === 'BiquadFilter' && n.type === 'lowpass');
+  const c2 = created.length;
+  engine.playFootstep('deck', false, 0);
+  const stepLp = created.slice(c2).find((n) => n.kind === 'BiquadFilter' && n.type === 'lowpass');
+  check('engine: in the hold an outside one-shot is lowpassed <= 900 Hz, your own footstep is not',
+    !!cannonLp && cannonLp.frequency.value <= 900 && !!stepLp && stepLp.frequency.value > 900,
+    `cannon lp ${cannonLp?.frequency?.value}, step lp ${stepLp?.frequency?.value}`);
+  engine.setListenerSpace?.({});
+  check('engine: back on the open deck the stage reopens (20 kHz, 0 dB)',
+    occF?.frequency?.ramped >= 20000 && occG?.gain?.ramped === 1, `f ${occF?.frequency?.ramped} g ${occG?.gain?.ramped}`);
+
+  // Director: the listener's hold state comes from the shared hold predicate.
+  const D = await import('../src/client/audio/AudioDirector.ts');
+  const { isStandingInShipHold } = await import('../src/shared/interactions.ts');
+  const { SHIP_STATS: SS } = await import('../src/shared/constants/index.ts');
+  const ship = { id: 's', type: 'sloop', position: { x: 0, y: 0, z: 0 }, rotation: 0, pitch: 0, roll: 0 };
+  let agree = 0, inHoldSeen = 0, disagree = [];
+  for (let y = -2; y <= SS.sloop.height + 4; y += 0.1) {
+    const L = { x: 0, y, z: 0 };
+    const got = D.listenerInHold?.(L, ship);
+    const want = isStandingInShipHold({ x: 0, y: y - D.LISTENER_FEET_BELOW_EAR, z: 0 }, ship);
+    if (got === want) agree++; else disagree.push(y.toFixed(1));
+    if (got) inHoldSeen++;
+  }
+  const onDeck = D.listenerInHold?.({ x: 0, y: SS.sloop.height + 0.2 + 1.7, z: 0 }, ship);
+  check('director: listenerInHold agrees with the shared isStandingInShipHold, is true somewhere in the hold and false standing on deck',
+    disagree.length === 0 && inHoldSeen > 0 && onDeck === false, `agree ${agree}, inHold at ${inHoldSeen} heights, deck ${onDeck}${disagree.length ? `, disagree at ${disagree.join(',')}` : ''}`);
 }
 
 let failed = 0;

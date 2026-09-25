@@ -831,6 +831,150 @@
       "license": "CC0-1.0",
       "notes": "Audio/chop.ogg (pitch +1 st of variant source)",
       "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/footstep.sand.1.mp3",
+      "source": "https://kenney.nl/media/pages/assets/impact-sounds/87b4ddecda-1677589768/kenney_impact-sounds.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/footstep_snow_000.ogg (pitch -1.5 st of variant source)",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/footstep.sand.2.mp3",
+      "source": "https://kenney.nl/media/pages/assets/impact-sounds/87b4ddecda-1677589768/kenney_impact-sounds.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/footstep_snow_001.ogg (pitch -1.5 st of variant source)",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/footstep.sand.3.mp3",
+      "source": "https://kenney.nl/media/pages/assets/impact-sounds/87b4ddecda-1677589768/kenney_impact-sounds.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/footstep_snow_002.ogg (pitch -1.5 st of variant source)",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/footstep.sand.4.mp3",
+      "source": "https://kenney.nl/media/pages/assets/impact-sounds/87b4ddecda-1677589768/kenney_impact-sounds.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/footstep_snow_003.ogg (pitch -1.5 st of variant source)",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/footstep.dock.1.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/footstep00.ogg",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/footstep.dock.2.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/footstep01.ogg",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/footstep.dock.3.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/footstep02.ogg",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/footstep.dock.4.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/footstep03.ogg",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/footstep.water.1.mp3",
+      "source": "https://opengameart.org/sites/default/files/water-splash-slime-sfx.zip",
+      "author": "rubberduck",
+      "license": "CC0-1.0",
+      "notes": "splash_06.ogg (pitch +2 st of variant source)",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/footstep.water.2.mp3",
+      "source": "https://opengameart.org/sites/default/files/water-splash-slime-sfx.zip",
+      "author": "rubberduck",
+      "license": "CC0-1.0",
+      "notes": "splash_07.ogg (pitch +2 st of variant source)",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/footstep.water.3.mp3",
+      "source": "https://opengameart.org/sites/default/files/water-splash-slime-sfx.zip",
+      "author": "rubberduck",
+      "license": "CC0-1.0",
+      "notes": "splash_08.ogg (pitch +2 st of variant source)",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/footstep.water.4.mp3",
+      "source": "https://opengameart.org/sites/default/files/water-splash-slime-sfx.zip",
+      "author": "rubberduck",
+      "license": "CC0-1.0",
+      "notes": "splash_09.ogg (pitch +2 st of variant source)",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/footstep.ladder.1.mp3",
+      "source": "https://opengameart.org/sites/default/files/100-CC0-wood-metal-SFX.zip",
+      "author": "rubberduck",
+      "license": "CC0-1.0",
+      "notes": "wood_hit_04.ogg (pitch +2 st of variant source)",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/footstep.ladder.2.mp3",
+      "source": "https://opengameart.org/sites/default/files/100-CC0-wood-metal-SFX.zip",
+      "author": "rubberduck",
+      "license": "CC0-1.0",
+      "notes": "wood_hit_05.ogg (pitch +2 st of variant source)",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/footstep.ladder.3.mp3",
+      "source": "https://opengameart.org/sites/default/files/100-CC0-wood-metal-SFX.zip",
+      "author": "rubberduck",
+      "license": "CC0-1.0",
+      "notes": "wood_hit_06.ogg (pitch +2 st of variant source)",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/footstep.rope.1.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/creak1.ogg (pitch +3 st of variant source)",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/footstep.rope.2.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/creak2.ogg (pitch +3 st of variant source)",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/footstep.rope.3.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/creak3.ogg (pitch +3 st of variant source)",
+      "from": "public/assets/audio/LICENSES.md"
     }
   ]
 }

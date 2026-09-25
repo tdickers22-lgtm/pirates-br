@@ -881,6 +881,127 @@
           "semitones": 1.0
         }
       ]
+    },
+    "footstep.sand": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/footstep_snow_000.ogg",
+          "semitones": -1.5
+        },
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/footstep_snow_001.ogg",
+          "semitones": -1.5
+        },
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/footstep_snow_002.ogg",
+          "semitones": -1.5
+        },
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/footstep_snow_003.ogg",
+          "semitones": -1.5
+        }
+      ]
+    },
+    "footstep.dock": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/footstep00.ogg"
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/footstep01.ogg"
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/footstep02.ogg"
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/footstep03.ogg"
+        }
+      ]
+    },
+    "footstep.water": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "rdWater",
+          "member": "splash_06.ogg",
+          "semitones": 2.0
+        },
+        {
+          "src": "rdWater",
+          "member": "splash_07.ogg",
+          "semitones": 2.0
+        },
+        {
+          "src": "rdWater",
+          "member": "splash_08.ogg",
+          "semitones": 2.0
+        },
+        {
+          "src": "rdWater",
+          "member": "splash_09.ogg",
+          "semitones": 2.0
+        }
+      ]
+    },
+    "footstep.ladder": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "rdWoodMetal",
+          "member": "wood_hit_04.ogg",
+          "semitones": 2.0
+        },
+        {
+          "src": "rdWoodMetal",
+          "member": "wood_hit_05.ogg",
+          "semitones": 2.0
+        },
+        {
+          "src": "rdWoodMetal",
+          "member": "wood_hit_06.ogg",
+          "semitones": 2.0
+        }
+      ]
+    },
+    "footstep.rope": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/creak1.ogg",
+          "semitones": 3.0
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/creak2.ogg",
+          "semitones": 3.0
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/creak3.ogg",
+          "semitones": 3.0
+        }
+      ]
     }
   }
 }

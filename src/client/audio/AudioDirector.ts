@@ -22,9 +22,9 @@
  * with a world position from the shared station geometry (anchor/capstan at the bow, wheel at
  * the helm, sail rope at the sail station, load/ram at the cannon that just came ready).
  */
-import { SHIP_STATS } from '../../shared/constants/index.js';
+import { PLAYER, SHIP_STATS } from '../../shared/constants/index.js';
 import {
-  getAnchorControlLocal, getCannonDeckLocalPosition, getHelmControlLocal, getSailControlLocal, toShipWorldPoint,
+  getAnchorControlLocal, getCannonDeckLocalPosition, getHelmControlLocal, getSailControlLocal, isStandingInShipHold, toShipWorldPoint,
 } from '../../shared/interactions.js';
 import type { Ship } from '../../shared/types/index.js';
 import { angleWrap, sampleLocalWind } from '../../shared/utils/index.js';
@@ -167,7 +167,19 @@ export function stationWorld(ship: Pick<Ship, 'position' | 'rotation'>, local: {
 export interface AmbienceBeds { wind: WindBedLevels; ocean: OceanLayers; surf01: number }
 
 /** What the director drives. SoundEngine implements it; the gate fakes it. */
+/** Feet below the ear for the hold test: the CROUCHED eye height, so a crouch on the weather deck
+ *  never reads as below deck, while the hold (a full storey down) still does (b2.4g). */
+export const LISTENER_FEET_BELOW_EAR = PLAYER.EYE_Y - PLAYER.CROUCH_DROP;
+/** Is the listener (camera = first-person ear) standing in this hull's hold? The shared
+ *  isStandingInShipHold predicate, the same one the hold interactions use. */
+export function listenerInHold(listener: SoundPoint, ship: Pick<Ship, 'position' | 'rotation' | 'type' | 'pitch' | 'roll'> | null): boolean {
+  if (!ship || !listener || !Number.isFinite(listener.x) || !Number.isFinite(listener.y) || !Number.isFinite(listener.z)) return false;
+  return isStandingInShipHold({ x: listener.x, y: listener.y - LISTENER_FEET_BELOW_EAR, z: listener.z }, ship);
+}
+
 export interface AudioDirectorSink {
+  /** Below-deck occlusion / hold reverb (b2.4g). Optional so older sinks keep working. */
+  setListenerSpace?(s: { inHold: boolean; aboard: boolean }): void;
   setAmbience(a: { nightFactor: number; storminess: number; nearShore01: number; rain01?: number; swimming?: boolean; beds?: AmbienceBeds }): void;
   setSailingState(s: { speed01: number; roughness01: number; heel01: number; luffing: boolean; aboard?: boolean; nearHullM?: number; load01?: number; luffHz?: number }): void;
   playAnchorChange(dropped: boolean, pos?: SoundPoint, distance?: number): void;
@@ -228,6 +240,7 @@ export class AudioDirector {
     this.clock += dt;
     const storm = clamp01(f.storminess);
     const aboard = f.aboardShip;
+    this.sink.setListenerSpace?.({ inHold: listenerInHold(f.listener, aboard), aboard: !!aboard });
     const at = aboard ? aboard.position : f.listener;
     const w = sampleLocalWind(fin(f.time), fin(at.x), fin(at.z), f.storm ?? null);
     const app = apparentWind(w.direction, w.strength, aboard ? aboard.velocity.x : 0, aboard ? aboard.velocity.z : 0);

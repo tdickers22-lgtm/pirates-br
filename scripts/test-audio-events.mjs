@@ -81,6 +81,7 @@ const methods = new Map();
     playUiHover: 'b2.4h menu hover (MenuController)',
     startFire: 'burning-ship fire loop: needs a Game/CombatFx caller (b2.3 hook)',
     playGoldCount: 'HUD gold tally counter (HUD lane)',
+    playFootLanding: 'jump/fall landing (vy > 3 m/s): Game.ts updateFootsteps caller (b2.3 hook, handoff in b2.4.json)',
   };
   const unexpected = dead.filter((n) => !(n in KNOWN_DEAD));
   const stale = Object.keys(KNOWN_DEAD).filter((n) => !dead.includes(n));
@@ -95,6 +96,15 @@ const methods = new Map();
 
 // Events migrated by b2.4f: [method, args, keys it must play (any of), min sample layers].
 const EVENTS = [
+  // b2.4g footsteps v2: every surface sample-first.
+  ['playFootstep', ['deck'], ['footstep.wood']],
+  ['playFootstep', ['dock'], ['footstep.dock']],
+  ['playFootstep', ['sand'], ['footstep.sand']],
+  ['playFootstep', ['stone'], ['footstep.stone']],
+  ['playFootstep', ['grass'], ['footstep.grass']],
+  ['playFootstep', ['water_shallow'], ['footstep.water']],
+  ['playFootstep', ['ladder'], ['footstep.ladder']],
+  ['playFootstep', ['rope'], ['footstep.rope']],
   ['playCannonFire', [10, { x: 0, y: 0, z: -10 }], ['cannon.fire']],
   ['playGunshot', ['flintlock', 5, { x: 5, y: 0, z: 0 }], ['gun.shot']],
   ['playGunshot', ['longRifle', 5, { x: 5, y: 0, z: 0 }], ['gun.shot']],
@@ -192,6 +202,18 @@ function fire(engine, method, args) {
   const samples = srcs.filter((n) => keyOf(n.buffer));
   const prim = nodes.filter((n) => n.kind === 'Oscillator').length + (srcs.length - samples.length);
   return { nodes, samples, prim };
+}
+
+// ── 1b. footstep surfaces (b2.4g, audio-13) ────────────────────────────────
+{
+  const SE = await import('../src/client/audio/SoundEngine.ts');
+  const want = ['deck', 'dock', 'sand', 'stone', 'grass', 'water_shallow', 'ladder', 'rope'];
+  const surf = Array.isArray(SE.FOOTSTEP_SURFACES) ? SE.FOOTSTEP_SURFACES : [];
+  const missing = want.filter((x) => !surf.includes(x));
+  const rows = surf.map((x) => `${x}=${SE.FOOTSTEP_SAMPLE?.[x]?.key}x${manifest.keys[SE.FOOTSTEP_SAMPLE?.[x]?.key]?.files?.length ?? 0}`);
+  const thin = surf.filter((x) => (manifest.keys[SE.FOOTSTEP_SAMPLE?.[x]?.key]?.files?.length ?? 0) < 3);
+  check('footsteps: every surface (deck, dock, sand, stone, grass, water_shallow, ladder, rope) has a manifest key with >= 3 variants',
+    missing.length === 0 && thin.length === 0, `${rows.join(' ')}${missing.length ? ` MISSING ${missing.join(',')}` : ''}${thin.length ? ` THIN ${thin.join(',')}` : ''}`);
 }
 
 // ── 2. sampled path ─────────────────────────────────────────────────────────
