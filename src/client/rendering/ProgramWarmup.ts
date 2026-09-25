@@ -79,12 +79,29 @@ import { budgeted } from './FrameBudget.js';
  * render target — or drive `shadowMap.render` itself, which collides with this
  * repo's shadow update gate. It is not a small change and it is not this one.
  *
- * NO EXTENSION, NO WARMER. Without KHR_parallel_shader_compile, three's
- * `isReady()` returns true before the driver is actually ready. There is no
- * non-blocking way to distinguish a cheap reflection from a multi-second link,
- * so proactive compilation and the visibility guard are disabled. That is the
- * pre-warmer rendering path: the game may take an ordinary first-use hitch, but
- * this optimisation can never create a beachball or shader backlog of its own.
+ * NO EXTENSION: WARM SYNCHRONOUSLY, BUT ONLY WHILE NOBODY PLAYS (b3.1e).
+ * Without KHR_parallel_shader_compile (Safari on every iPhone, iPad and Mac as
+ * measured by the 2026-09 audit), three's `isReady()` returns true before the
+ * driver is actually ready, so there is no non-blocking way to tell a cheap
+ * reflection from a multi-second link. The first version of this file took that
+ * to mean "no warmer at all", and every program then linked at first sight
+ * DURING PLAY: the first cannonball, the first fire, the first skeleton, each
+ * new biome. The link has to be paid somewhere; the only question is whether a
+ * player is steering through the frame that pays it.
+ *
+ * So while the renderer is BOOSTED (the menu, the start ceremony and its
+ * countdown, and a world build backlog: the frames Game classifies as load)
+ * the no-extension path runs the same serial warmer the context restore uses:
+ * compile() a chunk, then getUniforms()/getAttributes() on each program, which
+ * is the join. compile() alone does NOT link in r160 (it stops at getProgram),
+ * so a warm-up that only compiles pays nothing. The budget is checked BEFORE
+ * each link, so a frame pays at most `SYNC_MS_PER_FRAME` plus one link and the
+ * countdown keeps animating. The walk covers hidden nodes too, so pooled FX,
+ * spare projectiles and unrevealed islands that already sit in the graph are
+ * paid before they are ever shown. When the boost drops (the horn, backlog
+ * empty) the path goes back to the pre-warmer behaviour: nothing proactive,
+ * nothing held, an ordinary first-use link for anything that was never in the
+ * scene while it ran. test-program-warm --no-khr grades what is left.
  *
  * FAIL OPEN, ALWAYS. Warming is an optimisation and must never be able to make
  * something permanently invisible. A material that throws on the way through is
@@ -136,6 +153,14 @@ const SERIAL_MAX_HELD_FRAMES = 300;
 /** A join under this is a program three already had: the chunk may grow. */
 const SERIAL_CHEAP_JOIN_MS = 4;
 const SERIAL_CHUNK_MAX = 32;
+/**
+ * The no-extension warm-up's per-frame link budget at the menu and under the
+ * countdown (b3.1e). Smaller than the restore's because a countdown is on screen
+ * and must keep moving: checked before each link, so a frame costs this plus at
+ * most one indivisible link. A menu frame is otherwise nearly free, so even one
+ * link a frame pays a ~130-program world in a few seconds of menu.
+ */
+const SYNC_MS_PER_FRAME = 16;
 
 /**
  * Cost of the guard itself: the scene walk stops after this many NODES.
@@ -294,6 +319,8 @@ export class ProgramWarmer {
     walked: 0, owed: 0, unjoinable: 0, retired: 0,
     guard: true, active: false, parallel: null as boolean | null,
     serial: false, serialLinks: 0, serialMs: 0,
+    /** b3.1e no-extension warm-up: running this frame, programs linked, ms spent. */
+    sync: false, syncLinks: 0, syncMs: 0,
   };
 
   /** Run the serial no-extension warmer (context restore only). No effect where
@@ -372,7 +399,11 @@ export class ProgramWarmer {
     const parallel = this.parallelCompile(renderer);
     const frameGapMs = this.lastPrepareAt > 0 ? startedAt - this.lastPrepareAt : 0;
     this.lastPrepareAt = startedAt;
-    if (!parallel && !this.serial) {
+    // b3.1e: the no-extension path warms synchronously while boosted (nobody is
+    // playing) and stays the pre-warmer path otherwise.
+    const sync = !parallel && !this.serial && this.boosted;
+    this.stats.sync = sync;
+    if (!parallel && !this.serial && !sync) {
       this.stats.active = false;
       this.stats.heldNow = 0;
       this.stats.owed = 0;
@@ -446,7 +477,9 @@ export class ProgramWarmer {
       // SERIAL RESTORE: kick one, join it, check the budget. The first link of
       // the frame always runs, so a restore can never stall with work owed.
       const restOfFrame = Math.max(0, frameGapMs - this.stats.lastMs);
-      const budget = Math.min(SERIAL_MS_PER_FRAME_MAX, Math.max(SERIAL_MS_PER_FRAME_MIN, restOfFrame));
+      const budget = sync
+        ? SYNC_MS_PER_FRAME
+        : Math.min(SERIAL_MS_PER_FRAME_MAX, Math.max(SERIAL_MS_PER_FRAME_MIN, restOfFrame));
       // Kicks go in chunks because renderer.compile() walks the whole scene for
       // lights on every call (~17 ms a call under SwiftShader; 3,529 one-mesh
       // kicks cost 62 s in the first try). Most materials share a program that
@@ -458,7 +491,11 @@ export class ProgramWarmer {
         if (links > 0 && performance.now() - startedAt >= budget) break;
         const chunk: Owed[] = [];
         const keys = new Set<string>();
-        for (; cursor < owing.length && chunk.length < this.serialChunk; cursor++) {
+        // Sync warm-up links ONE material per kick: a cheap (cached) join says
+        // nothing about the next one, and the restore's chunk doubling let one
+        // countdown frame take a 32-program chunk (18.9 s on SwiftShader).
+        const chunkCap = sync ? 1 : this.serialChunk;
+        for (; cursor < owing.length && chunk.length < chunkCap; cursor++) {
           const entry = owing[cursor]!;
           if (this.paid.has(entry.key) || keys.has(entry.key)) continue;
           keys.add(entry.key);
@@ -470,7 +507,7 @@ export class ProgramWarmer {
         let worst = 0;
         for (const entry of chunk) {
           const joinStart = performance.now();
-          const joined = this.join(renderer, entry.material);
+          const joined = this.join(renderer, entry.material, true);
           worst = Math.max(worst, performance.now() - joinStart);
           if (joined) {
             this.paid.add(entry.key);
@@ -484,8 +521,13 @@ export class ProgramWarmer {
         const linkMs = performance.now() - linkStart;
         links += 1;
         this.serialChunk = worst < SERIAL_CHEAP_JOIN_MS ? Math.min(SERIAL_CHUNK_MAX, this.serialChunk * 2) : 1;
-        this.stats.serialLinks += chunk.length;
-        this.stats.serialMs = +(this.stats.serialMs + linkMs).toFixed(1);
+        if (sync) {
+          this.stats.syncLinks += chunk.length;
+          this.stats.syncMs = +(this.stats.syncMs + linkMs).toFixed(1);
+        } else {
+          this.stats.serialLinks += chunk.length;
+          this.stats.serialMs = +(this.stats.serialMs + linkMs).toFixed(1);
+        }
         this.stats.joinCount += chunk.length;
         this.stats.joinTotalMs = +(this.stats.joinTotalMs + linkMs).toFixed(1);
         if (worst > this.stats.worstJoinMs) this.stats.worstJoinMs = +worst.toFixed(1);
@@ -720,12 +762,34 @@ export class ProgramWarmer {
     }
   }
 
-  private join(renderer: THREE.WebGLRenderer, material: THREE.Material): boolean {
+  /**
+   * `every` (the blocking serial and no-extension paths only): join EVERY program
+   * the material owns, not just the current one. A transparent DoubleSide
+   * material is drawn as two programs, BackSide then FrontSide (r160
+   * renderObject and compile() both flip `side` per pass), and compile() leaves
+   * `currentProgram` on the FrontSide one, so the BackSide link was kicked but
+   * never joined and paid 1.3 s at first draw during play (own-pennant, measured
+   * by test-program-warm --no-khr). The parallel path keeps current-only: it may
+   * only join what isReady() has proven complete.
+   */
+  private join(renderer: THREE.WebGLRenderer, material: THREE.Material, every = false): boolean {
     const program = this.programOf(renderer, material);
     if (!program) return false;
     const previous = renderer.debug.checkShaderErrors;
     renderer.debug.checkShaderErrors = true;
     try {
+      if (every) {
+        const owned = (renderer as unknown as {
+          properties?: { get(o: object): { programs?: Map<string, ProgramLike> } };
+        }).properties?.get(material)?.programs;
+        if (owned) {
+          for (const other of owned.values()) {
+            if (other === program) continue;
+            other.getUniforms?.();
+            other.getAttributes?.();
+          }
+        }
+      }
       program.getUniforms?.();
       program.getAttributes?.();
     } catch {

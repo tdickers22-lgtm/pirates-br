@@ -19,6 +19,21 @@
 //   node scripts/test-program-warm.mjs --quality low
 //   node scripts/test-program-warm.mjs --mutate          # the gate must FAIL
 //   node scripts/test-program-warm.mjs --mutate-lights   # …and so must this
+//   node scripts/test-program-warm.mjs --no-khr          # Safari's path (b3.1e)
+//   node scripts/test-program-warm.mjs --no-khr --mutate # sync warm-up off: MUST fail
+//   node scripts/test-program-warm.mjs --no-khr --write-census   # re-pin programCensus.json
+//
+// --no-khr (b3.1e) deletes KHR_parallel_shader_compile in an init script, before
+// the game exists, so the build takes the path every Safari takes: no
+// non-blocking readiness, so ProgramWarmer warms SYNCHRONOUSLY while nobody
+// plays (menu, countdown, world backlog) and not at all afterwards. The verdict
+// is then a hard count of programs linked inside a drawn frame after first
+// control (NO_KHR_BUDGET), a floor on the programs the sync path paid, and the
+// per-tier census in src/client/rendering/programCensus.json: every program that
+// census names must have been paid BEFORE control, so a variant the warm-up
+// stops reaching is a named failure rather than a hitch somebody feels later.
+// --mutate under --no-khr pins the warmer's boost to false, which switches the
+// sync path off and nothing else.
 //
 // THE SECOND THING THIS GATE COUNTS, added after the first one missed it: a
 // program that is linked TWICE because a light entered or left the scene.
@@ -68,6 +83,15 @@ const MUTATE = argv.includes('--mutate');
  */
 const MUTATE_LIGHTS = argv.includes('--mutate-lights');
 const MUTATING = MUTATE || MUTATE_LIGHTS;
+const NO_KHR = argv.includes('--no-khr');
+const WRITE_CENSUS = argv.includes('--write-census');
+const CENSUS_PATH = new globalThis.URL('../src/client/rendering/programCensus.json', import.meta.url);
+/** Programs linked inside a drawn frame after control on the no-extension path.
+ *  The target is zero; shadow depth programs are allowlisted as everywhere. */
+const NO_KHR_BUDGET = { high: 0, low: 0, balanced: 0 };
+/** The sync warm-up must have linked at least this many programs before control,
+ *  or it is not running (mutation: 0). */
+const SYNC_LINK_FLOOR = 20;
 
 const URL = (process.env.PIRATES_BR_URL ?? arg('url', 'http://127.0.0.1:3101')).replace(/\/$/, '');
 const QUALITY = arg('quality', 'high');
@@ -267,7 +291,7 @@ async function main() {
   if (!h) { console.error(`[program-gate] no game server on :${port}`); process.exit(2); }
   console.log(`[program-gate] GL: ${describeGl()}  quality=${QUALITY}  map seed ${h.mapSeed ?? 'UNPINNED'}  ${MAX_ISLANDS} islands x 2 vantage points x ${FRAMES_PER_STOP} frames`);
   if (!h.mapSeed) console.error('[program-gate] the map is UNPINNED — this gate counts programs against a fixed world; set PIRATES_BR_MAP_SEED');
-  if (MUTATE) console.log('[program-gate] MUTATION ARMED: ProgramWarmer.prepare() is a no-op from first control — this run MUST fail');
+  if (MUTATE) console.log(NO_KHR ? '[program-gate] MUTATION ARMED: the no-extension sync warm-up is off (boost pinned false) — this run MUST fail' : '[program-gate] MUTATION ARMED: ProgramWarmer.prepare() is a no-op from first control — this run MUST fail');
   if (MUTATE_LIGHTS) console.log('[program-gate] MUTATION ARMED: one extra HemisphereLight joins the scene after first control — this run MUST fail on the light-count line');
 
   const client = await ensureDevClient(`${URL}/`);
@@ -296,6 +320,19 @@ async function main() {
 
   try {
     await page.addInitScript(PROGRAM_CENSUS_SOURCE);
+    if (NO_KHR) {
+      await page.addInitScript(() => {
+        const NAME = 'KHR_parallel_shader_compile';
+        for (const C of [window.WebGL2RenderingContext, window.WebGLRenderingContext]) {
+          if (!C) continue;
+          const get = C.prototype.getExtension;
+          C.prototype.getExtension = function (name) { return name === NAME ? null : get.call(this, name); };
+          const list = C.prototype.getSupportedExtensions;
+          C.prototype.getSupportedExtensions = function () { return (list.call(this) || []).filter((n) => n !== NAME); };
+        }
+        window.__noKhr = true;
+      });
+    }
     // Armed BEFORE the game exists, because a warmer disabled at first control
     // has already paid for the whole loaded world and the two builds are then
     // indistinguishable — which is exactly how the first version of this suite
@@ -313,7 +350,12 @@ async function main() {
           get: () => (prev && prev.get ? prev.get() : game),
           set: (value) => {
             const warmer = value?.renderer?.programWarmer;
-            if (warmer) {
+            if (warmer && window.__noKhr) {
+              // Sync path off and nothing else: the boost never reaches it.
+              warmer.boosted = false;
+              warmer.setBoosted = () => {};
+              window.__mutatedWarmer = true;
+            } else if (warmer) {
               warmer.prepare = () => {};
               warmer.release = () => {};
               window.__mutatedWarmer = true;
@@ -417,7 +459,44 @@ async function main() {
     // denominator says more about how long the load was than about the warmer.
     // The floor is set at half of what this build measures.
     const warmed = summary.counters.joinsOutsideDraw;
-    if (!canWarmWithoutBlocking) {
+    if (NO_KHR && warmerStats?.parallel !== false) {
+      fail('--no-khr: KHR_parallel_shader_compile was still visible to the renderer, so this run graded the wrong path');
+    }
+    if (warmerStats?.parallel === false) {
+      // THE NO-EXTENSION PATH (b3.1e): Safari's. Paid synchronously before control, nothing after.
+      const noKhrBudget = NO_KHR_BUDGET[QUALITY] ?? 0;
+      console.log(`  no-extension warm-up: ${warmerStats.syncLinks} material programs paid synchronously in ${Math.round(warmerStats.syncMs)}ms (sync now: ${warmerStats.sync})`);
+      if (warmerStats.syncLinks < SYNC_LINK_FLOOR) {
+        fail(`the no-extension warm-up linked only ${warmerStats.syncLinks} programs before play (floor ${SYNC_LINK_FLOOR}) — the sync path is not running`);
+      } else pass(`the no-extension warm-up linked ${warmerStats.syncLinks} programs outside any draw (floor ${SYNC_LINK_FLOOR})`);
+      if (counted.length > noKhrBudget) fail(`${counted.length} programs linked inside a drawn frame during play on the no-extension path (budget ${noKhrBudget} at ${QUALITY})`);
+      else pass(`${counted.length} programs linked inside a drawn frame during play on the no-extension path (budget ${noKhrBudget})`);
+      if (warmerStats.sync) fail('the sync warm-up was still running after the tour: it must stand down once play has started and the world has arrived');
+      // THE CENSUS: every program the tier is known to reach must be paid before control.
+      // A program's identity is its full three cache key (shader type + every
+      // define and parameter, no uuid), hashed; warm joins carry no material name.
+      const { createHash } = require('node:crypto');
+      const censusKey = (e) => `${shaderTypeOf(e.cacheKey)}|${createHash('sha1').update(String(e.cacheKey)).digest('hex').slice(0, 12)}`;
+      const before = new Set(summary.all
+        .filter((e) => !String(e.phase).startsWith('play') && e.cacheKey && e.cacheKey !== '(unresolved)')
+        .map(censusKey));
+      const fs = require('node:fs');
+      let census = {};
+      try { census = JSON.parse(fs.readFileSync(CENSUS_PATH, 'utf8')); } catch { census = {}; }
+      if (WRITE_CENSUS && !MUTATING) {
+        const keys = [...before].filter((k) => !ALLOWED_SHADER_TYPES.has(k.split('|')[0])).sort();
+        census[QUALITY] = { measured: new Date().toISOString().slice(0, 10), programsBeforeControl: keys.length, keys };
+        fs.writeFileSync(CENSUS_PATH, JSON.stringify(census, null, 2) + '\n');
+        console.log(`  wrote ${keys.length} census keys for ${QUALITY} to programCensus.json`);
+      }
+      const want = census[QUALITY]?.keys ?? [];
+      if (want.length === 0) fail(`programCensus.json has no row for ${QUALITY} (run with --no-khr --write-census on a green build)`);
+      else {
+        const missing = want.filter((k) => !before.has(k));
+        if (missing.length > 0) fail(`${missing.length} of ${want.length} census programs were not paid before control on the no-extension path: ${missing.slice(0, 5).join(', ')}`);
+        else pass(`all ${want.length} census programs for ${QUALITY} were paid before control`);
+      }
+    } else if (!canWarmWithoutBlocking) {
       if (!warmerStats || warmerStats.parallel !== false) {
         fail('the shader warmer did not report whether non-blocking readiness is available');
       } else if (warmerStats.kicked !== 0 || warmerStats.joinCount !== 0 || warmerStats.forced !== 0) {
@@ -467,14 +546,14 @@ async function main() {
   }
 
   if (MUTATING) {
-    if (MUTATE && warmUnavailable) {
+    if (MUTATE && warmUnavailable && !NO_KHR) {
       console.log('\n[program-gate] MUTATION NOT APPLICABLE — this backend exposes no non-blocking readiness, so production already disables the warmer.');
       process.exit(0);
     }
     // A mutation is only proof if it reddens the line it was written for. A run
     // that fails on some other assertion has shown the suite is noisy, not that
     // it can see the defect.
-    const wanted = MUTATE_LIGHTS ? /light count/ : /linked inside a drawn frame|paid outside a draw/;
+    const wanted = MUTATE_LIGHTS ? /light count/ : /linked inside a drawn frame|paid outside a draw|no-extension warm-up linked only|census programs were not paid/;
     const onTarget = failed.filter((m) => wanted.test(m));
     if (onTarget.length > 0) {
       console.log(`\n✓ MUTATION CAUGHT — ${onTarget.length} assertion(s) red on the intended line: ${onTarget[0]}`);
