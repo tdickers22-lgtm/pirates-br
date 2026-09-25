@@ -1,5 +1,6 @@
 import { WebSocket } from 'ws';
 import { idealBrace } from '../../shared/sailing.js';
+import { anchorRaiseSeconds } from '../../shared/anchor.js';
 import { v4 as uuid } from 'uuid';
 import type {
   Crew, GameState, HullSections, InteractRefusalReason, InteractRefusedIntent, InteractRefusedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool, WreckEvent, ItemType,
@@ -672,6 +673,8 @@ export class Match {
   private readonly lastToolEquip = new Map<string, { tool: EquippableTool; at: number }>();
   /** Ship waterLevel at tick start — floodingRate is published NET of bailing. */
   private waterLevelAtTickStart = new Map<string, number>();
+  /** Hands on each ship's capstan last tick (D22: 3.2 s solo, 2.0 s with two). */
+  private capstanHands = new Map<string, number>();
   /** Axe-swing accumulation per player — resets when the target prop changes
    *  or the swing stops (progress is per-prop, not a global charge). */
   private harvestProgressByPlayer = new Map<string, { islandId: string; propId: number; t: number }>();
@@ -2459,7 +2462,9 @@ export class Match {
 
     this.updateRespawns(dt);
 
+    this.capstanHands.clear();
     for (const player of this.state.players) {
+      if (player.atCapstan && player.onShipId) this.capstanHands.set(player.onShipId, (this.capstanHands.get(player.onShipId) ?? 0) + 1);
       // POSE-01 wire bits: both are momentary and both are re-asserted later in
       // THIS tick (applyInput for humans, BotPirate for bots), so clearing here
       // is what keeps a pirate from freezing mid-aim when her input stops
@@ -3182,7 +3187,8 @@ export class Match {
         // it (the helmsman's shortcut below is NOT this — that pirate is at the
         // wheel and is animated as such).
         player.atCapstan = true;
-        ship.anchorRaiseProgress = Math.min(1, ship.anchorRaiseProgress + dt / SHIP.ANCHOR_RAISE_TIME);
+        const hands = Math.max(1, this.capstanHands.get(ship.id) ?? 1);
+        ship.anchorRaiseProgress = Math.min(1, ship.anchorRaiseProgress + dt / (anchorRaiseSeconds(hands) * hands));
         if (ship.anchorRaiseProgress >= 1) {
           // Anchor is fully raised — release the brake but keep progress at 1 so the HUD reads
           // "100% — Anchor Raised" until the player drops the anchor again. The drop path resets
