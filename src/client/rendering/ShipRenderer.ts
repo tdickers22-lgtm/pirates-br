@@ -69,6 +69,10 @@ import { createHoldWater, disposeHoldWater, updateHoldWater, type HoldWaterHandl
 /** Decal forward axis: hole groups are built facing +Z and rotated onto the
  *  hull's outward surface normal. */
 const HULL_Z_AXIS = new THREE.Vector3(0, 0, 1);
+/** b2.3c: a board-seated breach backdrop sits this far along the tube from
+ *  the board face (just behind its 0.16 m back face) with this radius. */
+const BREACH_BACKDROP_BEHIND_BOARD = 0.2;
+const BREACH_BACKDROP_BOARD_R = 0.4;
 
 /** Three quarter-turns of the helm from hard a-port to hard a-starboard. */
 /**
@@ -2802,7 +2806,7 @@ export class ShipRenderer {
     mesh.root.add(inboard);
     const backdrop = new THREE.Mesh(this.getBreachBackdropGeo(), this.getBreachBackdropMat());
     backdrop.name = 'hole-backdrop';
-    this.seatBackdrop(backdrop, normal);
+    this.seatBackdrop(backdrop, normal, point, inner, seat.onBoard);
     group.add(backdrop);
 
     // NO DECK-SIDE DECAL. It painted a fake "torn planking" disc on the INBOARD
@@ -2832,12 +2836,12 @@ export class ShipRenderer {
     point: THREE.Vector3,
     inner: THREE.Vector3,
     innerNormal: THREE.Vector3,
-  ): { hasSeat: boolean; belowSole: boolean } {
+  ): { hasSeat: boolean; belowSole: boolean; onBoard: boolean } {
     const side = point.x < 0 ? -1 : 1;
     if (Math.abs(point.z) > mesh.holdHalfLen - 0.05) {
       inner.copy(point);
       innerNormal.set(-side, 0, 0);
-      return { hasSeat: false, belowSole: false };
+      return { hasSeat: false, belowSole: false, onBoard: false };
     }
     const half = mesh.holdHalfAt(point.z);
     if (point.y >= HOLD_FLOOR_Y + 0.06) {
@@ -2850,15 +2854,15 @@ export class ShipRenderer {
       if (board && Math.abs(board.x) < half) {
         innerNormal.set(board.nx, board.ny, 0);
         inner.set(board.x + board.nx * 0.01, point.y + board.ny * 0.01, point.z);
-      } else {
-        inner.set(side * (half - 0.01), point.y, point.z);
-        innerNormal.set(-side, 0, 0);
+        return { hasSeat: true, belowSole: false, onBoard: true };
       }
-      return { hasSeat: true, belowSole: false };
+      inner.set(side * (half - 0.01), point.y, point.z);
+      innerNormal.set(-side, 0, 0);
+      return { hasSeat: true, belowSole: false, onBoard: false };
     }
     inner.set(side * Math.max(0.2, half - FLOODING.HOLE_VISUAL_RADIUS * 0.9), HOLD_FLOOR_Y + 0.004, point.z);
     innerNormal.set(0, 1, 0);
-    return { hasSeat: true, belowSole: true };
+    return { hasSeat: true, belowSole: true, onBoard: false };
   }
 
   private seatInboardPieces(
@@ -2875,8 +2879,27 @@ export class ShipRenderer {
     welling.visible = belowSole;
   }
 
-  private seatBackdrop(backdrop: THREE.Mesh, normal: THREE.Vector3) {
-    backdrop.position.copy(normal).multiplyScalar(0.05);
+  /**
+   * The sea / daylight the hold sees through the opening. Seated on the bilge
+   * board, the eye looks through the board cut into the unlit gap between the
+   * board and the lining, which rendered near-black (3,3,8) at the seat (b2.3c
+   * probe): so there the backdrop moves just behind the board's back face
+   * (0.16 m board, ~0.17 m along the tube) and widens to 0.4 m, filling the
+   * gap the cut exposes. Elsewhere it stays on the shell. Group-local (the
+   * group sits on the shell point), always facing inboard (-normal).
+   */
+  private seatBackdrop(
+    backdrop: THREE.Mesh, normal: THREE.Vector3,
+    point: THREE.Vector3, inner: THREE.Vector3, onBoard: boolean,
+  ) {
+    if (onBoard) {
+      const out = this.tempHoleNormal.copy(point).sub(inner).normalize();
+      backdrop.position.copy(inner).sub(point).addScaledVector(out, BREACH_BACKDROP_BEHIND_BOARD);
+      backdrop.scale.setScalar(BREACH_BACKDROP_BOARD_R / (FLOODING.HOLE_VISUAL_RADIUS * 1.04));
+    } else {
+      backdrop.position.copy(normal).multiplyScalar(0.05);
+      backdrop.scale.setScalar(1);
+    }
     backdrop.quaternion.setFromUnitVectors(HULL_Z_AXIS, this.tempHoleNormal.copy(normal).negate());
   }
 
@@ -3005,7 +3028,7 @@ void main() {
     vis.hasSeat = seat.hasSeat;
     vis.belowSole = seat.belowSole;
     this.seatInboardPieces(vis.inboard, vis.ring, vis.welling, vis.inner, vis.innerNormal, seat.belowSole);
-    this.seatBackdrop(vis.backdrop, normal);
+    this.seatBackdrop(vis.backdrop, normal, point, vis.inner, seat.onBoard);
     if (vis.patch) {
       // The plank was nailed over the OLD wound. A recycled slot is a fresh
       // hole by definition, so the carpentry goes with it.
