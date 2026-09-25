@@ -1,8 +1,10 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 import { auditAssetMaterial } from './materialAudit.js';
 import { collapseChunks } from './AssetMaterialCollapse.js';
 import { modelUrl, withMeshopt } from './modelManifest.js';
+import { loadQualityPreference, parseRenderQuality } from '../rendering/QualityPreference.js';
 import { trackUpload, geometryUploaded, releaseGeometryCpu, cpuCopyReleaseEnabled } from '../rendering/CpuCopyRelease.js';
 
 /**
@@ -233,6 +235,106 @@ function cpuReleasableKey(key: string): boolean {
 /** Released GLBs refetched + re-parsed at once at the next match (b1-device-03). */
 export const REHYDRATE_CONCURRENCY = 3;
 
+// ── KTX2 TEXTURES (b3.1c; performance-02) ──────────────────────────────────
+// scripts/pack-models.mjs ships every GLB texture as KHR_texture_basisu (ETC1S
+// colour/ORM, UASTC+zstd normals, full mip chain in the file). ONE KTX2Loader
+// serves every GLTFLoader (a second one would spin a second transcoder worker
+// pool). Its transcoder (public/basis/, served with .br/.gz siblings) is only
+// fetched by the first .load(), i.e. by the first GLB that carries a KTX2
+// image; no boot-set GLB does (test-texture-budget), so the ~220 KB brotli
+// transcoder is paid in the world stage, never before the menu (D27).
+
+/** Top-mip ceilings on the capped tiers (low quality, phones, iPad): family
+ *  maps upload at most 512 px, the hero first-person viewmodel at most 1024.
+ *  test-texture-budget reads these two numbers out of this file. */
+export const TEXTURE_TOP_MIP_CAP = { family: 512, heroViewmodel: 1024 } as const;
+/** Assets drawn as the held first-person viewmodel (the 1024 cap applies). */
+export const HERO_VIEWMODEL_TEXTURE_ASSETS: ReadonlySet<string> = new Set<string>(['cutlass', 'flintlock', 'blunderbuss', 'eye_of_reach', 'flintknock', 'tool_bucket', 'tool_hammer', 'tool_planks']);
+
+/** The subset of WebGLRenderer KTX2Loader.detectSupport reads. */
+export type TextureSupportSource = { extensions: { has(name: string): boolean }; capabilities: { isWebGL2: boolean } };
+
+let ktx2Loader: KTX2Loader | null = null;
+let ktx2Support: TextureSupportSource | null = null;
+
+/** The game's renderer, when the caller has one: detectSupport reads its
+ *  context instead of a throwaway probe context. Call before the world set. */
+export function attachTextureRenderer(renderer: TextureSupportSource): void {
+  ktx2Support = renderer;
+  ktx2Loader?.detectSupport(renderer as unknown as THREE.WebGLRenderer);
+}
+
+/** Compressed-format support without the renderer: one probe context, read
+ *  once and released (format support is a property of the device/browser). */
+function probeTextureSupport(): TextureSupportSource {
+  const exts = new Set<string>();
+  let isWebGL2 = false;
+  try {
+    const canvas = document.createElement('canvas');
+    const gl2 = canvas.getContext('webgl2');
+    const gl = gl2 ?? canvas.getContext('webgl');
+    isWebGL2 = gl2 !== null;
+    for (const e of gl?.getSupportedExtensions() ?? []) exts.add(e);
+    gl?.getExtension('WEBGL_lose_context')?.loseContext();
+  } catch { /* no GL: KTX2Loader falls back to RGBA32, which every GL accepts */ }
+  return { extensions: { has: (n: string) => exts.has(n) }, capabilities: { isWebGL2 } };
+}
+
+/** detectSupport runs at the first .load(), not at construction: the library
+ *  singleton is built at import (menu time) and must not open a probe context
+ *  or touch the transcoder before a KTX2 image actually arrives. */
+class LazyKtx2Loader extends KTX2Loader {
+  private detected = false;
+  override load(...args: Parameters<KTX2Loader['load']>): ReturnType<KTX2Loader['load']> {
+    if (!this.detected) {
+      this.detected = true;
+      ktx2Support ??= probeTextureSupport();
+      this.detectSupport(ktx2Support as unknown as THREE.WebGLRenderer);
+    }
+    return super.load(...args);
+  }
+}
+
+/** The shared KTX2Loader (created on first use, transcoder path /basis/). */
+export function sharedKtx2Loader(): KTX2Loader {
+  ktx2Loader ??= new LazyKtx2Loader().setTranscoderPath('/basis/');
+  return ktx2Loader;
+}
+
+/** Wire the shared KTX2 decoder into a GLTFLoader (idempotent); returns it.
+ *  Every loader that fetches a packed GLB needs this beside withMeshopt(). */
+export function withKtx2<T extends GLTFLoader>(loader: T): T {
+  loader.setKTX2Loader(sharedKtx2Loader());
+  return loader;
+}
+
+let cappedTier: boolean | null = null;
+/** Low quality, phone or iPad: textures upload without their top mip(s). */
+export function textureTierCapped(): boolean {
+  if (cappedTier !== null) return cappedTier;
+  let urlQuality: string | null = null;
+  try { urlQuality = new URLSearchParams(globalThis.location?.search ?? '').get('quality'); } catch { urlQuality = null; }
+  const quality = parseRenderQuality(urlQuality) ?? loadQualityPreference();
+  cappedTier = storyPhoneProfile() || quality === 'low';
+  return cappedTier;
+}
+
+/** Drop top mips of a compressed (KTX2) texture until it fits `cap`. Returns
+ *  the number of levels dropped. Must run before the first upload. */
+export function dropTopMips(tex: THREE.Texture, cap: number): number {
+  const c = tex as THREE.CompressedTexture;
+  if (!c.isCompressedTexture || !Array.isArray(c.mipmaps)) return 0;
+  const mips = c.mipmaps as { width: number; height: number }[];
+  let dropped = 0;
+  while (mips.length > 1 && Math.max(mips[0].width, mips[0].height) > cap) { mips.shift(); dropped += 1; }
+  if (dropped) {
+    const img = c.image as { width: number; height: number };
+    img.width = mips[0].width; img.height = mips[0].height;
+    c.needsUpdate = true;
+  }
+  return dropped;
+}
+
 export class AssetLibrary {
   private scenes = new Map<AssetKey, THREE.Group>();
   /** cloneTinted copies, one per (template material uuid, colour). */
@@ -270,7 +372,7 @@ export class AssetLibrary {
   private readonly ensured = new Map<AssetName, Promise<void>>();
   private readonly lazyQueue: { name: AssetName; run: () => void }[] = [];
   private lazyActive = 0;
-  private readonly loader = withMeshopt(new GLTFLoader());
+  private readonly loader = withKtx2(withMeshopt(new GLTFLoader()));
   private done = 0;
 
   /**
@@ -423,6 +525,9 @@ export class AssetLibrary {
   private async loadOne(name: AssetName, key: AssetKey): Promise<void> {
     const gltf = await this.loader.loadAsync(modelUrl(key));
     const root = gltf.scene;
+    const mipCap = textureTierCapped()
+      ? (HERO_VIEWMODEL_TEXTURE_ASSETS.has(name) ? TEXTURE_TOP_MIP_CAP.heroViewmodel : TEXTURE_TOP_MIP_CAP.family)
+      : Infinity;
     root.traverse((o) => {
       if (o instanceof THREE.Mesh) {
         o.castShadow = true;
@@ -438,7 +543,10 @@ export class AssetLibrary {
           const record = m as unknown as Record<string, unknown>;
           for (const key of Object.keys(record)) {
             const value = record[key] as { isTexture?: boolean } | null;
-            if (value && value.isTexture) this.sharedResources.add(value);
+            if (value && value.isTexture) {
+              this.sharedResources.add(value);
+              if (mipCap !== Infinity) dropTopMips(value as unknown as THREE.Texture, mipCap);
+            }
           }
           if (m instanceof THREE.MeshStandardMaterial) {
             // The GLB's own normals decide (assets-06). The exporter
