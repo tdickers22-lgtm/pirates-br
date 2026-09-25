@@ -30,6 +30,8 @@ const THREE = await import('three');
 const { ShipRenderer } = await import('../src/client/rendering/ShipRenderer.ts');
 const { SHIP_STATS, FLOODING } = await import('../src/shared/constants/index.ts');
 const { openFirstDrawBudgetForSettle } = await import('../src/client/rendering/FirstDrawBudget.ts');
+const breach = await import('../src/client/rendering/ship/breach.ts');
+const { getHullProfile, hullSurfacePointAt } = await import('../src/shared/hull.ts');
 
 let failures = 0, checks = 0;
 function expect(label, ok, detail = '') {
@@ -283,7 +285,9 @@ const R = FLOODING.HOLE_VISUAL_RADIUS;
     const ab = new THREE.Vector3(uE[i].x - c.x, uE[i].y - c.y, uE[i].z - c.z);
     const ap = new THREE.Vector3(p.x - c.x, p.y - c.y, p.z - c.z);
     const t = Math.max(0, Math.min(1, ap.dot(ab) / Math.max(ab.lengthSq(), 1e-6)));
-    return ap.distanceTo(ab.multiplyScalar(t)) < c.w;
+    // b2.3d: the torn outline the shader evaluates, not a circle.
+    const sh = mesh.hullHoleUniform.shape.value[i];
+    return breach.breachCuts(ap.sub(ab.multiplyScalar(t)), new THREE.Vector3(sh.x, sh.y, sh.z), sh.w, c.w);
   });
   const tri2 = new THREE.Triangle();
   const q = new THREE.Vector3(), p0 = new THREE.Vector3(), p1 = new THREE.Vector3(), p2 = new THREE.Vector3();
@@ -350,6 +354,160 @@ const R = FLOODING.HOLE_VISUAL_RADIUS;
     !!at && at.distanceTo(vA.inner) < 0.12 && Math.abs(at.x) < Math.abs(vA.point.x) - 0.1);
   expect('a patched hole no longer cuts the lining', !cut(liningA.p));
   expect('the inboard ring goes when the hole is patched', !vA?.inboard?.visible);
+}
+
+// ── 6. BREACH GEOMETRY v2 (b2.3d, ships-06, vm:assets:2) ────────────────────
+// Every hole was the same drilled disc (sphere discard of one radius, a flat
+// ring, seven 4-sided cones) and the repair a cartoon X. Now: a seeded torn
+// outline stretched along the strake, evaluated by the discard shader; a
+// 0.08 m broken-plank wall; 5-9 plank ends bent inboard; splinters inboard; a
+// strake-aligned patch of 2-3 planks with nails. RED ON HEAD: breach.ts absent.
+{
+  // (a) outline variation and stretch over many ids.
+  let minCv = Infinity, minCvFull = Infinity, minRatio = Infinity, sumRatio = 0;
+  for (let id = 1; id <= 60; id++) {
+    const seed = breach.breachSeed(id);
+    const jag = [], full = [];
+    for (let k = 0; k < 360; k++) {
+      const th = (k / 360) * Math.PI * 2;
+      jag.push(breach.breachJag(th, seed));
+      full.push(breach.breachRadiusAt(th, seed, 0.24));
+    }
+    const cv = (a) => { const m = a.reduce((x, y) => x + y, 0) / a.length; return Math.sqrt(a.reduce((x, y) => x + (y - m) ** 2, 0) / a.length) / m; };
+    minCv = Math.min(minCv, cv(jag));
+    minCvFull = Math.min(minCvFull, cv(full));
+    const e = breach.breachExtent(seed, 0.24);
+    minRatio = Math.min(minRatio, e.along / e.across);
+    sumRatio += e.along / e.across;
+  }
+  console.log(`  outline over 60 ids: min CV jag ${minCv.toFixed(3)}, min CV full ${minCvFull.toFixed(3)}, along/across min ${minRatio.toFixed(2)} mean ${(sumRatio / 60).toFixed(2)}`);
+  expect('torn outline: radius CV >= 0.15 for every id (jag alone, before the stretch)', minCv >= 0.15, `min ${minCv.toFixed(3)}`);
+  expect('torn outline: stretched along the strake (along/across mean >= 1.3, every id >= 1.1)', minRatio >= 1.1 && sumRatio / 60 >= 1.3, `min ${minRatio.toFixed(2)} mean ${(sumRatio / 60).toFixed(2)}`);
+
+  // (b) the GLSL twin is the same function (parsed and evaluated here).
+  const G = breach.BREACH_GLSL;
+  const jLine = G.match(/float j = ([^;]+);/)?.[1];
+  const tLine = G.match(/j \+= ([^;]+);/)?.[1];
+  const minV = Number(G.match(/j = max\(j, ([0-9.]+)\)/)?.[1]);
+  let worst = Infinity;
+  if (jLine && tLine) {
+    const js = (e) => e.replace(/\bcos\(/g, 'Math.cos(').replace(/\babs\(/g, 'Math.abs(');
+    const glslJag = new Function('th', 's', 'fract', `let j = ${js(jLine)}; j += ${js(tLine)}; return Math.max(j, ${minV});`);
+    const fr = (v) => v - Math.floor(v);
+    worst = 0;
+    for (let k = 0; k < 400; k++) {
+      const th = -Math.PI + (k / 400) * Math.PI * 2, sd = breach.breachSeed(k + 3);
+      worst = Math.max(worst, Math.abs(glslJag(th, sd, fr) - breach.breachJag(th, sd)));
+    }
+  }
+  expect('the shader outline == the mesh outline (GLSL parsed, 400 samples, |diff| < 1e-5)', worst < 1e-5, `max diff ${worst}`);
+
+  // (c) three sizes on a live hull; uniforms carry the size radius and the seed.
+  const Lh = stats.length;
+  const holes = [1, 2, 3].map((size, i) => ({ id: 40 + i, x: 1, y: 0.3, z: Lh * (-0.2 + 0.2 * i), patched: false, size }));
+  const ship = fixtureShip(type, holes);
+  ship.id = 'holevis-breach2';
+  sr.update([ship], [], 25, 1 / 60, 0, cam);
+  const mesh = sr.shipMeshes.get(ship.id);
+  const vs = holes.map((h) => mesh.holeVis.get(h.id));
+  const Rs = vs.map((v) => v?.R ?? 0);
+  expect('3 sizes: the drawn radius follows HOLE_SIZE_RADIUS', Rs.every((r, i) => Math.abs(r - FLOODING.HOLE_SIZE_RADIUS[i]) < 1e-9), `R ${Rs.join(', ')}`);
+  const uh = mesh.hullHoleUniform.value, us = mesh.hullHoleUniform.shape.value;
+  expect('the discard slots carry each size radius and the id seed',
+    [0, 1, 2].every((i) => Math.abs(uh[i].w - Rs[i]) < 1e-9 && Math.abs(us[i].w - breach.breachSeed(holes[i].id)) < 1e-9));
+
+  // (d) deterministic by id across two builds.
+  const sr2 = new ShipRenderer();
+  sr2.init(new THREE.Scene(), 'high');
+  const ship2 = fixtureShip(type, holes.map((h) => ({ ...h })));
+  ship2.id = 'holevis-breach2';
+  sr2.update([ship2], [], 25, 1 / 60, 0, cam);
+  const v2 = sr2.shipMeshes.get(ship2.id).holeVis.get(41);
+  const pa = vs[1].edgeGeo.attributes.position.array, pb = v2.edgeGeo.attributes.position.array;
+  let same = pa.length === pb.length;
+  for (let i = 0; same && i < pa.length; i++) same = pa[i] === pb[i];
+  const other = vs[0].edgeGeo.attributes.position.array;
+  expect('deterministic by hole id: two builds tear hole 41 identically', same);
+  expect('different ids tear differently', other.length !== pa.length || other.some((v, i) => v !== pa[i]));
+
+  // (e) the rim wall: vertices ON the outline span >= 0.06 m of depth.
+  const ed = breach.buildBreachEdgeGeometry(vs[1].seed, vs[1].R);
+  const pos = ed.geometry.attributes.position;
+  let zMin = Infinity, zMax = -Infinity, onOutline = 0;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), y = pos.getY(i);
+    const r = Math.hypot(x, y);
+    if (Math.abs(r - breach.breachRadiusAt(Math.atan2(y, x), vs[1].seed, vs[1].R)) < 1e-4) { onOutline += 1; zMin = Math.min(zMin, pos.getZ(i)); zMax = Math.max(zMax, pos.getZ(i)); }
+  }
+  console.log(`  rim: ${onOutline} vertices on the outline, depth ${(zMax - zMin).toFixed(3)} m; ${ed.info.plankEnds.length} plank ends (bend ${ed.info.plankEnds.map((e) => e.bendDeg.toFixed(0)).join('/')} deg), ${ed.info.splinters} splinters`);
+  expect('rim: the torn wall is >= 0.06 m thick (closes the zero-thickness shell)', onOutline >= 48 && zMax - zMin >= 0.06, `${(zMax - zMin).toFixed(3)} m`);
+  const ends = ed.info.plankEnds;
+  const bent = ends.every((e) => {
+    const d = e.tip.clone().sub(e.root);
+    const deg = THREE.MathUtils.radToDeg(Math.asin(-d.z / d.length()));
+    return deg >= 19.9 && deg <= 50.1;
+  });
+  expect('5-9 broken plank ends, every tip bent 20-50 deg INBOARD of the face', ends.length >= 5 && ends.length <= 9 && bent);
+  let inboardVerts = 0;
+  for (let i = 0; i < pos.count; i++) if (pos.getZ(i) < -0.06) inboardVerts += 1;
+  expect('splinters stand off the inboard face (>= 6, geometry below -0.06 m)', ed.info.splinters >= 6 && inboardVerts > 0);
+  ed.geometry.dispose();
+
+  // (f) mesh outline == shader cut: points just inside the drawn wall are cut
+  // by the uniforms, points just outside are not (frame + sign convention).
+  const edge = vs[1].decal.children[0];
+  mesh.root.updateMatrixWorld(true);
+  const toLocal = new THREE.Matrix4().copy(mesh.root.matrixWorld).invert().multiply(edge.matrixWorld);
+  const sh = us[1];
+  const T = new THREE.Vector3(sh.x, sh.y, sh.z);
+  let inOk = 0, outOk = 0, n = 0;
+  const epos = vs[1].edgeGeo.attributes.position;
+  for (let i = 0; i < epos.count && n < 200; i++) {
+    const x = epos.getX(i), y = epos.getY(i), z = epos.getZ(i);
+    if (z < 0 || Math.abs(Math.hypot(x, y) - breach.breachRadiusAt(Math.atan2(y, x), sh.w, uh[1].w)) > 1e-4) continue;
+    n += 1;
+    const pIn = new THREE.Vector3(x * 0.95, y * 0.95, 0).applyMatrix4(toLocal).sub(vs[1].point);
+    const pOut = new THREE.Vector3(x * 1.05, y * 1.05, 0).applyMatrix4(toLocal).sub(vs[1].point);
+    if (breach.breachCuts(pIn, T, sh.w, uh[1].w)) inOk += 1;
+    if (!breach.breachCuts(pOut, T, sh.w, uh[1].w)) outOk += 1;
+  }
+  expect(`the drawn torn edge IS the shader cut (${inOk}/${n} inside cut, ${outOk}/${n} outside kept)`, n >= 40 && inOk === n && outOk === n);
+
+  // (g) one draw per family; program key scheme unchanged.
+  const meshCount = (o) => { let c = 0; o?.traverse((x) => { if (x.isMesh) c += 1; }); return c; };
+  expect('1 draw per hole family: torn edge 1, inboard ring 1', meshCount(vs[1].decal) === 1 && meshCount(vs[1].ring) === 1,
+    `edge ${meshCount(vs[1].decal)}, ring ${meshCount(vs[1].ring)}`);
+  let hullKey = '';
+  mesh.detailRoot.traverse((o) => { if (o.isMesh && o.material?.name === 'ship-hull-shell') hullKey = o.material.customProgramCacheKey(); });
+  expect(`program cache key scheme kept ('${hullKey}': no per-hole or per-size program)`,
+    hullKey.startsWith(`hull-hole-discard-${FLOODING.MAX_HOLES_PER_SHIP}|`) && !/\d{2,}\|/.test(hullKey.slice(20)) && vs.every((v) => v.decal.children[0].material === vs[0].decal.children[0].material));
+
+  // (h) the patch: 2-3 planks along the strake tangent measured independently.
+  holes.forEach((h) => { h.patched = true; });
+  sr.update([ship], [], 25.02, 1 / 60, 0, cam);
+  mesh.root.updateMatrixWorld(true);
+  const profile = getHullProfile(type);
+  const rootInv = new THREE.Matrix4().copy(mesh.root.matrixWorld).invert();
+  holes.forEach((h, i) => {
+    const vis = vs[i];
+    let planks = null, nails = null;
+    vis.patch?.traverse((o) => { if (o.name === 'hole-patch-planks') planks = o; if (o.name === 'hole-patch-nails') nails = o; });
+    const m = new THREE.Matrix4().copy(rootInv).multiply(planks?.matrixWorld ?? new THREE.Matrix4());
+    const axis = new THREE.Vector3().setFromMatrixColumn(m, 0).normalize();
+    const a = hullSurfacePointAt(profile, vis.point.z - 0.3, vis.point.y), b = hullSurfacePointAt(profile, vis.point.z + 0.3, vis.point.y);
+    const ref = new THREE.Vector3(Math.sign(vis.point.x) * (b.x - a.x), 0, 0.6).normalize();
+    const deg = THREE.MathUtils.radToDeg(Math.acos(Math.min(1, Math.abs(axis.dot(ref)))));
+    planks?.geometry.computeBoundingBox();
+    const bb = planks?.geometry.boundingBox;
+    const boxes = (planks?.geometry.index?.count ?? 0) / 36;
+    const expected = h.size >= 2 ? 3 : 2;
+    console.log(`  patch size ${h.size}: ${boxes} planks, axis ${deg.toFixed(2)} deg off the strake, ${bb ? (bb.max.x - bb.min.x).toFixed(2) : '-'} x ${bb ? (bb.max.y - bb.min.y).toFixed(2) : '-'} m, ${nails ? nails.geometry.index.count / 72 : 0} nails`);
+    expect(`size ${h.size} patch: ${expected} planks laid along the strake (axis within 5 deg), nails at the ends, covers the wound`,
+      !!planks && !!nails && boxes === expected && deg <= 5
+        && bb.max.x - bb.min.x >= breach.breachExtent(vis.seed, vis.R).along * 2 + 0.1
+        && bb.max.x - bb.min.x > bb.max.y - bb.min.y
+        && nails.geometry.index.count / 72 >= expected * 4);
+  });
 }
 
 console.log(`\n${checks} checks, ${failures} failed`);
