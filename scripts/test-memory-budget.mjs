@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// RESIDENT MEMORY BUDGET — phone and iPad rows (b1.7b, critique gap 9).
+// RESIDENT MEMORY BUDGET — phone and iPad rows (b1.7b, critique gap 9), desktop low row (b3.1b).
 //
 // An iPhone does not slow a tab that holds too much; it kills it and reloads
 // the page, mid-match. SwiftShader cannot see that, and neither can a Mac. What
@@ -42,7 +42,12 @@ const MUTATE = process.argv.includes('--mutate') || process.env.PIRATES_BR_MUTAT
  *  The mutation needs the dev server (it imports the census module by source path). */
 const PROD = process.argv.includes('--prod') && !MUTATE;
 const PROD_DIR = '/tmp/pbr-memory-dist';
-const PROFILES = (process.env.PIRATES_MEMORY_PROFILES ?? (MUTATE ? 'phone' : 'phone,ipad')).split(',');
+const PROFILES = (process.env.PIRATES_MEMORY_PROFILES ?? (MUTATE ? 'phone' : 'phone,ipad,desktopLow')).split(',');
+/** b3.1b: an Air-class desktop pinned to the low tier at the harness's 960x540 @1 window (no
+ *  device emulation: desktop UA, fine pointer). Graded against MEMORY_BUDGETS.desktopLow. */
+const DESKTOP_PROFILES = {
+  desktopLow: { label: 'desktop 960x540 @1, ?quality=low', query: '&quality=low', quality: 'low', viewport: { width: 960, height: 540 } },
+};
 if ([SERVER_PORT, new URL(CLIENT_URL).port].some((p) => ['3000', '8090', '8080'].includes(p))) {
   throw new Error('test-memory-budget never runs on 3000/8090 (the owner plays there) or 8080');
 }
@@ -94,22 +99,27 @@ const TOUR = async ([tourMs]) => {
 };
 
 async function censusFor(browser, id) {
-  const profile = DEVICE_PROFILES[id];
+  const desktop = DESKTOP_PROFILES[id];
+  const profile = desktop ?? DEVICE_PROFILES[id];
   const budget = MEMORY_BUDGETS[id];
-  const context = await newDeviceContext(browser, profile);
+  if (!profile || !budget) throw new Error(`no profile/budget row for ${id}`);
+  const context = desktop
+    ? await browser.newContext({ viewport: desktop.viewport, deviceScaleFactor: 1 })
+    : await newDeviceContext(browser, profile);
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   try {
     console.log(`\n  [${id}] ${profile.label}${MUTATE ? '  [MUTATED: every story scene at LOD0 twice]' : ''}`);
-    await page.goto(`${CLIENT_URL}/?debug&fps=uncapped&server=${SERVER_PORT}`, { waitUntil: 'domcontentloaded' });
+    await page.goto(`${CLIENT_URL}/?debug&fps=uncapped&server=${SERVER_PORT}${desktop?.query ?? ''}`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#menu-solo-btn', { timeout: 60_000 });
     await page.click('#menu-solo-btn', { noWaitAfter: true });
     await page.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', null, { timeout: 240_000 });
     await page.waitForTimeout(8_000);
     await page.evaluate(() => window.__piratesBR.setBotPeace?.(true));
     const v = await page.evaluate(READ_DEVICE_VERDICT);
-    expect(`[${id}] session runs the mobile verdict (${DEVICE_EXPECTED_VERDICT.quality}/${DEVICE_EXPECTED_VERDICT.reason})`,
+    if (desktop) expect(`[${id}] session runs the ${desktop.quality} tier`, v.quality === desktop.quality, `got ${v.quality} (${v.reason})`);
+    else expect(`[${id}] session runs the mobile verdict (${DEVICE_EXPECTED_VERDICT.quality}/${DEVICE_EXPECTED_VERDICT.reason})`,
       v.quality === DEVICE_EXPECTED_VERDICT.quality && v.reason === DEVICE_EXPECTED_VERDICT.reason, `got ${v.quality} (${v.reason})`);
     const tour = await page.evaluate(TOUR, [TOUR_MS]);
     console.log(`      tour: ${tour.visited}/${tour.islands} islands in ${(tour.ms / 1000).toFixed(1)} s`);
@@ -159,7 +169,7 @@ async function censusFor(browser, id) {
 }
 
 async function main() {
-  console.log(`Resident memory budget (phone/iPad) — GL: ${describeGl()}`);
+  console.log(`Resident memory budget (${PROFILES.join('/')}) — GL: ${describeGl()}`);
   const started = [];
   let browser;
   try {
