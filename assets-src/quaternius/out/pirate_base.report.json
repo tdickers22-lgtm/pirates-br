@@ -13,6 +13,17 @@
     "height": 1.7583991009742022,
     "sole": -0.00815102644264698
    },
+   "baseColor": {
+    "cheekRGB": [
+     0.6667,
+     0.464,
+     0.3212
+    ],
+    "cheekSamples": 40,
+    "kit": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Female_Dark_BaseColor.png",
+    "maskTexels": 24917,
+    "recoloured": "assets-src/quaternius/out/T_body_female_BaseColor.png"
+   },
    "before": {
     "chin": 1.538089632987976,
     "crown": 1.7666435241699219,
@@ -84,6 +95,7 @@
     "upperarm_l",
     "upperarm_r"
    ],
+   "browIslands": 2,
    "defaultHair": [
     "hair_buns"
    ],
@@ -100,8 +112,8 @@
    "leafBonesRemoved": 12,
    "lids": {
     "bodyVerts": {
-     "l": 30,
-     "r": 30
+     "l": 29,
+     "r": 29
     },
     "eyeRadius": {
      "l": 0.0202,
@@ -116,8 +128,8 @@
      "upperMarginDeg": 8.4
     },
     "lashVerts": {
-     "l": 219,
-     "r": 219
+     "l": 239,
+     "r": 239
     },
     "r": {
      "closeDeg": 47.2,
@@ -152,6 +164,17 @@
     "headRatio": 6.751161683744631,
     "height": 1.7592986160889268,
     "sole": -0.009002619422972202
+   },
+   "baseColor": {
+    "cheekRGB": [
+     0.6623,
+     0.4512,
+     0.3146
+    ],
+    "cheekSamples": 24,
+    "kit": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Male_Dark.png",
+    "maskTexels": 23421,
+    "recoloured": "assets-src/quaternius/out/T_body_male_BaseColor.png"
    },
    "before": {
     "chin": 1.5765712261199951,
@@ -224,6 +247,7 @@
     "upperarm_l",
     "upperarm_r"
    ],
+   "browIslands": 2,
    "defaultHair": [
     "hair_beard",
     "hair_simpleparted"
@@ -242,8 +266,8 @@
    "leafBonesRemoved": 12,
    "lids": {
     "bodyVerts": {
-     "l": 28,
-     "r": 28
+     "l": 25,
+     "r": 25
     },
     "eyeRadius": {
      "l": 0.0184,
@@ -258,8 +282,8 @@
      "upperMarginDeg": 9.2
     },
     "lashVerts": {
-     "l": 172,
-     "r": 172
+     "l": 74,
+     "r": 74
     },
     "r": {
      "closeDeg": 50.49,
@@ -298,6 +322,17 @@
     "headRatio": 6.751644614828652,
     "height": 1.760325905866921,
     "sole": -0.009963271208107471
+   },
+   "baseColor": {
+    "cheekRGB": [
+     0.6612,
+     0.4473,
+     0.312
+    ],
+    "cheekSamples": 32,
+    "kit": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Male_Dark.png",
+    "maskTexels": 25156,
+    "recoloured": "assets-src/quaternius/out/T_body_stout_BaseColor.png"
    },
    "before": {
     "chin": 1.5614628791809082,
@@ -370,6 +405,7 @@
     "upperarm_l",
     "upperarm_r"
    ],
+   "browIslands": 2,
    "defaultHair": [
     "hair_beard",
     "hair_buzzed"
@@ -387,8 +423,8 @@
    "leafBonesRemoved": 12,
    "lids": {
     "bodyVerts": {
-     "l": 28,
-     "r": 28
+     "l": 25,
+     "r": 25
     },
     "eyeRadius": {
      "l": 0.0184,
@@ -403,8 +439,8 @@
      "upperMarginDeg": 9.2
     },
     "lashVerts": {
-     "l": 172,
-     "r": 172
+     "l": 74,
+     "r": 74
     },
     "r": {
      "closeDeg": 40.46,
@@ -498,17 +534,17 @@
    "normal": "assets-src/quaternius/ubc/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/T_Hair_2_Normal.png"
   },
   "MI_body_female": {
-   "a": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Female_Dark_BaseColor.png",
+   "a": "assets-src/quaternius/out/T_body_female_BaseColor.png",
    "normal": "assets-src/quaternius/out/T_body_female_Normal.png",
    "orm": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Female_Roughness.png"
   },
   "MI_body_male": {
-   "a": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Male_Dark.png",
+   "a": "assets-src/quaternius/out/T_body_male_BaseColor.png",
    "normal": "assets-src/quaternius/out/T_body_male_Normal.png",
    "orm": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Male_Roughness.png"
   },
   "MI_body_stout": {
-   "a": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Male_Dark.png",
+   "a": "assets-src/quaternius/out/T_body_stout_BaseColor.png",
    "normal": "assets-src/quaternius/out/T_body_stout_Normal.png",
    "orm": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Male_Roughness.png"
   }

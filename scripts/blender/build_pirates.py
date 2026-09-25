@@ -201,8 +201,15 @@ def main():
             pb.rotation_euler.x = -math.radians(male.data.bones[f"lid_upper_{s}"]["closeDeg"])
         bpy.context.view_layer.update()
         render(os.path.join(SHEET, f"face-1m-{tag}-lids-closed.png"))
+        # R1 re-review F5: the left eye and brow in macro (1 m, 200 mm), closed then open: a closing lid must not
+        # tear the brow (64788b33 folded a wedge of each brow down behind the skin)
+        el = male.matrix_world @ male.data.bones["eye_l"].head_local
+        camera((el.x, el.y - 1.0, el.z + 0.02), (el.x, el.y, el.z + 0.012), lens=200)
+        render(os.path.join(SHEET, f"eye-macro-{tag}-lids-closed.png"))
         for s in "lr":
             male.pose.bones[f"lid_upper_{s}"].rotation_euler = (0, 0, 0)
+        bpy.context.view_layer.update()
+        render(os.path.join(SHEET, f"eye-macro-{tag}.png"))
         male.rotation_euler.z = 0
     setup_render(False)
     for x, b in zip((-2.0, 0.0, 2.0), ("female", "male", "stout")):   # R1 obs: >= 2.0 m so T-pose arms never overlap

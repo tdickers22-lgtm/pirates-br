@@ -348,7 +348,7 @@ def stoutify(arm, body):
     _move(body, acc, field)
 
 
-def smooth_abs(arm, body, amount, iters):
+def smooth_abs(arm, body, amount, iters, shoulders=0.0):
     """R1 F1/F2: the kit SCULPTS the 8-pack and pec lines into the trunk geometry (the normal map only
     sharpens them), so flattening the map alone left them readable. Taubin smoothing (lambda/mu, no volume
     loss) over welded positions, weighted by trunk share x front-of-spine x ``amount``: the stout gets a
@@ -368,6 +368,7 @@ def smooth_abs(arm, body, amount, iters):
     y_spine = _jw(arm, "spine_02").y
     z_lo, z_hi = _jw(arm, "pelvis").z, _jw(arm, "spine_03").z + 0.12
     trunk = ("pelvis", "spine_01", "spine_02", "spine_03")
+    ua = {s: _jw(arm, f"upperarm_{s}") for s in "lr"}
     f = {}
     for k, e in acc.items():
         tot = sum(e[1].values()) or 1.0
@@ -375,6 +376,10 @@ def smooth_abs(arm, body, amount, iters):
         front = _smooth(0.0, 0.05, y_spine - k[1])
         band = _smooth(z_lo - 0.02, z_lo + 0.06, k[2]) * (1 - _smooth(z_hi - 0.04, z_hi, k[2]))
         f[k] = amount * t * front * band
+        if shoulders > 0:     # R1 re-review F2: light deltoid/pec cap relief smooth (male)
+            sh = sum(e[1].get(g, 0) for g in ("upperarm_l", "upperarm_r", "clavicle_l", "clavicle_r")) / tot
+            near = 1 - _smooth(0.05, 0.11, min((Vector(k) - ua[s]).length for s in "lr"))
+            f[k] = max(f[k], shoulders * sh * near)
     pos = {k: Vector(k) for k in keys}
     for it in range(iters * 2):
         lam = 0.5 if it % 2 == 0 else -0.53
@@ -425,7 +430,10 @@ def add_lid_bones(arm, body, eyes, brows, report):
         shell = 1 - _smooth(r + 0.004, r + 0.011, d.length)
         corner = 1 - _smooth(0.6 * r, 1.05 * r, abs(d.x))
         up = _smooth(0.0, 4.0, a) * (1 - _smooth(70.0, 110.0, a))
-        return shell * corner * up
+        # R1 re-review F5: fade to 0 at the lid crease (r + 3 mm above the eye centre, below the brow ridge),
+        # or closing the lid drags the brow-ridge skin down with it (64788b33: skin moved 6.3 mm above r + 4 mm)
+        crease = 1 - _smooth(r - 0.003, r + 0.003, d.z)
+        return shell * corner * up * crease
 
     gi = {g.index: g.name for g in body.vertex_groups}
     groups = {s: body.vertex_groups.new(name=f"lid_upper_{s}") for s in "lr"}
@@ -444,27 +452,53 @@ def add_lid_bones(arm, body, eyes, brows, report):
             body.vertex_groups[g.group].add([v.index], g.weight * (1 - w), "REPLACE")
         groups[s].add([v.index], w * tot, "REPLACE")
         n_lid[s] += 1
-    # upper lash cards: brows-mesh vertices just above the eye (the kit joins brow and lash strips in one
-    # island, so a whole-island rule dragged the brows down with the lid; R1fix render). Weight fades from 1
-    # at the lid margin to 0 below the brow line, lower lashes (under the eye centre) stay on the head.
+    # upper lash cards BY ISLAND (R1 re-review F5). The brows mesh holds four islands once welded by position:
+    # a lash strip per eye (centroid ~2 mm above the eye centre, ~10 mm from it) and a brow card per side
+    # (centroid ~17 mm up). The earlier distance rule weighted the lower rows of the brow cards too, and a
+    # closed lid tore a wedge out of each brow (brows moved up to 25 mm). Lash islands get the lid weight with
+    # the same canthus fade as the skin; brow islands get none.
     lash = {"l": [], "r": []}
     bwm = brows.matrix_world
     for s_ in "lr":
         brows.vertex_groups.get(f"lid_upper_{s_}") or brows.vertex_groups.new(name=f"lid_upper_{s_}")
-    for v in brows.data.vertices:
-        p = bwm @ v.co
-        s_ = "l" if p.x > 0 else "r"
-        rel = p - cen[s_]
-        if rel.z <= 0 or abs(rel.x) > 1.4 * rmax[s_]:
+    bme = brows.data
+    par = list(range(len(bme.vertices)))
+
+    def find(i):
+        while par[i] != i:
+            par[i] = par[par[i]]
+            i = par[i]
+        return i
+    weld = {}
+    for v in bme.vertices:
+        weld.setdefault(tuple(round(c, 5) for c in (bwm @ v.co)), []).append(v.index)
+    for ids in weld.values():
+        for i in ids[1:]:
+            par[find(i)] = find(ids[0])
+    for ed in bme.edges:
+        par[find(ed.vertices[0])] = find(ed.vertices[1])
+    islands = {}
+    for v in bme.vertices:
+        islands.setdefault(find(v.index), []).append(v)
+    brow_islands = 0
+    for vs in islands.values():
+        cpos = sum((bwm @ v.co for v in vs), Vector()) / len(vs)
+        s_ = "l" if cpos.x > 0 else "r"
+        rel = cpos - cen[s_]
+        if not (rel.z < 0.5 * rmax[s_] and rel.length < rmax[s_]):
+            brow_islands += 1
             continue
-        w = 1 - _smooth(0.55 * rmax[s_], 0.85 * rmax[s_], rel.z)
-        if w <= 0.01:
-            continue
-        tot = sum(g.weight for g in v.groups) or 1.0
-        for og in list(v.groups):
-            brows.vertex_groups[og.group].add([v.index], og.weight * (1 - w), "REPLACE")
-        brows.vertex_groups[f"lid_upper_{s_}"].add([v.index], w * tot, "REPLACE")
-        lash[s_].append(v.index)
+        for v in vs:
+            d = (bwm @ v.co) - cen[s_]
+            w = 1 - _smooth(0.6 * rmax[s_], 1.05 * rmax[s_], abs(d.x))
+            if w <= 0.01:
+                continue
+            tot = sum(g.weight for g in v.groups) or 1.0
+            for og in list(v.groups):
+                brows.vertex_groups[og.group].add([v.index], og.weight * (1 - w), "REPLACE")
+            brows.vertex_groups[f"lid_upper_{s_}"].add([v.index], w * tot, "REPLACE")
+            lash[s_].append(v.index)
+    report["browIslands"] = brow_islands
     report["lids"] = {"bodyVerts": n_lid, "lashVerts": {s: len(lash[s]) for s in "lr"},
                       "eyeRadius": {s: round(rmax[s], 4) for s in "lr"}}
     return lash
@@ -594,32 +628,10 @@ def tint_hair(body_id, meshes):
     return tint
 
 
-def soften_normals(arm, body, body_id, out_dir, report):
-    """R1 F1/F2: write a per-body copy of the kit normal map with the torso/limb regions flattened toward
-    (0.5, 0.5, 1) by NORMAL_FLATTEN (and the stout's trunk fully flat), and point the body material at it.
-    The flatten amount is a per-vertex field rasterised into UV space (512 px, dilated into the island
-    padding, upsampled + box-blurred), so the transition follows the skin weights, not a UV rectangle."""
+def _uv_field(body, fv, W, H):
+    """Rasterise a per-vertex field ``fv`` into UV space (512 px, dilated into the island padding so a
+    bilinear/mip fetch at a seam stays in the field), upsampled to W x H and 5x5 box-blurred. Row 0 = v 0."""
     import numpy as np
-    mat = body.data.materials[0]
-    mat.name = f"MI_body_{body_id}"
-    nn = next(n for n in mat.node_tree.nodes if n.type == "NORMAL_MAP")
-    tex = nn.inputs["Color"].links[0].from_node
-    src = tex.image
-    W, H = src.size
-    gi = {g.index: g.name for g in body.vertex_groups}
-    stout = BODIES[body_id][2]
-    z_belly = _jw(arm, "spine_01").z * 0.35 + _jw(arm, "spine_02").z * 0.65
-    span = _jw(arm, "spine_03").z - _jw(arm, "pelvis").z
-    trunk_b = {"pelvis", "spine_01", "spine_02", "spine_03"}
-    bw = body.matrix_world
-    fv = np.zeros(len(body.data.vertices), np.float32)
-    for v in body.data.vertices:
-        tot = sum(g.weight for g in v.groups) or 1.0
-        f = sum(g.weight * NORMAL_FLATTEN.get(gi.get(g.group, ""), 0.0) for g in v.groups) / tot
-        if stout:
-            t = sum(g.weight for g in v.groups if gi.get(g.group) in trunk_b) / tot
-            f = max(f, min(1.0, 0.92 * t + 0.08 * t * math.exp(-(((bw @ v.co).z - z_belly) / span) ** 2)))
-        fv[v.index] = f
     me = body.data
     me.calc_loop_triangles()
     uvl = next((l for l in me.uv_layers if l.active_render), me.uv_layers[0])
@@ -660,11 +672,40 @@ def soften_normals(arm, body, body_id, out_dir, report):
                 got |= m2
         mask = np.where(filled, mask, best)
         filled |= got
-    k = W // N
-    big = np.kron(mask, np.ones((k, k), np.float32))
+    big = np.kron(mask, np.ones((H // N, W // N), np.float32))
     cs = np.cumsum(np.cumsum(np.pad(big, ((2, 2), (2, 2)), mode="edge"), 0), 1)
     cs = np.pad(cs, ((1, 0), (1, 0)))
     big = (cs[5:, 5:] - cs[:-5, 5:] - cs[5:, :-5] + cs[:-5, :-5]) / 25.0
+    return big
+
+
+def soften_normals(arm, body, body_id, out_dir, report):
+    """R1 F1/F2: write a per-body copy of the kit normal map with the torso/limb regions flattened toward
+    (0.5, 0.5, 1) by NORMAL_FLATTEN (and the stout's trunk fully flat), and point the body material at it.
+    The flatten amount is a per-vertex field rasterised into UV space (512 px, dilated into the island
+    padding, upsampled + box-blurred), so the transition follows the skin weights, not a UV rectangle."""
+    import numpy as np
+    mat = body.data.materials[0]
+    mat.name = f"MI_body_{body_id}"
+    nn = next(n for n in mat.node_tree.nodes if n.type == "NORMAL_MAP")
+    tex = nn.inputs["Color"].links[0].from_node
+    src = tex.image
+    W, H = src.size
+    gi = {g.index: g.name for g in body.vertex_groups}
+    stout = BODIES[body_id][2]
+    z_belly = _jw(arm, "spine_01").z * 0.35 + _jw(arm, "spine_02").z * 0.65
+    span = _jw(arm, "spine_03").z - _jw(arm, "pelvis").z
+    trunk_b = {"pelvis", "spine_01", "spine_02", "spine_03"}
+    bw = body.matrix_world
+    fv = np.zeros(len(body.data.vertices), np.float32)
+    for v in body.data.vertices:
+        tot = sum(g.weight for g in v.groups) or 1.0
+        f = sum(g.weight * NORMAL_FLATTEN.get(gi.get(g.group, ""), 0.0) for g in v.groups) / tot
+        if stout:
+            t = sum(g.weight for g in v.groups if gi.get(g.group) in trunk_b) / tot
+            f = max(f, min(1.0, 0.92 * t + 0.08 * t * math.exp(-(((bw @ v.co).z - z_belly) / span) ** 2)))
+        fv[v.index] = f
+    big = _uv_field(body, fv, W, H)
     px = np.empty(W * H * 4, np.float32)
     src.pixels.foreach_get(px)
     px = px.reshape(H, W, 4)
@@ -684,6 +725,79 @@ def soften_normals(arm, body, body_id, out_dir, report):
     tex.image = img
     report["normal"] = {"kit": os.path.relpath(bpy.path.abspath(src.filepath), REPO), "softened": os.path.relpath(path, REPO),
                         "meanFlatten": round(float(big.mean()), 3)}
+
+
+def recolor_periocular(arm, body, eyes, body_id, out_dir, report):
+    """R1 re-review F3: the kit 'Dark' albedo paints a desaturated grey-green patch under and inside each eye
+    that reads as bruising against the warm skin (reviewer diag: a flat albedo removes it, hiding the eyeballs
+    does not). Write a per-body copy (out/T_body_<b>_BaseColor.png) whose periocular field takes the cheek's
+    chroma: each texel becomes cheek colour x (its own luminance / cheek luminance, lifted halfway to 1), so a
+    faint warm socket shade and the texel detail survive and the green cast goes. Point the material at it."""
+    import numpy as np
+    mat = body.data.materials[0]
+    tex = next(l.from_node for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED"
+               for l in n.inputs["Base Color"].links if l.from_node.type == "TEX_IMAGE") \
+        if any(n.type == "BSDF_PRINCIPLED" and n.inputs["Base Color"].links and n.inputs["Base Color"].links[0].from_node.type == "TEX_IMAGE"
+               for n in mat.node_tree.nodes) else None
+    if tex is None:     # the kit routes Base Color through a mix node: take the colour image that is not the normal/ORM
+        nn = next(n for n in mat.node_tree.nodes if n.type == "NORMAL_MAP")
+        skip = {nn.inputs["Color"].links[0].from_node.name}
+        tex = next(n for n in mat.node_tree.nodes if n.type == "TEX_IMAGE" and n.name not in skip
+                   and n.image and n.image.colorspace_settings.name != "Non-Color")
+    src = tex.image
+    W, H = src.size
+    ev = {"l": [], "r": []}
+    for v in eyes.data.vertices:
+        w = eyes.matrix_world @ v.co
+        ev["l" if w.x > 0 else "r"].append(w)
+    cen = {s: _jw(arm, f"eye_{s}") for s in "lr"}
+    rmax = {s: max((p - cen[s]).length for p in ev[s]) for s in "lr"}
+    bw = body.matrix_world
+    fv = np.zeros(len(body.data.vertices), np.float32)
+    cheek, ring = [], []
+    for v in body.data.vertices:
+        p = bw @ v.co
+        s = "l" if p.x > 0 else "r"
+        d, r = p - cen[s], rmax[s]
+        if d.y > 0.01:
+            continue
+        fv[v.index] = (1 - _smooth(r + 0.008, r + 0.018, d.length)) * _smooth(-0.004, 0.006, -d.y)
+        if abs(d.x) < 1.2 * r and -(r + 0.035) < d.z < -(r + 0.020) and d.y < 0:
+            cheek.append(v.index)
+        elif r + 0.018 < d.length < r + 0.028 and d.y < 0:
+            ring.append(v.index)
+    me = body.data
+    uvl = next((l for l in me.uv_layers if l.active_render), me.uv_layers[0])
+    px = np.empty(W * H * 4, np.float32)
+    src.pixels.foreach_get(px)
+    px = px.reshape(H, W, 4)
+    def mean_at(ids):
+        ids, uv = set(ids), {}
+        for loop in me.loops:
+            if loop.vertex_index in ids:
+                uv[loop.vertex_index] = uvl.data[loop.index].uv[:]
+        return np.array([px[min(H - 1, int(v * H)), min(W - 1, int(u * W)), :3] for u, v in uv.values()], np.float32)
+    samp = mean_at(cheek)
+    # the cheek alone painted a rosy halo round the eyes (cheek chroma is redder than brow and temple skin):
+    # take half the chroma from the skin ring just outside the field, all the way round
+    ck = 0.5 * samp.mean(0) + 0.5 * mean_at(ring).mean(0)
+    lum = lambda c: c[..., 0] * 0.2126 + c[..., 1] * 0.7152 + c[..., 2] * 0.0722
+    lc = float(lum(ck))
+    m = _uv_field(body, fv, W, H)[..., None]
+    ratio = lum(px[..., :3]) / max(lc, 1e-4)
+    ratio = np.where(ratio < 1, ratio + 0.5 * (1 - ratio), np.minimum(ratio, 1.08))[..., None]
+    tgt = np.clip(ck[None, None, :] * ratio, 0, 1)
+    px[..., :3] = px[..., :3] * (1 - m) + tgt * m
+    img = bpy.data.images.new(f"T_body_{body_id}_BaseColor", W, H, alpha=False)
+    img.pixels.foreach_set(px.ravel())
+    path = os.path.join(out_dir, f"T_body_{body_id}_BaseColor.png")
+    img.filepath_raw = path
+    img.file_format = "PNG"
+    img.save()
+    tex.image = img
+    report["baseColor"] = {"kit": os.path.relpath(bpy.path.abspath(src.filepath), REPO), "recoloured": os.path.relpath(path, REPO),
+                           "cheekRGB": [round(float(c), 4) for c in ck], "cheekSamples": len(samp),
+                           "maskTexels": int((m[..., 0] > 0.5).sum())}
 
 
 def build_base(body_id, report, do_retarget=True, out_dir=None):
@@ -706,13 +820,17 @@ def build_base(body_id, report, do_retarget=True, out_dir=None):
     soften_physique(arm, body)
     if stout:
         stoutify(arm, body)
-    smooth_abs(arm, body, 1.0 if stout else 0.5, 14 if stout else 6)
+    # R1 re-review F2: the male abdomen 0.5 x 6 left a geometric 8-pack at 4 m (4.29 mm sculpt relief)
+    male = body_id == "male"
+    smooth_abs(arm, body, 1.0 if stout else (0.9 if male else 0.5), 18 if stout else (12 if male else 6),
+               shoulders=0.35 if male else 0.0)
     rep["before"] = measure(arm, body)
     rep["after"] = retarget(arm, body, meshes) if do_retarget else rep["before"]
     close_lids(arm, body, eyes, rep)
     rep["hairTint"] = list(tint_hair(body_id, meshes))
     if out_dir:
         soften_normals(arm, body, body_id, out_dir, rep)
+        recolor_periocular(arm, body, eyes, body_id, out_dir, rep)
     rep["bones"] = sorted(b.name for b in arm.data.bones)
     arm.name = f"{body_id}_rig"
     defaults = {h.lower() for h in DEFAULT_HAIR[body_id]}

@@ -278,7 +278,61 @@ function lidChecks(g, W, gltf, names, skin, bodyI, eyesI, closeFromReport) {
     expect(`${lid}: open at rest (iris covered ${(open * 100).toFixed(0)}% < 50%)`, open < 0.5);
     expect(`${lid}: closed by ${close} deg about +X covers ${(shut * 100).toFixed(0)}% of the iris (>= 95%)`, shut >= 0.95);
     expect(`${lid}: no lid vertex inside the eyeball at half and full close (${poke})`, poke === 0);
+    // R1 re-review F5: closing the lid must not tear the brows. Brow cards = brows-mesh islands (welded
+    // positions + triangles) whose centroid sits more than half an eye radius above the eye centre; at closeDeg
+    // none of their vertices moves > 0.5 mm, and no body vertex above eyeCentre + r + 4 mm moves > 1 mm.
+    // Red (64788b33, reviewer lidleak.json): brows moved up to 25.4 mm, skin up to 25.8 mm above the eye.
+    const P1 = posedAt(close);
+    const skinHi = all.reduce((m, v, i) => (side(v.p) && v.p[1] - c[1] > rEye + 0.004 ? Math.max(m, len(sub(P1[i], sub(v.p, c)))) : m), 0);
+    expect(`${lid}: no skin above the lid crease (eye + r + 4 mm) moves > 1 mm when closed (${(skinHi * 1000).toFixed(1)} mm)`, skinHi <= 0.001);
+    if (browsI >= 0) {
+      const bw = skinned(g, W, browsI, lid);
+      const key = (p) => p.map((x) => x.toFixed(4)).join(',');
+      const par = new Map(); const find = (k) => { while (par.get(k) !== k) { par.set(k, par.get(par.get(k))); k = par.get(k); } return k; };
+      for (const v of bw) if (!par.has(key(v.p))) par.set(key(v.p), key(v.p));
+      for (const t of bw.tris ?? []) for (let a = 1; a < 3; a++) par.set(find(key(bw[t[a]].p)), find(key(bw[t[0]].p)));
+      const isl = new Map();
+      bw.forEach((v, i) => { if (!side(v.p)) return; const r = find(key(v.p)); (isl.get(r) ?? isl.set(r, []).get(r)).push(i); });
+      let browMove = 0; let nBrow = 0;
+      for (const ids of isl.values()) {
+        const cy = ids.reduce((a, i) => a + bw[i].p[1], 0) / ids.length - c[1];
+        if (cy <= 0.5 * rEye) continue;
+        nBrow += ids.length;
+        for (const i of ids) { const v = bw[i]; if (!(v.wj > 0)) continue; const d = sub(v.p, c); browMove = Math.max(browMove, v.wj * len(sub(rotX(d, close), d))); }
+      }
+      expect(`${lid}: brow cards (${nBrow} verts outside the lash islands) move <= 0.5 mm when the lid closes (${(browMove * 1000).toFixed(1)} mm)`, nBrow > 0 && browMove <= 0.0005);
+    }
   }
+}
+
+// R1 re-review F3: the kit 'Dark' albedo paints a desaturated grey-green patch under and inside each eye. Mean hue
+// (circular) and HSV saturation of the shipped albedo under the eye must sit near the cheek below it.
+function hueSat(I, uvs) {
+  let sx = 0; let sy = 0; let ss = 0; let n = 0;
+  for (const [u, v] of uvs) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    const x = Math.min(I.w - 1, Math.max(0, Math.floor((u - Math.floor(u)) * I.w) + dx));
+    const y = Math.min(I.h - 1, Math.max(0, Math.floor((v - Math.floor(v)) * I.h) + dy));
+    const o = (y * I.w + x) * I.ch; const r = I.data[o] / 255; const gg = I.data[o + 1] / 255; const b = I.data[o + 2] / 255;
+    const mx = Math.max(r, gg, b); const mn = Math.min(r, gg, b); const d = mx - mn;
+    let h = 0; if (d > 1e-6) h = mx === r ? ((gg - b) / d) % 6 : mx === gg ? (b - r) / d + 2 : (r - gg) / d + 4;
+    h *= Math.PI / 3; const s = mx > 0 ? d / mx : 0;
+    sx += Math.cos(h) * s; sy += Math.sin(h) * s; ss += s; n++;
+  }
+  return { hue: ((Math.atan2(sy, sx) * 180 / Math.PI) + 360) % 360, sat: n ? ss / n : 0, n };
+}
+async function periocular(L, rep, bodyId) {
+  const body = L.body; const mat = L.g.gltf.materials?.[body.find((v) => v.uv)?.mat]?.name;
+  const I = rep?.materials?.[mat]?.a && await img(rep.materials[mat].a);
+  if (!I) return null;
+  const out = [];
+  for (const s of ['l', 'r']) {
+    const c = L.joint(`eye_${s}`); const r = rep?.bodies?.[bodyId]?.lids?.eyeRadius?.[s] ?? 0.019;
+    const rel = body.filter((v) => v.uv && v.j === 'head').map((v) => ({ uv: v.uv, d: sub(v.p, c) })).filter(({ d }) => d[2] > 0);
+    const under = rel.filter(({ d }) => Math.abs(d[0]) < 0.9 * r && d[1] < -0.45 * r && d[1] > -(r + 0.010)).map((x) => x.uv);
+    const cheek = rel.filter(({ d }) => Math.abs(d[0]) < 1.2 * r && d[1] < -(r + 0.020) && d[1] > -(r + 0.035)).map((x) => x.uv);
+    out.push({ s, under: hueSat(I, under), cheek: hueSat(I, cheek), file: rep.materials[mat].a });
+  }
+  return out;
 }
 
 function hairChecks(gltf, g, W) {
@@ -373,6 +427,7 @@ if (argv.includes('--glb')) {
     !!wm && !!ws && ws[0] >= 1.3 * wm[0] && ws[1] >= 1.35 * wm[1] && ws[0] <= 1.7 * wm[0] && ws[1] <= 1.7 * wm[1],
     wm && ws ? `ratios ${(ws[0] / wm[0]).toFixed(2)} / ${(ws[1] / wm[1]).toFixed(2)}` : '');
 
+  let lap = () => 0;
   console.log('\nR1 F1: the stout is heavier everywhere, not only at the waist');
   const Lm = loadGlb(`${OUT}/pirate_base_male.glb`); const Ls = loadGlb(`${OUT}/pirate_base_stout.glb`); const Lf = loadGlb(`${OUT}/pirate_base_female.glb`);
   if (Lm && Ls) {
@@ -382,7 +437,7 @@ if (argv.includes('--glb')) {
     }
     const bl = await relief(Ls, rep0, 'stout', (v) => TRUNK.has(v.j) && v.p[1] > Ls.joint('pelvis')[1] + 0.05 && v.p[1] < Ls.joint('spine_02')[1] + 0.05 && v.p[2] > Ls.joint('spine_01')[2]);
     // sculpted relief: mean |p - mean(neighbours)| over the welded belly positions (the kit sculpts the abs)
-    const lap = (L) => {
+    lap = (L) => {
       const key = (p) => p.map((x) => x.toFixed(4)).join(',');
       const nb = new Map(); const pos = new Map();
       for (const t of L.body.tris ?? []) for (let a = 0; a < 3; a++) {
@@ -399,7 +454,9 @@ if (argv.includes('--glb')) {
     const lm = lap(Lm); const ls = lap(Ls);
     // red (b3.2a2, 3ab60c66): stout 8.32 mm, male 5.46 mm. A round gut keeps some curvature Laplacian, so the
     // bar is half the reviewed stout AND no more relief than the (itself softened) male abdomen.
-    expect(`stout belly sculpt relief ${(ls * 1000).toFixed(2)} mm <= 4.16 (half of b3.2a2's 8.32) and <= the male's ${(lm * 1000).toFixed(2)} mm: no 8-pack modelled into the gut`, lm > 0 && ls <= 0.00416 && ls <= lm);
+    // R1 re-review: the male abdomen is now smoothed harder (2.55 mm) than a round gut can go without losing its
+    // curvature, so the stout bar is the value the re-review graded PASS on the stout (3.72 mm, tighter than 4.16).
+    expect(`stout belly sculpt relief ${(ls * 1000).toFixed(2)} mm <= 3.72 (R1 re-review pass; b3.2a2 red 8.32; male now ${(lm * 1000).toFixed(2)} mm): no 8-pack modelled into the gut`, lm > 0 && ls <= 0.00372);
     expect(`stout belly normal relief ${bl.ratio.toFixed(2)}x the kit map (<= 0.15: no abs printed on the gut)`, bl.ratio <= 0.15, bl.why);
   } else expect('male and stout GLBs present', false);
 
@@ -415,6 +472,22 @@ if (argv.includes('--glb')) {
     expect(`${b}: V-taper (armpit / waist width) ${vt.toFixed(3)} <= ${PHYSIQUE[b].vTaper}`, vt <= PHYSIQUE[b].vTaper);
     const tr = await relief(L, rep0, b, (v) => TRUNK.has(v.j));
     expect(`${b}: torso normal relief ${tr.ratio.toFixed(2)}x the kit map (<= 0.45, strength ~0.35)`, tr.ratio <= 0.45, tr.why);
+  }
+
+  console.log('\nR1 re-review F2 (male) and F3 (every body)');
+  if (Lm) {
+    const lmx = lap(Lm);
+    // red (64788b33): 4.29 mm, still a readable 8-pack at 4 m (tt-noon-front.png). Ceiling 3.2 mm (-25%).
+    expect(`male abdomen sculpt relief ${(lmx * 1000).toFixed(2)} mm <= 3.20: no geometric 8-pack at 4 m`, lmx > 0 && lmx <= 0.0032);
+  }
+  for (const [b, L] of [['male', Lm], ['female', Lf], ['stout', Ls]]) {
+    const pr = L && await periocular(L, rep0, b);
+    if (!pr) { expect(`${b}: body albedo readable for the periocular check`, false); continue; }
+    for (const { s, under, cheek, file } of pr) {
+      const dh = Math.abs(((under.hue - cheek.hue + 540) % 360) - 180); const ds = cheek.sat - under.sat;
+      expect(`${b} eye_${s}: under-eye albedo hue ${under.hue.toFixed(1)} vs cheek ${cheek.hue.toFixed(1)} (<= 6 deg; the build blends cheek and brow-ring chroma so no rosy halo) and saturation ${under.sat.toFixed(3)} vs ${cheek.sat.toFixed(3)} (>= cheek - 0.05; red 0.094-0.107 below): no grey-green bruise`,
+        under.n > 0 && cheek.n > 0 && dh <= 6 && ds <= 0.05, file);
+    }
   }
 
   console.log('\nprovenance and materials');
