@@ -374,10 +374,14 @@ export const PRECOMPRESSED_EXTENSIONS: ReadonlySet<string> = new Set([
  * re-export, and a year of `immutable` on it meant every returning player kept
  * the OLD model until their cache evicted, with renaming the file as the only
  * repair (netcode-33). `models/` is excluded outright as a second belt: a model
- * is never hashed no matter what an artist calls it.
+ * is never hashed no matter what an artist calls it, EXCEPT the pack step's
+ * content-hashed output `models/packed/<key>.<hash8>.glb` (b3.1b): that name is
+ * sha256 of its bytes (test-static-serving proves it), so a re-export is a new URL.
  */
 const VITE_HASHED_NAME = /-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+$/;
+const PACKED_MODEL_NAME = /^[A-Za-z0-9_]+\.[0-9a-f]{8}\.glb$/;
 function isImmutablyNamed(filePath: string): boolean {
+  if (filePath.includes(`${sep}models${sep}packed${sep}`)) return PACKED_MODEL_NAME.test(basename(filePath));
   if (filePath.includes(`${sep}models${sep}`)) return false;
   return VITE_HASHED_NAME.test(basename(filePath));
 }
