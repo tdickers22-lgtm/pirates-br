@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import type { Vec3 } from '../../shared/types/index.js';
 import { finiteClamp } from '../../shared/utils/index.js';
 import { AudioLifecycle, audioParamStats, finiteDistance, finitePos, safeSet } from './audioLifecycle.js';
-import { AUDIO_BUSES, buildAudioCore, type AudioBusName, type AudioCoreNodes } from './AudioCore.js';
+import { AUDIO_BUSES, buildAudioCore, combatDuckGains, type AudioBusName, type AudioCoreNodes } from './AudioCore.js';
 import { DECODED_CAP_BYTES, SampleBank, decodeAudioDataCompat } from './SampleBank.js';
 import { VOICE_PRIORITY, VoiceAllocator, type AudioTier } from './VoiceAllocator.js';
 import {
@@ -17,6 +17,8 @@ import {
   FloodAudio, type FloodAudioFrame, type FloodAudioHost, type FloodLoopHandle, type FloodLoopKind, type FloodOneShotKind,
   type FloodVec,
 } from './FloodAudio.js';
+/** Seconds the combat duck holds after the last shot or hit inside 40 m (b2-ask-07). */
+const COMBAT_DUCK_HOLD_S = 5;
 
 /** A looped, filtered-noise voice with an optional tremolo/gust LFO on its gain. */
 interface LoopVoice {
@@ -562,6 +564,12 @@ export class SoundEngine {
   private busMusic: GainNode | null = null;
   /** Sidechain node — combat and weather push the music down through this. */
   private musicDuck: GainNode | null = null;
+  /** Section 3.8 combat duck (b2-ask-07): sustained -6 dB ambience / -12 dB music while a fight
+   *  is within COMBAT_DUCK_RANGE_M, held COMBAT_DUCK_HOLD_S past the last shot or hit. */
+  private combatDuckAmb: GainNode | null = null;
+  private combatDuckMusic: GainNode | null = null;
+  private combatNearUntil = 0;
+  private combatDuckOn = false;
   private musicSend: GainNode | null = null;
   /** Spatial chain for the tavern jig: distance lowpass → pan → level → busMusic. */
   private tavernChain: { input: BiquadFilterNode; panner: StereoPannerNode; gain: GainNode } | null = null;
@@ -787,10 +795,13 @@ export class SoundEngine {
       safeSet(this.occGain.gain, 'value', dbToGain(this.space.outsideGainDb));
       this.busBed.connect(this.occFilter);
       this.occFilter.connect(this.occGain);
-      this.occGain.connect(core.levels.ambience);
+      this.combatDuckAmb = ctx.createGain();
+      safeSet(this.combatDuckAmb.gain, 'value', 1);
+      this.combatDuckAmb.connect(core.levels.ambience);
+      this.occGain.connect(this.combatDuckAmb);
       this.busInside = ctx.createGain();
       safeSet(this.busInside.gain, 'value', dbToGain(this.space.ownCreakDb));
-      this.busInside.connect(core.levels.ambience);
+      this.busInside.connect(this.combatDuckAmb);
 
       // Music bus. It sits BEHIND the world (post-worldFilter, so it muffles
       // when you go under) and behind its own duck node, which combat and
@@ -800,7 +811,10 @@ export class SoundEngine {
       this.musicDuck = ctx.createGain();
       safeSet(this.musicDuck.gain, 'value', 1);
       this.busMusic.connect(this.musicDuck);
-      this.musicDuck.connect(core.levels.music);
+      this.combatDuckMusic = ctx.createGain();
+      safeSet(this.combatDuckMusic.gain, 'value', 1);
+      this.musicDuck.connect(this.combatDuckMusic);
+      this.combatDuckMusic.connect(core.levels.music);
       // One generous send for the whole score — a concertina in a taproom, not
       // in a laboratory. Tapped post-duck AND post-slider so a ducked or muted tune loses its tail too.
       this.musicSend = ctx.createGain();
@@ -1010,6 +1024,7 @@ export class SoundEngine {
     // A non-finite pose would poison every pan after it: keep the last good one.
     if (!finitePos(position)) return;
     if (typeof forward === 'number' ? !Number.isFinite(forward) : !finitePos(forward)) return;
+    this.releaseCombatDuck();
     this.listenerPos.set(position.x, position.y, position.z);
     if (typeof forward === 'number') {
       this.listenerFwd.set(-Math.sin(forward), 0, -Math.cos(forward));
@@ -1538,6 +1553,7 @@ export class SoundEngine {
    * @param distance metres from the listener (0 = your own weapon).
    */
   playGunshot(kind: GunshotKind = 'flintlock', distance = 0, pos?: SoundPos): void {
+    this.noteCombatDistance(distance);
     if (!this.ctx || !this.busDry) return;
     if (!this.throttle('gunshot')) return;
     this.markCombat();
@@ -1603,6 +1619,7 @@ export class SoundEngine {
    *   over 120-220 m while the low distant thump fades in (b2.4c, audio-10: no 140 m switch).
    */
   playCannonFire(distance = 0, pos?: SoundPos): void {
+    this.noteCombatDistance(distance);
     const ctx = this.ctx;
     if (!ctx || !this.busDry) return;
     if (!this.throttle('cannonFire')) return;
@@ -1691,6 +1708,7 @@ export class SoundEngine {
 
   /** Projectile terminal impact on a solid (hull hits use {@link playHullImpact}). */
   playProjectileImpact(kind: ImpactKind, distance = 0, pos?: SoundPos): void {
+    this.noteCombatDistance(distance);
     if (!this.ctx || !this.busDry) return;
     if (!this.throttle('impact')) return;
     const now = this.ctx.currentTime;
@@ -2656,6 +2674,7 @@ export class SoundEngine {
    * @param speed ball speed (m/s), muzzle speed by default.
    */
   playCannonballWhistle(distance = 0, pos?: SoundPos, delaySeconds = 0, speed = CANNON_MUZZLE_SPEED): void {
+    this.noteCombatDistance(distance);
     const ctx = this.ctx;
     const noise = this.noise;
     if (!ctx || !this.busDry) return;
@@ -2716,6 +2735,7 @@ export class SoundEngine {
 
   /** Cannonball smashing a hull — deep thud under a burst of wood splinters. */
   playHullImpact(distance = 0, pos?: SoundPos): void {
+    this.noteCombatDistance(distance);
     if (!this.ctx || !this.busDry) return;
     if (!this.throttle('hullImpact')) return;
     const now = this.ctx.currentTime;
@@ -2877,6 +2897,7 @@ export class SoundEngine {
 
   /** Powder-keg detonation — sub drop, blast body, debris patter, and a rolling tail. */
   playKegExplosion(distance = 0, pos?: SoundPos): void {
+    this.noteCombatDistance(distance);
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
     const at = now; // travel time lives in the spatial chain (d/343, no cap)
@@ -4342,6 +4363,30 @@ export class SoundEngine {
   }
 
   /** Lead is in the air: the idle whistling keeps away for a while. */
+  /** A shot, blast or hit `distance` m from the listener: inside COMBAT_DUCK_RANGE_M the ambience
+   *  and music duck nodes glide to combatDuckGains and hold there while the fight goes on. */
+  private noteCombatDistance(distance: number): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.combatDuckAmb || !this.combatDuckMusic) return;
+    const g = combatDuckGains(distance);
+    if (g.music >= 1) return;
+    this.combatNearUntil = ctx.currentTime + COMBAT_DUCK_HOLD_S;
+    if (this.combatDuckOn) return;
+    this.combatDuckOn = true;
+    this.ramp(this.combatDuckAmb.gain, g.ambience, 0.25);
+    this.ramp(this.combatDuckMusic.gain, g.music, 0.4);
+  }
+
+  /** Per frame (setListenerPose): the fight has moved off or gone quiet, bring the beds back. */
+  private releaseCombatDuck(): void {
+    const ctx = this.ctx;
+    if (!this.combatDuckOn || !ctx || ctx.currentTime < this.combatNearUntil) return;
+    this.combatDuckOn = false;
+    if (this.combatDuckAmb) this.ramp(this.combatDuckAmb.gain, 1, 1.5);
+    if (this.combatDuckMusic) this.ramp(this.combatDuckMusic.gain, 1, 2.5);
+  }
+
+
   private markCombat(seconds = 8): void {
     const ctx = this.ctx;
     if (!ctx) return;

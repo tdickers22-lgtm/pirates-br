@@ -256,6 +256,33 @@ const { SoundEngine } = await import('../src/client/audio/SoundEngine.ts');
     created.slice(b4).some((n) => n.kind === 'Oscillator'));
 }
 
+// ── 3b. the combat duck is the ENGINE's, not just the helper's (b2-ask-07) ──
+{
+  const gainOf = (n) => (n?.gain?.ramped ?? n?.gain?.value);
+  const near = new SoundEngine();
+  near.unlock();
+  near.setListenerPose({ x: 0, y: 0, z: 0 }, 0);
+  near.playCannonFire(30, { x: 30, y: 0, z: 0 });
+  const amb = near.combatDuckAmb;
+  const mus = near.combatDuckMusic;
+  const db = (g) => 20 * Math.log10(g);
+  check('engine: a cannon 30 m away ducks the ambience bed -6 dB and the music -12 dB on the live nodes',
+    !!amb && !!mus && Math.abs(db(gainOf(amb)) + 6) < 0.05 && Math.abs(db(gainOf(mus)) + 12) < 0.05,
+    amb && mus ? `ambience ${db(gainOf(amb)).toFixed(2)} dB, music ${db(gainOf(mus)).toFixed(2)} dB` : 'no combat duck nodes');
+  const d = amb ? downstream(near.occGain) : new Set();
+  check('engine: the ambience bed and the music run through the combat duck nodes to the output',
+    !!amb && d.has(amb) && d.has(near.ctx.destination) && downstream(near.musicDuck).has(mus) && !downstream(near.busUi).has(amb));
+  near.ctx.currentTime += 6;
+  near.setListenerPose({ x: 0, y: 0, z: 0 }, 0);
+  check('engine: 6 s after the last shot the beds come back to 0 dB', !!amb && gainOf(amb) === 1 && gainOf(mus) === 1,
+    amb ? `ambience ${gainOf(amb)}, music ${gainOf(mus)}` : 'no nodes');
+  const far = new SoundEngine();
+  far.unlock();
+  far.playCannonFire(45, { x: 45, y: 0, z: 0 });
+  check('engine: a cannon 45 m away does not engage the 40 m combat duck',
+    !!far.combatDuckAmb && gainOf(far.combatDuckAmb) === 1 && gainOf(far.combatDuckMusic) === 1);
+}
+
 // ── 4. SampleBank ───────────────────────────────────────────────────────────
 const tick = () => new Promise((r) => setTimeout(r, 0));
 async function drain(bank) { for (let i = 0; i < 2000 && (bank.decodesInFlight > 0); i++) await tick(); await tick(); }
