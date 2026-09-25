@@ -356,6 +356,13 @@ export const FAMILY_TEXTURE_MB = {
 };
 export const FAMILY_TEXTURE_ROW_OF = { instruments: 'creatures-kraken' };
 export const FAMILY_TEXTURE_TOTALS_MB = { high: 256, balanced: 128, low: 96, phone: 64 };
+/** DECLARED texture deviations (same contract as the wire list: only shrink, the ratchet holds upTo).
+ *  Measured at b3.1g on the dev server after the tour (iPhone 14 profile): shared 20.5-20.8 MB against the
+ *  14 MB phone row, because every procedural canvas texture (ocean bathymetry 1 MB, the ~40 512x192 ship
+ *  and HUD canvases at 0.5 MB each) is untagged and so charged to `shared`. */
+export const FAMILY_TEXTURE_DEVIATIONS_MB = {
+  'shared.phone': { upTo: 21, owner: 'b3.4 / b4.4 (tag procedural ship/island canvases to their family, halve them on phones)', measured: 20.8 },
+};
 
 /** DECLARED deviations: family rows today's (unrebuilt) GLBs overflow, measured at b3.1g (HEAD cd33720b,
  *  brotli q9). `upTo` is the reading rounded up to 10 KB; a reading above it FAILS, and so does an entry
@@ -396,6 +403,7 @@ export const ALL_BUDGETS = {
   modelFamilyWireTotals: FAMILY_WIRE_TOTALS_MB,
   modelFamilyTextureTotals: FAMILY_TEXTURE_TOTALS_MB,
   modelFamilyWireDeviations: FAMILY_WIRE_DEVIATIONS_MB,
+  modelFamilyTextureDeviations: FAMILY_TEXTURE_DEVIATIONS_MB,
 };
 
 /** Keys that are readings or scene inputs, never budgets. */
