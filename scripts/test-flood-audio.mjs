@@ -253,6 +253,23 @@ const { SoundEngine } = await import('../src/client/audio/SoundEngine.ts');
       engine.updateFlood({ dt: NaN, listener: { x: NaN, y: 0, z: 0 }, aboardShipId: null, ships: [null, hullWith('z', 1, [])], emitters: () => [] });
     } catch (e) { threw = e; }
     check('engine: bucket scoop/fling, reset and junk frames never throw', threw === null, String(threw ?? ''));
+
+    // b2-device-01: flood loops are voices. A phone ('low', cap 24) with 20
+    // slots already taken by important one-shots and 3 hulls x 9 breaches at
+    // fill 0.8 in earshot may open at most the 4 free slots, and the allocator
+    // must see every loop it opened.
+    engine.stopFlooding();
+    engine.setAudioTier('low');
+    const V = engine.voices;
+    for (let i = 0; i < 20; i += 1) V.acquire({ priority: 6, gain: 1, now: engine.ctx.currentTime, duration: Infinity });
+    const beforeLoops = created.length;
+    const ships = ['own', 'b', 'c'].map((id, k) => hullWith(id, k * 10, Array.from({ length: 9 }, (_, i) => ({ id: i + 1, x: 0, y: -1, z: i - 4, patched: false, size: 2 })), { waterLevel: 0.8 }));
+    const ems = (id) => Array.from({ length: 9 }, (_, i) => ({ holeId: i + 1, worldPos: { x: (id === 'own' ? 0 : id === 'b' ? 10 : 20), y: -1, z: i - 4 }, v: 3 + i * 0.2, submergedInside: false, strength: 1 }));
+    for (let f = 0; f < 3; f += 1) engine.updateFlood({ dt: 0.05, listener: { x: 0, y: 0, z: 0 }, aboardShipId: 'own', ships, emitters: ems });
+    const loops = created.slice(beforeLoops).filter((n) => n.kind === 'BufferSource' && n.loop === true).length;
+    check('engine: on tier low, flood loops + one-shot voices never exceed the 24-voice cap', loops <= 4 && V.active <= 24,
+      `${loops} loop sources opened with 4 free slots, allocator active ${V.active}/${V.cap}`);
+    engine.stopFlooding();
   }
 }
 

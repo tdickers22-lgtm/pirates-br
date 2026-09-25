@@ -26,9 +26,14 @@ export interface FloodLoopParams { gain: number; cutoff: number; rate: number; p
 export interface FloodLoopHandle {
   set(p: FloodLoopParams, glideS: number): void;
   stop(releaseS: number): void;
+  /** False once the host took the voice back (the VoiceAllocator stole it for a
+   *  louder or more important sound): FloodAudio drops the handle and asks again. */
+  alive?(): boolean;
 }
 export interface FloodAudioHost {
-  openLoop(kind: FloodLoopKind, pos: FloodVec): FloodLoopHandle | null;
+  /** A looping water voice, or null when the host has no voice for it (the loop
+   *  counts against the same voice cap as every sample; `own` = the hull you are on). */
+  openLoop(kind: FloodLoopKind, pos: FloodVec, own?: boolean): FloodLoopHandle | null;
   /** Positioned one-shot; the host applies its own distance law. volume already carries hull occlusion. */
   oneShot(kind: FloodOneShotKind, pos: FloodVec | null, volume: number, rate: number): void;
 }
@@ -193,8 +198,9 @@ export class FloodAudio {
       const g = gushFromSpeed(e.v, holeSize.get(e.holeId), e.submergedInside, e.strength);
       const gain = g.level * floodDistanceGain(dist(L, e.worldPos), own) * (own ? this.ownSpace.gain : 1);
       let h = tr.gush.get(e.holeId);
+      if (h && h.alive && !h.alive()) { tr.gush.delete(e.holeId); h = undefined; }
       if (!h && gain > 1e-4) {
-        h = this.host.openLoop('gush', e.worldPos) ?? undefined;
+        h = this.host.openLoop('gush', e.worldPos, own) ?? undefined;
         if (h) tr.gush.set(e.holeId, h);
       }
       if (!h) continue;
@@ -219,18 +225,19 @@ export class FloodAudio {
     const dg = floodDistanceGain(dist(L, ship.position), own) * (own ? this.ownSpace.gain : 1);
     const s = sloshLevel(fill, rollRate, pitchRate);
     const sloshGain = s.level * dg;
-    tr.slosh = this.loopTo(tr.slosh, 'slosh', ship.position, sloshGain, own ? Math.min(s.cutoff, this.ownSpace.cutoff) : Math.min(s.cutoff, FLOOD_HULL_OCCLUSION_CUTOFF), s.rate);
+    tr.slosh = this.loopTo(tr.slosh, 'slosh', own, ship.position, sloshGain, own ? Math.min(s.cutoff, this.ownSpace.cutoff) : Math.min(s.cutoff, FLOOD_HULL_OCCLUSION_CUTOFF), s.rate);
     const gg = gurgleLevel(fill) * 0.6 * dg;
-    tr.gurgle = this.loopTo(tr.gurgle, 'gurgle', ship.position, gg, 520, 0.5);
+    tr.gurgle = this.loopTo(tr.gurgle, 'gurgle', own, ship.position, gg, 520, 0.5);
     this.lastGains.set(ship.id, { gush: gains, slosh: sloshGain, gurgle: gg });
   }
 
-  private loopTo(h: FloodLoopHandle | null, kind: FloodLoopKind, pos: FloodVec, gain: number, cutoff: number, rate: number): FloodLoopHandle | null {
+  private loopTo(h: FloodLoopHandle | null, kind: FloodLoopKind, own: boolean, pos: FloodVec, gain: number, cutoff: number, rate: number): FloodLoopHandle | null {
+    if (h && h.alive && !h.alive()) h = null;
     if (gain <= 1e-4) {
       if (h) h.stop(0.6);
       return null;
     }
-    const v = h ?? this.host.openLoop(kind, pos);
+    const v = h ?? this.host.openLoop(kind, pos, own);
     v?.set({ gain, cutoff, rate, pos }, 0.4);
     return v;
   }

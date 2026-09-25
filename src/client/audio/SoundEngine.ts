@@ -3023,17 +3023,30 @@ export class SoundEngine {
 
   private floodHost(): FloodAudioHost {
     return {
-      openLoop: (kind, pos) => this.openFloodLoop(kind, pos),
+      openLoop: (kind, pos, own) => this.openFloodLoop(kind, pos, own === true),
       oneShot: (kind, pos, volume, rate) => this.playFloodOneShot(kind, pos, volume, rate),
     };
   }
 
   /** A looping water voice at `pos`: sampled gush (bed.floodGush) or filtered noise until it decodes.
    *  The PannerNode does direction only; FloodAudio's gain carries distance and hull occlusion. */
-  private openFloodLoop(kind: FloodLoopKind, pos: FloodVec): FloodLoopHandle | null {
+  private openFloodLoop(kind: FloodLoopKind, pos: FloodVec, own = false): FloodLoopHandle | null {
     const ctx = this.ctx;
     const out = this.busDry;
     if (!ctx || !out || !this.noise || !finitePos(pos)) return null;
+    // A loop is a voice (b2-device-01): it takes a slot under the same tier cap as
+    // every sample (24 on a phone), so 3 flooded hulls cannot stack 24 panner
+    // chains on top of the one-shots. The hull you stand on outranks world sound;
+    // a stolen loop reports !alive() and FloodAudio asks again next frame.
+    let handle: FloodLoopHandle | null = null;
+    const voiceId = this.voices.acquire({
+      priority: own ? VOICE_PRIORITY.own : VOICE_PRIORITY.world,
+      gain: kind === 'gush' ? 0.5 : 0.35,
+      now: ctx.currentTime,
+      duration: Infinity,
+      stop: () => handle?.stop(0.05),
+    });
+    if (voiceId === null) return null;
     const pick = this.bank?.pick('bed.floodGush') ?? null;
     const src = ctx.createBufferSource();
     src.buffer = (pick ? pick.buffer : this.noise) as AudioBuffer;
@@ -3065,7 +3078,8 @@ export class SoundEngine {
     const dur = (src.buffer as AudioBuffer | null)?.duration ?? 1;
     src.start(0, Math.random() * Math.max(0.05, Math.min(dur - 0.2, (pick?.file.loopEnd ?? dur) - 0.2)));
     let stopped = false;
-    return {
+    handle = {
+      alive: () => !stopped,
       set: (p, glide) => {
         if (stopped) return;
         this.ramp(gain.gain, finiteClamp(p.gain, 0, 1.5, 0), glide);
@@ -3080,6 +3094,7 @@ export class SoundEngine {
       stop: (releaseS) => {
         if (stopped) return;
         stopped = true;
+        this.voices.release(voiceId);
         const r = finiteClamp(releaseS, 0.02, 3, 0.3);
         this.ramp(gain.gain, 0, r);
         window.setTimeout(() => {
@@ -3089,6 +3104,7 @@ export class SoundEngine {
         }, (r + 0.15) * 1000);
       },
     };
+    return handle;
   }
 
   /** Sample first (FloodAudio's volume already carries hull occlusion; playSample adds distance),
