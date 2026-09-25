@@ -10,6 +10,10 @@ import {
   makeWorldPanner, panningModelFor, rearShade, type SpatialCategory,
 } from './Spatial.js';
 import { CANNON_MUZZLE_SPEED } from '../../shared/ballistics.js';
+import {
+  FloodAudio, type FloodAudioFrame, type FloodAudioHost, type FloodLoopHandle, type FloodLoopKind, type FloodOneShotKind,
+  type FloodVec,
+} from './FloodAudio.js';
 
 /** A looped, filtered-noise voice with an optional tremolo/gust LFO on its gain. */
 interface LoopVoice {
@@ -491,8 +495,8 @@ export class SoundEngine {
   private rainBody: LoopVoice | null = null;
   private submergedBed: LoopVoice | null = null;
   private nextGullAt = 0;
-  // Interior flooding slosh (single instance)
-  private flooding: RichLoopVoice | null = null;
+  // Flooding (b2.4d): per-breach positioned gush loops, slosh, gurgle and flood one-shots.
+  private floodAudio: FloodAudio | null = null;
   // Per-burning-ship fire crackle loops (capped at 2; oldest is stolen)
   private readonly fires = new Map<string, LoopVoice>();
   // Nearest-waterfall bed (single voice; the environment picks the fall)
@@ -2453,64 +2457,167 @@ export class SoundEngine {
     if (this.waterfallBed.lfoGain) this.ramp(this.waterfallBed.lfoGain.gain, 0.03 * g, 0.5);
   }
 
-  // ── Interior flooding slosh (single instance) ────────────────────
-  /** Begin the interior water-slosh loop. level is 0..1 waterline. */
-  startFlooding(level = 0): void {
-    const ctx = this.ctx;
-    if (!ctx || !this.busDry || !this.noise) return;
-    if (!this.flooding) {
-      // Route to dry (not the bed bus): flooding is critical feedback, not ambience to duck.
-      const v = this.makeNoiseLoop('lowpass', 420, 0.7, this.busDry);
-      const trem = this.addGainTremolo(v.gain, 0.5, 0.02); // slow swell
-      // Slosh: a slow LFO wobbles the filter cutoff for a moving-water feel.
-      const lfo2 = ctx.createOscillator();
-      lfo2.type = 'sine';
-      safeSet(lfo2.frequency, 'value', 0.32);
-      const lfo2Gain = ctx.createGain();
-      safeSet(lfo2Gain.gain, 'value', 120);
-      lfo2.connect(lfo2Gain);
-      lfo2Gain.connect(v.filter.frequency);
-      lfo2.start();
-      this.flooding = { ...v, lfo: trem.lfo, lfoGain: trem.lfoGain, lfo2, lfoGain2: lfo2Gain };
+  // ── Flooding (b2.4d, audio-02) ──────────────────────────────────
+  /**
+   * Drive the SoT-style flooding sound once per frame: a positioned gush loop on each breach
+   * (up to 6 per hull, the deepest kept), slosh and gurgle at the hull, punch / patch / mallet /
+   * founder one-shots. Replaces the single centred startFlooding/updateFlooding noise loop.
+   */
+  updateFlood(frame: FloodAudioFrame): void {
+    if (!this.ctx || !frame || !finitePos(frame.listener)) return;
+    try {
+      if (!this.floodAudio) this.floodAudio = new FloodAudio(this.floodHost());
+      this.floodAudio.update(frame);
+    } catch (err) {
+      this.backstopFaults += 1;
+      if (this.backstopFaults <= 3) console.warn('[Audio] updateFlood failed:', err);
     }
-    this.updateFlooding(level);
   }
 
-  /** Follow the waterline: louder + brighter as the interior floods. */
-  updateFlooding(level: number): void {
+  /** Bucket scoop (dip) and fling (water over the rail), sampled with the procedural fallback. */
+  playBucket(kind: 'scoop' | 'fling', pos?: SoundPos | null): void {
     if (!this.ctx) return;
-    if (!this.flooding) { this.startFlooding(level); return; }
-    const l = THREE.MathUtils.clamp(level, 0, 1);
-    this.ramp(this.flooding.gain.gain, 0.03 + l * 0.16, 0.4);
-    this.ramp(this.flooding.filter.frequency, 300 + l * 700, 0.5);
+    if (!this.floodAudio) this.floodAudio = new FloodAudio(this.floodHost());
+    this.floodAudio.bucket(kind === 'scoop' ? 'scoop' : 'fling', finitePos(pos) ? (pos as FloodVec) : null);
   }
 
-  /** Fade out and dispose the flooding loop. */
+  /** Silence every flood voice (respawn, match end). */
   stopFlooding(): void {
-    const ctx = this.ctx;
-    const f = this.flooding;
-    this.flooding = null;
-    if (!ctx || !f) return;
-    safeSet(f.gain.gain, 'linear', 0, ctx.currentTime + 0.7);
-    window.setTimeout(() => {
-      try { f.source.stop(); } catch { /* ignore */ }
-      try { f.lfo?.stop(); } catch { /* ignore */ }
-      try { f.lfo2?.stop(); } catch { /* ignore */ }
-    }, 900);
+    this.floodAudio?.reset();
   }
 
-  /** Scoop-and-toss bilge bail one-shot. */
-  playBail(): void {
+  private floodHost(): FloodAudioHost {
+    return {
+      openLoop: (kind, pos) => this.openFloodLoop(kind, pos),
+      oneShot: (kind, pos, volume, rate) => this.playFloodOneShot(kind, pos, volume, rate),
+    };
+  }
+
+  /** A looping water voice at `pos`: sampled gush (bed.floodGush) or filtered noise until it decodes.
+   *  The PannerNode does direction only; FloodAudio's gain carries distance and hull occlusion. */
+  private openFloodLoop(kind: FloodLoopKind, pos: FloodVec): FloodLoopHandle | null {
+    const ctx = this.ctx;
+    const out = this.busDry;
+    if (!ctx || !out || !this.noise || !finitePos(pos)) return null;
+    const pick = this.bank?.pick('bed.floodGush') ?? null;
+    const src = ctx.createBufferSource();
+    src.buffer = (pick ? pick.buffer : this.noise) as AudioBuffer;
+    src.loop = true;
+    if (pick) {
+      const f = pick.file as { loopStart?: number; loopEnd?: number };
+      if (Number.isFinite(f.loopStart)) src.loopStart = f.loopStart as number;
+      if (Number.isFinite(f.loopEnd) && (f.loopEnd as number) > (f.loopStart ?? 0)) src.loopEnd = f.loopEnd as number;
+    }
+    const filter = ctx.createBiquadFilter();
+    // Noise needs the band shaped into water; the recording only needs its top trimmed.
+    filter.type = pick || kind !== 'gush' ? 'lowpass' : 'bandpass';
+    safeSet(filter.frequency, 'value', kind === 'gush' ? 1600 : 400);
+    safeSet(filter.Q, 'value', pick ? 0.5 : (kind === 'gurgle' ? 2.2 : 0.8));
+    const gain = ctx.createGain();
+    safeSet(gain.gain, 'value', 0);
+    const panner = makeWorldPanner(ctx, pos, this.panningModel());
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(panner);
+    panner.connect(out);
+    if (this.busReverb) {
+      const send = ctx.createGain();
+      safeSet(send.gain, 'value', 0.16);
+      panner.connect(send);
+      send.connect(this.busReverb);
+      this.ownSendNodes.add(panner);
+    }
+    const dur = (src.buffer as AudioBuffer | null)?.duration ?? 1;
+    src.start(0, Math.random() * Math.max(0.05, Math.min(dur - 0.2, (pick?.file.loopEnd ?? dur) - 0.2)));
+    let stopped = false;
+    return {
+      set: (p, glide) => {
+        if (stopped) return;
+        this.ramp(gain.gain, finiteClamp(p.gain, 0, 1.5, 0), glide);
+        this.ramp(filter.frequency, finiteClamp(p.cutoff, 60, 16000, 800), glide);
+        if (pick) this.ramp(src.playbackRate, finiteClamp(p.rate, 0.25, 2, 1), glide);
+        if (finitePos(p.pos)) {
+          safeSet(panner.positionX, 'value', p.pos.x);
+          safeSet(panner.positionY, 'value', p.pos.y);
+          safeSet(panner.positionZ, 'value', p.pos.z);
+        }
+      },
+      stop: (releaseS) => {
+        if (stopped) return;
+        stopped = true;
+        const r = finiteClamp(releaseS, 0.02, 3, 0.3);
+        this.ramp(gain.gain, 0, r);
+        window.setTimeout(() => {
+          try { src.stop(); } catch { /* already stopped */ }
+          try { panner.disconnect(); } catch { /* gone */ }
+          this.ownSendNodes.delete(panner);
+        }, (r + 0.15) * 1000);
+      },
+    };
+  }
+
+  /** Sample first (FloodAudio's volume already carries hull occlusion; playSample adds distance),
+   *  procedural fallback when the sample is not decoded. */
+  private playFloodOneShot(kind: FloodOneShotKind, pos: FloodVec | null, volume: number, rate: number): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const at = pos && finitePos(pos) ? pos : null;
+    const table: Record<FloodOneShotKind, { key: string; rate: number; cat: SpatialCategory; pri: number }> = {
+      holePunch: { key: 'wood.crack', rate: 1, cat: 'impact', pri: VOICE_PRIORITY.combat },
+      patchKnock: { key: 'wood.plank', rate: 1, cat: 'foley', pri: VOICE_PRIORITY.own },
+      hammer: { key: 'hammer.hit', rate: 1, cat: 'foley', pri: VOICE_PRIORITY.own },
+      scoop: { key: 'splash.small', rate: 1, cat: 'splash', pri: VOICE_PRIORITY.foley },
+      fling: { key: 'splash.small', rate: 1, cat: 'splash', pri: VOICE_PRIORITY.foley },
+      groan: { key: 'ship.creak', rate: 0.55, cat: 'impact', pri: VOICE_PRIORITY.world },
+      frameCrack: { key: 'wood.crack', rate: 0.62, cat: 'impact', pri: VOICE_PRIORITY.world },
+      airRelease: { key: 'splash.cannon', rate: 0.7, cat: 'splash', pri: VOICE_PRIORITY.world },
+      suction: { key: 'splash.cannon', rate: 0.42, cat: 'splash', pri: VOICE_PRIORITY.world },
+    };
+    const e = table[kind];
+    if (!e) return;
+    const vol = finiteClamp(volume, 0, 2, 1);
+    if (this.playSample(e.key, { pos: at, volume: vol, rate: e.rate * finiteClamp(rate, 0.25, 4, 1), priority: e.pri, category: e.cat })) return;
+    // Procedural fallback, scaled by the same distance law the sample would get.
+    const d = at && this.listenerKnown ? Math.hypot(at.x - this.listenerPos.x, at.y - this.listenerPos.y, at.z - this.listenerPos.z) : 0;
+    const g = vol * gainFor(e.cat, d);
+    if (g < 0.01) return;
+    const now = ctx.currentTime;
+    switch (kind) {
+      case 'patchKnock':
+      case 'hammer': this.plankHit(now, g); break;
+      case 'scoop': this.playSwimSplash(0.5 * g); break;
+      case 'fling': this.proceduralBail(g); break;
+      case 'groan':
+        this.playTone(now, 70, 48, 2.2, 0.2 * g, 'sawtooth', 0.4);
+        this.playNoise(now, 2.0, 160, 1.4, 0.12 * g, 'bandpass');
+        break;
+      case 'holePunch':
+      case 'frameCrack':
+        this.playNoise(now, 0.18, 1400, 1.1, 0.3 * g, 'bandpass');
+        this.playTone(now, 160, 70, 0.3, 0.2 * g, 'triangle', 0.004);
+        break;
+      case 'airRelease':
+        this.playNoise(now, 1.4, 520, 0.6, 0.22 * g, 'lowpass');
+        this.playNoise(now + 0.1, 1.1, 1500, 1.2, 0.1 * g, 'bandpass');
+        break;
+      case 'suction':
+        this.playNoise(now, 2.6, 240, 0.8, 0.24 * g, 'lowpass');
+        this.playTone(now, 90, 38, 2.4, 0.16 * g, 'sine', 0.3);
+        break;
+    }
+  }
+
+  /** Procedural scoop-and-toss (fallback for the sampled bucket fling). */
+  private proceduralBail(vol = 1): void {
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
-    // Scoop swish
-    this.playNoise(now, 0.16, 700, 1.2, 0.12, 'bandpass');
-    this.playNoise(now + 0.04, 0.14, 2200, 0.9, 0.08, 'highpass');
-    // Toss-out splash
-    this.playNoise(now + 0.18, 0.3, 3600, 0.5, 0.16, 'highpass');
-    this.playNoise(now + 0.2, 0.34, 800, 0.7, 0.14, 'bandpass');
-    this.playNoise(now + 0.26, 0.4, 240, 0.5, 0.1, 'lowpass');
-    this.playTone(now + 0.2, 180, 90, 0.28, 0.06, 'sine', 0.02);
+    const v = finiteClamp(vol, 0, 2, 1);
+    this.playNoise(now, 0.16, 700, 1.2, 0.12 * v, 'bandpass');
+    this.playNoise(now + 0.04, 0.14, 2200, 0.9, 0.08 * v, 'highpass');
+    this.playNoise(now + 0.18, 0.3, 3600, 0.5, 0.16 * v, 'highpass');
+    this.playNoise(now + 0.2, 0.34, 800, 0.7, 0.14 * v, 'bandpass');
+    this.playNoise(now + 0.26, 0.4, 240, 0.5, 0.1 * v, 'lowpass');
+    this.playTone(now + 0.2, 180, 90, 0.28, 0.06 * v, 'sine', 0.02);
   }
 
   // ── Sailing feel (continuous) ────────────────────────────────────

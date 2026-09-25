@@ -559,6 +559,13 @@ export const LOGIC = [
   //                                 procedural); SampleBank: missing/404/late sample falls back without throwing,
   //                                 <= 3 decodes by priority, decoded LRU under 40/64 MB, per-kind duration caps.
   quick(tsx('test-audio-models.mjs')),
+  //   test-flood-audio            — b2.4d SoT flooding sound (audio-02, vm:audio:1/2, vm:liveplay:4): gush 0 at/above
+  //                                 the waterline and strictly increasing with depth (sqrt(2 g h), tear size, boil
+  //                                 under the hold water), 6 voices per hull keep the deepest, each ON its breach;
+  //                                 slosh 0 dry and louder with roll rate, gurgle past half full; a hull 60 m off
+  //                                 >= 12 dB under your own; punch/patch/mallet/founder edges; engine: one
+  //                                 PannerNode per breach (not one centred loop), junk frames never throw.
+  quick(tsx('test-flood-audio.mjs')),
   //   test-connect-supervisor     — real NetworkClient, fake socket Worker, virtual clock: cold start 7 s -> connect()
   //                                 resolves once, one live transport, no resume from a fresh page; drop -> one resume
   //                                 with this page's token; 60 s give-up + retryNow; offline/online; silent background
