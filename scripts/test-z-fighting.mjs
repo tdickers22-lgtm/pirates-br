@@ -34,7 +34,7 @@ import {
   PIN_PROBE_RESOLUTION, PLACE_AND_SETTLE, DEPTH_TIE_CENSUS, PIERCE_TIE_PIXELS,
   DETACH_POST_CHAIN,
 } from './lib/zfight-probe.mjs';
-import { planStands, DOLLY, TIME_OF_DAY, VIEWPORT } from './lib/zfight-stands.mjs';
+import { planStands, DOLLY, TIME_OF_DAY, VIEWPORT, STAGE_SHIP_STAND, RELEASE_SHIP_STAND } from './lib/zfight-stands.mjs';
 
 const argv = process.argv.slice(2);
 const arg = (name, fallback = null) => {
@@ -126,6 +126,16 @@ async function main() {
     console.log(`  ${stands.length} stands x ${tods.length} times of day x ${POSES} poses\n`);
 
     for (const stand of stands) {
+      if (stand.setup) {
+        let cam = null;
+        for (let t = 0; t < 40 && !cam; t++) {
+          const r = await page.evaluate(STAGE_SHIP_STAND, stand.setup);
+          if (r?.error) throw new Error(`${stand.id}: ${r.error}`);
+          if (r && !r.pending) cam = r; else await waitFrames(page, 2);
+        }
+        if (!cam) throw new Error(`${stand.id}: staging never settled`);
+        stand.cam = cam;
+      }
       for (const [todName, todSec] of tods) {
         const placed = await page.evaluate(PLACE_AND_SETTLE, { ...stand.cam, tod: todSec });
         // Let the warmer finish paying for whatever this view newly needs before
@@ -172,6 +182,7 @@ async function main() {
         const worst = poses.reduce((a, b) => (b.ties > a.ties ? b : a));
         report.stands.push({ id: stand.id, label: stand.label, tod: todName, poses, worst: worst.ties });
       }
+      if (stand.setup) await page.evaluate(RELEASE_SHIP_STAND);
     }
 
     // ── the assertions ────────────────────────────────────────────────

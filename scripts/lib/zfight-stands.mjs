@@ -103,5 +103,62 @@ export function planStands(world, filter = null) {
     });
   }
 
+  // THE HOLD (b2.3e). Staged, not placed: the camera is computed IN the page
+  // from the drawn hull after STAGE_SHIP_STAND pins the hold water (which also
+  // freezes the drawn hull, so the dolly re-measures the same view).
+  //  - hold-flooded: water at 0.45 fill against the inner planking, frames,
+  //    locker lids, bilge boards and sole; the waterline meets every one.
+  //  - hull-patched: an above-sole breach patched from inside, the patch
+  //    planks and nails lying on the bilge board face and lining.
+  if (world.ship) {
+    stands.push({
+      id: 'hold-flooded',
+      label: 'hold flooded to 0.45 (water vs planking, frames, lids, sole)',
+      cam: { staged: true },
+      setup: { fill: 0.45 },
+    });
+    stands.push({
+      id: 'hull-patched',
+      label: 'hull patched from inside (patch planks + nails on the board face)',
+      cam: { staged: true },
+      setup: { fill: 0, holes: [{ id: 951, x: 1, y: 0.44, z: 0.3, patched: true }] },
+    });
+  }
+
   return stands.filter((s) => s.cam && (!filter || filter.includes(s.id)));
 }
+
+/** In-page: pin the hold, stage any debug breach, return the camera pose for a
+ *  staged stand ({ pending: true } until the breach vis is built). */
+export const STAGE_SHIP_STAND = (s) => {
+  const g = window.__piratesBR;
+  const sr = g.shipRenderer;
+  sr.setHoldWaterDebug({ fill: s.fill, roll: 0, pitch: 0 });
+  const me = g.state.players.find((p) => p.id === g.localPlayerId);
+  const mesh = sr.shipMeshes.get(me?.shipId);
+  if (!mesh) return { error: 'no ship mesh' };
+  let tl;
+  if (s.holes) {
+    sr.setBreachDebug(me.shipId, s.holes);
+    const vis = mesh.holeVis.get(s.holes[0].id);
+    if (!vis || vis.patched !== !!s.holes[0].patched) return { pending: true };
+    tl = vis.inner;
+  } else {
+    tl = { x: mesh.ceilingAt(mesh.holdHalfLen * 0.3, mesh.lockerTop + 0.4), y: mesh.lockerTop + 0.2, z: mesh.holdHalfLen * 0.3 };
+  }
+  const V = mesh.root.position.constructor;
+  mesh.root.updateMatrixWorld(true);
+  const deckY = sr.getHoldWater(me.shipId)?.clip?.deckY ?? 2.4;
+  const target = mesh.root.localToWorld(new V(tl.x, tl.y, tl.z));
+  const eye = mesh.root.localToWorld(s.holes
+    ? new V(0.55 * tl.x, deckY - 0.45, tl.z - 0.7)
+    : new V(-0.3, deckY - 0.3, -0.3 * mesh.holdHalfLen));
+  const d = target.clone().sub(eye);
+  return { x: eye.x, y: eye.y, z: eye.z, yaw: Math.atan2(d.x, d.z), pitch: Math.atan2(d.y, Math.hypot(d.x, d.z)) };
+};
+
+export const RELEASE_SHIP_STAND = () => {
+  const sr = window.__piratesBR.shipRenderer;
+  sr.setHoldWaterDebug(null);
+  sr.setBreachDebug(null);
+};
