@@ -113,6 +113,10 @@ import { intersectRayIslandProps, resolvePropCollision } from '../../shared/prop
 import { resolveWalkerAgainstWildlife, swimFloatVelocity } from '../../shared/locomotion.js';
 import { raymarchIslandSurface } from '../../shared/raycast.js';
 import { CLASS_TOP_SPEED, HULL_PARAMS, polarSpeed, sailPolarFraction, trimEfficiency as sailTrimEfficiency } from '../../shared/sailing.js';
+import {
+  ANCHOR_HELD_DAMP, ANCHOR_TURN_SLEW, anchorHolds, anchorPivotLateral, anchorTurnOmega, rodeForwardStep, rodeSpeedFloorScale, stepAnchorPhase,
+  type AnchorPhase, type AnchorState,
+} from '../../shared/anchor.js';
 
 // ── Ship wave-riding dynamics tuning ─────────────────────────────────────────
 /** Near-critical damping for the heave spring (k = PHYSICS.BUOYANCY_SPRING). */
@@ -521,6 +525,16 @@ export class PhysicsSystem {
    *  than STORM_GUST_BLOWOUT_DEPLOYMENT inside a squall. Server-side only; at
    *  most one entry per floating hull (<=12). */
   private gustDwell = new Map<string, number>();
+  /** THE ANCHOR (D22, b2.1c): per-hull phase of the shared state machine
+   *  (shared/anchor.ts). Server-side only, keyed by ship id; `ship.anchored`
+   *  stays the replicated intent flag. */
+  private anchorStates = new Map<string, AnchorState>();
+  /** Bites this update (dropping -> biting), for the crew stagger (Match). */
+  anchorBites: Array<{ shipId: string; speed: number }> = [];
+  /** The anchor phase of a hull ('raised' for one never seen). */
+  getAnchorPhase(shipId: string): AnchorPhase {
+    return this.anchorStates.get(shipId)?.phase ?? 'raised';
+  }
   /** Rotation applied to each ship this update — deck passengers must be carried by the actual delta. */
   private shipRotationDeltas = new Map<string, number>();
   /** Per-ship spring-damper velocities for heave/pitch/roll wave riding. */
@@ -709,6 +723,7 @@ export class PhysicsSystem {
 
   private updateShips(dt: number, t: number, ships: Ship[], players: Player[], islands: Island[], seaRocks: SeaRock[], storm: StormState | null) {
     this.rebuildEnvSafeShips(t, ships, players, islands, storm);
+    this.anchorBites.length = 0;
     const helmedShipIds = new Set<string>();
     const helmsmanByShip = new Map<string, string>();
     const humanHelmShipIds = new Set<string>();
@@ -781,6 +796,14 @@ export class PhysicsSystem {
       const sinR = Math.sin(ship.rotation);
       const currentFwd = sinR * ship.velocity.x + cosR * ship.velocity.z;
       const currentLat = cosR * ship.velocity.x - sinR * ship.velocity.z;
+      // THE ANCHOR (D22): the cable pays out for 2 s before the rode acts at
+      // all, then bites (<= 0.6 g), then holds. `rodeOn` replaces the old
+      // `ship.anchored` brake everywhere in the force path below.
+      const anchorStep = stepAnchorPhase(this.anchorStates.get(ship.id), ship.anchored, t, Math.hypot(ship.velocity.x, ship.velocity.z));
+      this.anchorStates.set(ship.id, anchorStep.state);
+      if (anchorStep.bit) this.anchorBites.push({ shipId: ship.id, speed: anchorStep.biteSpeed });
+      const anchorPhase = anchorStep.state.phase;
+      const rodeOn = anchorHolds(anchorPhase);
       // Drag of a torn hull: every two open breaches cost what one wrecked
       // section used to (same 4-step ceiling at 8 holes as the old model).
       const breachDrag = Math.min(4, countOpenHoles(ship) / 2);
@@ -813,7 +836,7 @@ export class PhysicsSystem {
       const sailDeployment =
         (chainshotted ? 0.42 : 1) * ship.sailHeight * clamp(ship.sailIntegrity, 0, 1);
       // Inside the no-go cone with canvas set the sails visibly luff (client flutter).
-      ship.luffing = offWind <= SHIP.SAIL_NO_GO_ANGLE && sailDeployment > 0.08 && !ship.anchored;
+      ship.luffing = offWind <= SHIP.SAIL_NO_GO_ANGLE && sailDeployment > 0.08 && !rodeOn;
       // Full canvas held through a squall tears it out of the bolt-ropes. The
       // dwell is what makes this a decision and not a dice roll: two seconds is
       // long enough to see the pulse on the HUD and shorten sail.
@@ -864,24 +887,40 @@ export class PhysicsSystem {
       // Flogging canvas in irons adds drag (physics-02): staying head to wind
       // still costs way, it just no longer costs it all in one tick.
       const luffC2 = ship.luffing ? hull.c2 * 1.3 * sailDeployment : 0;
-      let forwardSpeed: number;
-      let lateralSpeed: number;
-      if (ship.anchored) {
-        // The anchor itself (rode, bite, anchor turn) is b2.1c's state machine;
-        // until then the anchored hull keeps the old brake.
-        const speedBlend = 1 - Math.exp(-SHIP.ANCHOR_BRAKE * 1.28 * dt);
-        forwardSpeed = currentFwd - currentFwd * speedBlend;
-        lateralSpeed = currentLat * Math.exp(-dt * 8.5);
-      } else {
-        // Semi-implicit Euler at the fixed tick: the drag is taken implicitly
-        // (linearised about |v|), so it can slow a hull to zero but never flip
-        // her velocity, at any dt.
-        const fwdDragCoef = dragMult * (hull.c1 + (hull.c2 + luffC2) * Math.abs(currentFwd));
-        forwardSpeed = (currentFwd * hull.mass + fSail * dt) / (hull.mass + fwdDragCoef * dt);
-        // The keel: lateral resistance >= 25x the forward drag (KEEL_LATERAL_RATIO),
-        // so turning redirects the momentum instead of skidding it away.
-        const latDragCoef = hull.cLat1 + hull.cLat2 * Math.abs(currentLat);
-        lateralSpeed = (currentLat * hull.mass) / (hull.mass + latDragCoef * dt);
+      // Semi-implicit Euler at the fixed tick: the drag is taken implicitly
+      // (linearised about |v|), so it can slow a hull to zero but never flip
+      // her velocity, at any dt.
+      const fwdDragCoef = dragMult * (hull.c1 + (hull.c2 + luffC2) * Math.abs(currentFwd));
+      let forwardSpeed = (currentFwd * hull.mass + fSail * dt) / (hull.mass + fwdDragCoef * dt);
+      // The keel: lateral resistance >= 25x the forward drag (KEEL_LATERAL_RATIO),
+      // so turning redirects the momentum instead of skidding it away.
+      const latDragCoef = hull.cLat1 + hull.cLat2 * Math.abs(currentLat);
+      let lateralSpeed = (currentLat * hull.mass) / (hull.mass + latDragCoef * dt);
+      if (anchorPhase === 'biting') {
+        // The rode takes up: never more than 0.6 g, never a reversal, and a
+        // canvas still set cannot drive her through it.
+        forwardSpeed = rodeForwardStep(currentFwd, forwardSpeed, t - anchorStep.state.since, dt);
+        // THE ANCHOR TURN. The bow is held; with the helm over the stern swings
+        // and she pivots about her bow, her remaining way turned into swing.
+        // Helm amidships, no swing. The rudder's own answer is the floor.
+        const rudderFrac = (ship.rudderAngle ?? 0) / SHIP.RUDDER_MAX_ANGLE;
+        const swing = anchorTurnOmega(ship.type, rudderFrac, currentFwd, stats.length);
+        if (Math.abs(swing) > Math.abs(ship.angularVelocity) || Math.sign(swing) !== Math.sign(ship.angularVelocity)) {
+          ship.angularVelocity += (swing - ship.angularVelocity) * (1 - Math.exp(-dt * ANCHOR_TURN_SLEW));
+        }
+        // The bow is held on the rode line, so the centre carries the swing
+        // sideways (the stern goes out, the bow stays): the keel's own lateral
+        // answer is overridden by the pivot while she bites.
+        lateralSpeed = anchorPivotLateral(ship.angularVelocity, stats.length);
+        const keep = rodeSpeedFloorScale(Math.hypot(currentFwd, currentLat), Math.hypot(forwardSpeed, lateralSpeed), dt);
+        forwardSpeed *= keep;
+        lateralSpeed *= keep;
+      } else if (anchorPhase === 'held') {
+        // Lying to her anchor: residual way dies, canvas does not drive her.
+        const hold = Math.exp(-dt * ANCHOR_HELD_DAMP);
+        forwardSpeed = currentFwd * hold;
+        lateralSpeed = currentLat * hold;
+        ship.angularVelocity *= hold;
       }
 
       ship.velocity.x = sinR * forwardSpeed + cosR * lateralSpeed;
@@ -889,17 +928,11 @@ export class PhysicsSystem {
 
       // Leeway — the wind shoves a hull with canvas set gently downwind. The
       // lateral damping above keeps this a small (~4% of speed) sideways drift.
-      if (!ship.anchored && sailDeployment > 0.1) {
+      if (!rodeOn && sailDeployment > 0.1) {
         const leewayAccel = Math.sin(signedRelative) * wind.strength
           * Math.min(Math.abs(forwardSpeed), stats.maxSpeed) * 0.12;
         ship.velocity.x += cosR * leewayAccel * dt;
         ship.velocity.z += -sinR * leewayAccel * dt;
-      }
-
-      if (ship.anchored) {
-        const drag = Math.max(0, 1 - SHIP.ANCHOR_BRAKE * dt);
-        ship.velocity.x *= drag;
-        ship.velocity.z *= drag;
       }
 
       const speed = Math.sqrt(ship.velocity.x ** 2 + ship.velocity.z ** 2);
