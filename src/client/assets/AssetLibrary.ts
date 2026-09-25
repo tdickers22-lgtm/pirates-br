@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { auditAssetMaterial } from './materialAudit.js';
 import { collapseChunks } from './AssetMaterialCollapse.js';
+import { modelUrl, withMeshopt } from './modelManifest.js';
 import { trackUpload, geometryUploaded, releaseGeometryCpu, cpuCopyReleaseEnabled } from '../rendering/CpuCopyRelease.js';
 
 /**
@@ -269,7 +270,7 @@ export class AssetLibrary {
   private readonly ensured = new Map<AssetName, Promise<void>>();
   private readonly lazyQueue: { name: AssetName; run: () => void }[] = [];
   private lazyActive = 0;
-  private readonly loader = new GLTFLoader();
+  private readonly loader = withMeshopt(new GLTFLoader());
   private done = 0;
 
   /**
@@ -398,7 +399,7 @@ export class AssetLibrary {
    *  For the memory census mutation only: it must not share anything the
    *  release above has emptied. */
   async loadDetached(name: AssetName): Promise<THREE.Group> {
-    return (await this.loader.loadAsync(`/assets/models/${name}.glb`)).scene;
+    return (await this.loader.loadAsync(modelUrl(name))).scene;
   }
 
   /** Has this name been asked for through `ensure()` (settled or in flight)? */
@@ -420,7 +421,7 @@ export class AssetLibrary {
 
   /** Fetch + register one GLB under `key` (`name` is its base asset name). */
   private async loadOne(name: AssetName, key: AssetKey): Promise<void> {
-    const gltf = await this.loader.loadAsync(`/assets/models/${key}.glb`);
+    const gltf = await this.loader.loadAsync(modelUrl(key));
     const root = gltf.scene;
     root.traverse((o) => {
       if (o instanceof THREE.Mesh) {
