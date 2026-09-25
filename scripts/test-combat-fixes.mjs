@@ -402,7 +402,9 @@ console.log('\n4. floodingRate is the NET trend — negative while a bailer is w
   player.equippedTool = 'bucket'; // physical bailing requires the bucket equipped
 
   // Park in open water inside a pinned storm ring, one holed section, no
-  // auto-repair planks — one bailer (0.014/s) beats one hole (0.010/s).
+  // auto-repair planks. b2.2d re-pin: the hole sits mid-band (0.3, D15 band
+  // 0.10-0.45) so the bucket cycle (0.023 per ~1.2 s = 0.019/s) beats it; at
+  // y 0.05 on a hull settled at water 0.5 Torricelli ingress ties the bucket.
   const spot = findOpenSea(st, (x, z) => Math.hypot(x, z) < 700);
   ship.position = { x: spot.x, y: 0, z: spot.z };
   ship.velocity = { x: 0, y: 0, z: 0 };
@@ -410,7 +412,7 @@ console.log('\n4. floodingRate is the NET trend — negative while a bailer is w
   ship.inventory = ship.inventory.filter((s) => s.item !== 'wood_plank');
   ship.holes = [];
   ship.nextHoleId = 1;
-  match.physics.openHoleAt(ship, { x: -SHIP_STATS[ship.type].width * 0.5, y: 0.05, z: 0 }, 1, 'cannon');
+  match.physics.openHoleAt(ship, { x: -SHIP_STATS[ship.type].width * 0.5, y: 0.3, z: 0 }, 1, 'cannon');
   player.state = 'alive';
   player.onShipId = ship.id;
   player.position = {
@@ -462,15 +464,33 @@ console.log('\n4. floodingRate is the NET trend — negative while a bailer is w
   let bailSeq = 1000;
   let sawFilledBucket = false;
   let sawBailing = false;
+  // b2.2d (SoT bucket) re-pin: the scoop needs the hold water over his feet
+  // and the heave has to clear the rail, so the bailer shuttles: empty bucket
+  // -> standing in the hold water looking down, full bucket -> starboard rail
+  // facing outboard. (Teleporting stands in for the ladder walk.)
+  const bst = SHIP_STATS[ship.type];
+  const placeLocal = (lx, ly, lz) => {
+    const c = Math.cos(ship.rotation), sn = Math.sin(ship.rotation);
+    player.position = { x: ship.position.x + lx * c + lz * sn, y: ship.position.y + ly, z: ship.position.z + lz * c - lx * sn };
+  };
   for (let i = 0; i < 300; i++) {
     player.health = 100; if (bot) bot.health = 100;
-    client.lastInput = makeBailInput(bailSeq++);
+    const input = makeBailInput(bailSeq++);
+    if (player.bucketFilled) {
+      placeLocal(bst.width * 0.40, bst.height + SHIP.DECK_STAND_OFFSET, 0);
+      input.yaw = ship.rotation + Math.PI / 2; input.pitch = 0;
+    } else {
+      placeLocal(bst.width * 0.2, SHIP.HOLD_FLOOR_OFFSET, -bst.length * 0.2);
+      input.yaw = ship.rotation; input.pitch = -0.6;
+    }
+    client.lastInput = input;
     match.tick();
     if (player.bucketFilled) sawFilledBucket = true;
     if (player.bailing) sawBailing = true;
   }
   expect('bailer scoops (bucket fills during the cycle)', sawFilledBucket === true);
   expect('bailer is recognized (player.bailing set during a scoop/heave)', sawBailing === true);
+  console.log(`     (bail window water ${levelBeforeBail.toFixed(4)} -> ${ship.waterLevel.toFixed(4)})`);
   expect('cycling bailer: water actually falls', ship.waterLevel < levelBeforeBail - 0.01,
     `water ${levelBeforeBail.toFixed(4)} → ${ship.waterLevel.toFixed(4)}`);
 }
@@ -564,11 +584,22 @@ console.log('\n6. Bots bail under player-like constraints');
   expect('below the bail threshold the bot keeps working',
     ship.waterLevel === FLOODING.BOT_BAIL_THRESHOLD - 0.1 && b0.bailing === false);
 
-  // Aboard, free, deep water → bails at exactly one bucket rate.
+  // b2.2d re-pin: bots carry the SAME bucket a human does (no remote
+  // BAIL_RATE drain). Standing in the hold water, an aboard, free bot scoops
+  // exactly one bucketful.
+  const bst = SHIP_STATS[ship.type];
+  const inHoldWater = (b, k) => {
+    const lx = bst.width * (0.2 - 0.1 * k), lz = -bst.length * 0.2;
+    const c = Math.cos(ship.rotation), sn = Math.sin(ship.rotation);
+    b.position = { x: ship.position.x + lx * c + lz * sn, y: ship.position.y + SHIP.HOLD_FLOOR_OFFSET, z: ship.position.z + lz * c - lx * sn };
+    b.bucketFilled = false;
+  };
+  ship.pitch = 0; ship.roll = 0; ship.heave = 0;
+  inHoldWater(b0, 0);
   ship.waterLevel = 0.6;
   match.updateBotFlooding(DT);
   expect('an aboard, off-station bot bails deep water',
-    b0.bailing === true && Math.abs(ship.waterLevel - (0.6 - FLOODING.BAIL_RATE * DT)) < 1e-9,
+    b0.bailing === true && b0.bucketFilled === true && Math.abs(ship.waterLevel - (0.6 - FLOODING.BAIL_SCOOP_VOLUME)) < 1e-9,
     `water=${ship.waterLevel}`);
 
   // Bucket line caps at two per hull — a full crew can't stack free drain.
@@ -577,12 +608,14 @@ console.log('\n6. Bots bail under player-like constraints');
     b.onShipId = ship.id;
     b.bailing = false;
   }
+  bots.forEach((b, k) => inHoldWater(b, k));
+  match.t += 1; // past b0's scoop lock
   ship.waterLevel = 0.6;
   match.updateBotFlooding(DT);
   const bailers = bots.filter((b) => b.bailing).length;
   expect('at most two bots bail one hull', bailers === 2, `bailers=${bailers}`);
   expect('drain equals exactly two buckets',
-    Math.abs(ship.waterLevel - (0.6 - 2 * FLOODING.BAIL_RATE * DT)) < 1e-9,
+    Math.abs(ship.waterLevel - (0.6 - 2 * FLOODING.BAIL_SCOOP_VOLUME)) < 1e-9,
     `water=${ship.waterLevel}`);
 
   // Per-hole damage control: a bot abandons the bucket, walks to the rail above
