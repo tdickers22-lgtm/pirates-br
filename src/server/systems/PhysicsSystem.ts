@@ -111,7 +111,7 @@ type HullSweepHit =
 import { intersectRayIslandProps, resolvePropCollision } from '../../shared/props.js';
 import { resolveWalkerAgainstWildlife, swimFloatVelocity } from '../../shared/locomotion.js';
 import { raymarchIslandSurface } from '../../shared/raycast.js';
-import { projectileGravity, recordHullRates, stepBallistic, trySkip } from '../../shared/ballistics.js';
+import { hullPointVelocity, hullRatesOf, projectileGravity, recordHullRates, stepBallistic, trySkip } from '../../shared/ballistics.js';
 import { CLASS_TOP_SPEED, HULL_PARAMS, polarSpeed, sailPolarFraction, trimEfficiency as sailTrimEfficiency } from '../../shared/sailing.js';
 import {
   ANCHOR_HELD_DAMP, ANCHOR_TURN_SLEW, anchorHolds, anchorPivotLateral, anchorTurnOmega, rodeForwardStep, rodeSpeedFloorScale, stepAnchorPhase,
@@ -1768,6 +1768,20 @@ export class PhysicsSystem {
           player.health -= SHIP.FIRE_PLAYER_DAMAGE_PER_SEC * dt;
         }
       } else {
+        // physics-12 (b2.1h): stepping or leaping off a hull keeps her way.
+        // Aboard, velocity is deck-relative (the carry above adds the hull);
+        // the moment the body leaves, it becomes world velocity: + v + omega x r
+        // + heave/roll/pitch at the point it left from. A founder or a swimmer
+        // (flooded hold) inherits nothing.
+        if (player.onShipId && player.state !== 'swimming') {
+          const left = ships.find((s) => s.id === player.onShipId);
+          if (left && left.alive && !left.sinking) {
+            const carry = hullPointVelocity(left, player.position, hullRatesOf(left));
+            player.velocity.x += carry.x;
+            player.velocity.z += carry.z;
+            player.velocity.y += carry.y;
+          }
+        }
         player.onShipId = null;
 
         const onIsland = this.findPlayerIsland(player, islands);

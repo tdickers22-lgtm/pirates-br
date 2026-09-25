@@ -270,6 +270,13 @@ export function swimFloatVelocity(y: number, vy: number, restY: number, surfaceV
   return vy + (w * w * off - 2 * w * vrel) * dt;
 }
 
+/** physics-12 (b2.1h): on-foot acceleration, m/s^2. Ground 40 takes a
+ *  standing pirate to 4.5 m/s in ~0.11 s; 55 stops a walker in ~0.09 s; air 8
+ *  (~20% control) steers a leap without reversing it. */
+export const PIRATE_GROUND_ACCEL = 40;
+export const PIRATE_GROUND_DECEL = 55;
+export const PIRATE_AIR_ACCEL = 8;
+
 export interface PirateStepEnv {
   /** The hull the pirate is standing on, already validated (alive, onShipId
    *  matches). Null ashore, in the water or in free flight. */
@@ -404,24 +411,58 @@ export function stepPirate(
     return;
   }
 
-  const len = Math.sqrt(moveX * moveX + moveZ * moveZ) || 1;
-  const nx = moveX / len, nz = moveZ / len;
+  // physics-12 (b2.1h): the body has mass. Footing is tested ONCE, before the
+  // move, and the same answer picks the acceleration law and gates the jump.
+  const grounded = isPirateGrounded(k, env);
   const speed = PLAYER.MOVE_SPEED * (k.crouching ? 0.55 : 1);
-
   if (moveX !== 0 || moveZ !== 0) {
+    const len = Math.sqrt(moveX * moveX + moveZ * moveZ);
+    const nx = moveX / len, nz = moveZ / len;
     const cosY = Math.cos(yaw);
     const sinY = Math.sin(yaw);
-    k.velocity.x = (sinY * nz - cosY * nx) * speed;
-    k.velocity.z = (cosY * nz + sinY * nx) * speed;
+    const dirX = sinY * nz - cosY * nx;
+    const dirZ = cosY * nz + sinY * nx;
+    if (grounded) {
+      // Ground: slew the velocity vector toward the wish at GROUND_ACCEL.
+      const ex = dirX * speed - k.velocity.x;
+      const ez = dirZ * speed - k.velocity.z;
+      const err = Math.sqrt(ex * ex + ez * ez);
+      const step = PIRATE_GROUND_ACCEL * dt;
+      if (err <= step) {
+        k.velocity.x = dirX * speed;
+        k.velocity.z = dirZ * speed;
+      } else {
+        k.velocity.x += (ex / err) * step;
+        k.velocity.z += (ez / err) * step;
+      }
+    } else {
+      // Air: momentum is kept; the wish only adds AIR_ACCEL along itself, and
+      // never beyond walking speed in that direction, so a leap off a hull at
+      // 12 m/s keeps its 12 m/s and a mid-air reversal is a nudge, not a U-turn.
+      const along = k.velocity.x * dirX + k.velocity.z * dirZ;
+      const add = Math.min(PIRATE_AIR_ACCEL * dt, Math.max(0, speed - along));
+      k.velocity.x += dirX * add;
+      k.velocity.z += dirZ * add;
+    }
+  } else if (grounded) {
+    // Ground, no input: brake at GROUND_DECEL to a clean zero.
+    const v = Math.sqrt(k.velocity.x * k.velocity.x + k.velocity.z * k.velocity.z);
+    const step = PIRATE_GROUND_DECEL * dt;
+    if (v <= step) {
+      k.velocity.x = 0;
+      k.velocity.z = 0;
+    } else {
+      k.velocity.x -= (k.velocity.x / v) * step;
+      k.velocity.z -= (k.velocity.z / v) * step;
+    }
+  }
+  if (k.velocity.x !== 0 || k.velocity.z !== 0) {
     k.position.x += k.velocity.x * dt;
     k.position.z += k.velocity.z * dt;
-  } else {
-    k.velocity.x = 0;
-    k.velocity.z = 0;
   }
 
   // Jump
-  if (input.jumpPressed && !env.jumpBlocked && isPirateGrounded(k, env)) {
+  if (input.jumpPressed && !env.jumpBlocked && grounded) {
     k.velocity.y = PLAYER.JUMP_FORCE;
   }
 }

@@ -88,23 +88,38 @@ function referenceStep(player, input, dt, env) {
     }
     return;
   }
-  const len = Math.sqrt(moveX * moveX + moveZ * moveZ) || 1;
-  const nx = moveX / len, nz = moveZ / len;
-  const speed = PLAYER.MOVE_SPEED * (player.crouching ? 0.55 : 1);
-  if (moveX !== 0 || moveZ !== 0) {
-    const cosY = Math.cos(yaw);
-    const sinY = Math.sin(yaw);
-    player.velocity.x = (sinY * nz - cosY * nx) * speed;
-    player.velocity.z = (cosY * nz + sinY * nx) * speed;
-    player.position.x += player.velocity.x * dt;
-    player.position.z += player.velocity.z * dt;
-  } else {
-    player.velocity.x = 0;
-    player.velocity.z = 0;
-  }
+  // b2.1h re-pin (physics-12): the land half is now the mass law, ground accel
+  // 40 / decel 55 / air 8 m/s^2 with air momentum; footing tested once, before
+  // the move. Transcribed from the spec, not copied from locomotion.ts.
   const verticalReady = player.velocity.y <= 0.2;
   let grounded = false;
   if (verticalReady) grounded = env.referenceGrounded(player);
+  const speed = PLAYER.MOVE_SPEED * (player.crouching ? 0.55 : 1);
+  if (moveX !== 0 || moveZ !== 0) {
+    const len = Math.sqrt(moveX * moveX + moveZ * moveZ);
+    const nx = moveX / len, nz = moveZ / len;
+    const dirX = Math.sin(yaw) * nz - Math.cos(yaw) * nx;
+    const dirZ = Math.cos(yaw) * nz + Math.sin(yaw) * nx;
+    if (grounded) {
+      const ex = dirX * speed - player.velocity.x, ez = dirZ * speed - player.velocity.z;
+      const err = Math.sqrt(ex * ex + ez * ez), step = 40 * dt;
+      if (err <= step) { player.velocity.x = dirX * speed; player.velocity.z = dirZ * speed; }
+      else { player.velocity.x += (ex / err) * step; player.velocity.z += (ez / err) * step; }
+    } else {
+      const along = player.velocity.x * dirX + player.velocity.z * dirZ;
+      const add = Math.min(8 * dt, Math.max(0, speed - along));
+      player.velocity.x += dirX * add;
+      player.velocity.z += dirZ * add;
+    }
+  } else if (grounded) {
+    const v = Math.sqrt(player.velocity.x * player.velocity.x + player.velocity.z * player.velocity.z), step = 55 * dt;
+    if (v <= step) { player.velocity.x = 0; player.velocity.z = 0; }
+    else { player.velocity.x -= (player.velocity.x / v) * step; player.velocity.z -= (player.velocity.z / v) * step; }
+  }
+  if (player.velocity.x !== 0 || player.velocity.z !== 0) {
+    player.position.x += player.velocity.x * dt;
+    player.position.z += player.velocity.z * dt;
+  }
   if (input.jumpPressed && !jumpBlocked && grounded) player.velocity.y = PLAYER.JUMP_FORCE;
 }
 

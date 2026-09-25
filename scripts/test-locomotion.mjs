@@ -14,7 +14,7 @@
 //     same drop onto hard ground hurts (proves water entry cancels fall damage).
 import { PhysicsSystem } from '../src/server/systems/PhysicsSystem.ts';
 import { MapGenerator } from '../src/server/world/MapGenerator.ts';
-import { PLAYER } from '../src/shared/constants/index.ts';
+import { PLAYER, SHIP_STATS } from '../src/shared/constants/index.ts';
 import {
   getIslandSurfaceY,
   getIslandMaxRadius,
@@ -582,6 +582,96 @@ function findDryHighGround(pool) {
     expect('the same -0.5 look WITHOUT C stays at the surface (< 0.3 m)', shallowNoCrouch.deepest < 0.3, `deepest=${shallowNoCrouch.deepest.toFixed(2)}m`);
     const diveKey = swim({ ...base, sailLower: true }, 4, 99);
     expect('the dive key still takes the swimmer under (> 1.0 m in 4 s)', diveKey.deepest > 1.0, `deepest=${diveKey.deepest.toFixed(2)}m`);
+  }
+}
+
+// ── 8. The body has mass (physics-12, b2.1h) ────────────────────────────────
+// Shared stepPirate (server + client predictor) and, for the hull leap, the
+// real PhysicsSystem. Ground accel 40 / decel 55 / air 8 m/s^2, air momentum
+// kept, and a body that leaves a hull keeps the hull's way (v + omega x r).
+{
+  console.log('\n8. On-foot mass: ground accel/decel, air momentum, leaving a moving hull');
+  const base = { forward: false, back: false, left: false, right: false, jump: false, jumpPressed: false, sailLower: false, crouch: false, yaw: 0, pitch: 0 };
+  const dry = findDryHighGround(POOL);
+  if (!dry) expect('dry high ground found for the ground-accel cases', false);
+  else {
+    const env = { ship: null, islands: [dry.island], jumpBlocked: false };
+    const p = makePlayer({ x: dry.at.x, y: getIslandSurfaceY(dry.island, dry.at.x, dry.at.z), z: dry.at.z });
+    let tReach = null;
+    for (let i = 1; i <= 60 && tReach === null; i++) {
+      stepPirate(p, { ...base, forward: true }, DT, env);
+      p.position.y = getIslandSurfaceY(dry.island, p.position.x, p.position.z);
+      p.velocity.y = 0;
+      if (Math.hypot(p.velocity.x, p.velocity.z) >= 4.5 - 1e-9) tReach = i * DT;
+    }
+    expect('ground: 0 -> 4.5 m/s takes 0.10-0.16 s', tReach !== null && tReach >= 0.10 && tReach <= 0.16, `t=${tReach === null ? 'never' : tReach.toFixed(3)}s`);
+    for (let i = 0; i < 30; i++) {
+      stepPirate(p, { ...base, forward: true }, DT, env);
+      p.position.y = getIslandSurfaceY(dry.island, p.position.x, p.position.z);
+      p.velocity.y = 0;
+    }
+    let tStop = null;
+    for (let i = 1; i <= 60 && tStop === null; i++) {
+      stepPirate(p, { ...base }, DT, env);
+      p.position.y = getIslandSurfaceY(dry.island, p.position.x, p.position.z);
+      p.velocity.y = 0;
+      if (p.velocity.x === 0 && p.velocity.z === 0) tStop = i * DT;
+    }
+    expect('ground: a walker on release stops in 0.06-0.14 s (decel 55)', tStop !== null && tStop >= 0.06 && tStop <= 0.14, `t=${tStop === null ? 'never' : tStop.toFixed(3)}s`);
+  }
+  {
+    const air = { ship: null, islands: [], jumpBlocked: false };
+    const p = makePlayer({ x: 0, y: 50, z: 0 });
+    p.velocity = { x: 0, y: 2, z: 4.5 };
+    for (let i = 0; i < Math.round(0.3 / DT); i++) stepPirate(p, { ...base, back: true }, DT, air);
+    const dv = Math.hypot(p.velocity.x, p.velocity.z - 4.5);
+    expect('air: holding S for 0.3 s mid-leap changes velocity by <= 2.5 m/s (and does change it)', dv <= 2.5 && dv > 1.5, `dv=${dv.toFixed(2)} m/s vz=${p.velocity.z.toFixed(2)}`);
+    const q = makePlayer({ x: 0, y: 50, z: 0 });
+    q.velocity = { x: 3, y: 2, z: 4 };
+    for (let i = 0; i < 20; i++) stepPirate(q, { ...base }, DT, air);
+    expect('air: no input keeps horizontal momentum', q.velocity.x === 3 && q.velocity.z === 4 && Math.abs(q.position.x - 3 * 20 * DT) < 1e-9, `v=(${q.velocity.x}, ${q.velocity.z}) x=${q.position.x.toFixed(3)}`);
+  }
+  const sea = findOpenSea(POOL);
+  if (!sea) expect('open sea found for the hull leap', false);
+  else {
+    const stats = SHIP_STATS.sloop;
+    const ship = {
+      id: 'leap-sloop', type: 'sloop', ownerId: 'o', crewIds: [], position: { x: sea.x, y: 0, z: sea.z }, rotation: 0,
+      velocity: { x: 0, y: 0, z: 12 }, angularVelocity: 0, sailHeight: 0, sailAngle: 0, anchored: false,
+      anchorRaiseProgress: 0, holes: [], nextHoleId: 1, maxHull: stats.maxHull, onFire: false, fireTimer: 0,
+      fireDamageAccum: 0, sinkProgress: 0, sinking: false, cannonCooldowns: Array(stats.cannonCount).fill(0),
+      chainshottedUntil: 0, sailIntegrity: 1, sailRepairWoodTimer: 0, gold: 0, treasureChestIds: [], inventory: [],
+      repairCooldown: 0, autoRepairProgress: 0, teamColor: 0x3366cc, alive: true, upgrades: [], rudderAngle: 0,
+    };
+    const physics = new PhysicsSystem();
+    const p = makePlayer({ x: sea.x, y: 0, z: sea.z + 3 }, { onShipId: ship.id, mastClimb: null });
+    // On the weather deck (the hold floor is what getShipFloorYAt reports at y 0).
+    p.position.y = ship.position.y + stats.height + 0.14;
+    let t = 3;
+    const pin = () => { ship.velocity.x = 0; ship.velocity.z = 12; ship.angularVelocity = 0; };
+    const tick = (input) => {
+      pin();
+      stepPirate(p, input, DT, { ship: p.onShipId === ship.id ? ship : null, islands: [], jumpBlocked: false });
+      physics.update(DT, t, [ship], [p], [], [], []);
+      t += DT;
+    };
+    // Start 3 m forward of midships (clear of the hatch), walk to the rail
+    // (right = -x at yaw 0), then leap over it.
+    for (let i = 0; i < 90; i++) tick({ ...base, right: true });
+    const aboardAtRail = p.onShipId === ship.id;
+    p.shipBoundaryGraceTimer = 1.5;
+    const takeoffZ = p.position.z;
+    tick({ ...base, right: true, jumpPressed: true });
+    let leftAt = null, splashZ = null;
+    for (let i = 0; i < 300 && splashZ === null; i++) {
+      tick({ ...base, right: true });
+      if (leftAt === null && p.onShipId === null) leftAt = { vz: p.velocity.z };
+      if (p.state === 'swimming') splashZ = p.position.z;
+    }
+    expect('hull leap: the pirate reached the rail and was still aboard', aboardAtRail, `state=${p.state} onShip=${p.onShipId} x-off=${(p.position.x - ship.position.x).toFixed(2)} y=${p.position.y.toFixed(2)}`);
+    expect('hull leap: leaving a 12 m/s hull carries its way (vz >= 11 m/s once off)', leftAt !== null && leftAt.vz >= 11, `vz=${leftAt ? leftAt.vz.toFixed(2) : 'never left'}`);
+    const downstream = splashZ === null ? null : splashZ - takeoffZ;
+    expect('hull leap: a jump off a 12 m/s hull lands >= 7 m downstream', downstream !== null && downstream >= 7, `downstream=${downstream === null ? 'no splash' : downstream.toFixed(2)} m`);
   }
 }
 
