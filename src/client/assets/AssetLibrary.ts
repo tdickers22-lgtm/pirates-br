@@ -3,7 +3,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 import { auditAssetMaterial } from './materialAudit.js';
 import { collapseChunks } from './AssetMaterialCollapse.js';
-import { modelUrl, withMeshopt } from './modelManifest.js';
+import { modelUrl, withMeshopt, modelFamily } from './modelManifest.js';
 import { loadQualityPreference, parseRenderQuality } from '../rendering/QualityPreference.js';
 import { trackUpload, geometryUploaded, releaseGeometryCpu, cpuCopyReleaseEnabled } from '../rendering/CpuCopyRelease.js';
 
@@ -528,7 +528,12 @@ export class AssetLibrary {
     const mipCap = textureTierCapped()
       ? (HERO_VIEWMODEL_TEXTURE_ASSETS.has(name) ? TEXTURE_TOP_MIP_CAP.heroViewmodel : TEXTURE_TOP_MIP_CAP.family)
       : Infinity;
+    // b3.1g: every object and texture this GLB brings is charged to its D27 family
+    // (test-memory-budget sums resident texture MB per family from these tags).
+    const assetFamily = modelFamily(key) ?? 'shared';
+    root.userData.assetFamily = assetFamily;
     root.traverse((o) => {
+      o.userData.assetFamily = assetFamily;
       if (o instanceof THREE.Mesh) {
         o.castShadow = true;
         o.receiveShadow = true;
@@ -545,6 +550,8 @@ export class AssetLibrary {
             const value = record[key] as { isTexture?: boolean } | null;
             if (value && value.isTexture) {
               this.sharedResources.add(value);
+              const tex = value as unknown as THREE.Texture;
+              tex.userData.assetFamily ??= assetFamily;
               if (mipCap !== Infinity) dropTopMips(value as unknown as THREE.Texture, mipCap);
             }
           }
