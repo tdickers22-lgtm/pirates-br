@@ -106,6 +106,12 @@ console.log('\n2. Swept stem: 100 tangential crossings at 60 m/s just inside the
   const N = 100;
   for (let i = 0; i < N; i += 1) {
     const physics = new PhysicsSystem();
+    // Every crossing is an independent trial on the same hull: put her back
+    // where the case assumes she lies. The sea-keeping model (b2.1e) settles a
+    // hull placed at y = 0 onto the live wave plane, so carrying her state
+    // over 100 trials walked her half a metre down until the waterline-height
+    // shot below was fired into the swell at her bow and died in the WATER.
+    ship.position.y = 0; ship.pitch = 0; ship.roll = 0; ship.heave = 0;
     // Across the bow, 0.515 L forward of amidships (inside the 0.52 L stem
     // post, outside the old 0.48 L + 0.38 m deck limit), waterline height,
     // phase-shifted so the 1 m/tick samples land at every offset.
