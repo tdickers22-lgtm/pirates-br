@@ -584,7 +584,6 @@ export class Game {
   private prevCannonBallistic = false;
   private prevStormShrinking = false;
   // Bilge flooding audio loop + FX throttles (naval damage loop).
-  private floodingLoopActive = false;
   /** Breach jets, boil and foam (b2.3b): one instanced ribbon draw for every jet. */
   private floodFx: FloodFx | null = null;
   private readonly floodFxShips: FloodFxShip[] = [];
@@ -1843,10 +1842,7 @@ export class Game {
     this.cameraRoll = 0;
     this.prevOwnHullTotal = 4;
     this.prevOwnShipId = null;
-    if (this.floodingLoopActive) {
-      this.audio.stopFlooding();
-      this.floodingLoopActive = false;
-    }
+    this.audio.stopFlooding();
     this.ui.waterGauge.classList.remove('visible', 'danger');
 
     document.getElementById('hud')?.classList.remove('visible');
@@ -7691,23 +7687,22 @@ export class Game {
       this.founderFx.update(this.presentDt, t, sinkers, cam, this.founderFxSources);
     }
 
-    // Flooding loop — the ship you're on if it's taking water, else the nearest
-    // flooding hull within earshot.
-    const floodShip = aboardShip && (aboardShip.waterLevel ?? 0) > 0.02
-      ? aboardShip
-      : this.findNearestFloodingShip(cam, 20);
-    if (floodShip && (floodShip.waterLevel ?? 0) > 0.02) {
-      const level = THREE.MathUtils.clamp(floodShip.waterLevel ?? 0, 0, 1);
-      if (!this.floodingLoopActive) {
-        this.audio.startFlooding(level);
-        this.floodingLoopActive = true;
-      } else {
-        this.audio.updateFlooding(level);
-      }
-    } else if (this.floodingLoopActive) {
-      this.audio.stopFlooding();
-      this.floodingLoopActive = false;
-    }
+    // Flooding sound (b2.4d, audio-02): FloodAudio voices every breach floodFx
+    // judges flooding, ON the breach (gush from sqrt(2 g h), tear size, boil under
+    // the hold water, 6 per hull, deepest kept), slosh by fill and roll rate, a
+    // gurgle past half full, punch/patch/mallet/founder one-shots. Other hulls are
+    // heard by distance and through their planking, not at full level.
+    const floodMe = this.getLocalPlayer();
+    this.audio.updateFlood({
+      dt: _dt,
+      listener: cam,
+      aboardShipId: aboardShip?.id ?? null,
+      ships: this.state.ships,
+      emitters: (id) => this.getFloodEmitters(id),
+      repair: floodMe && (floodMe.hullRepairProgress ?? 0) > 0
+        ? { progress: floodMe.hullRepairProgress, pos: floodMe.position }
+        : null,
+    });
 
     // Bail scoop arcs (+ the local scoop one-shot), beaten out for all bailers.
     // Bail FX ride the bucketFilled EDGES (10Hz snapshot resolution) so the
@@ -7734,10 +7729,10 @@ export class Game {
           { x: bailer.position.x + dx * 0.55, y: bailer.position.y + PLAYER.HEIGHT * 0.62, z: bailer.position.z + dz * 0.55 },
           dx, dz,
         );
-        if (bailer.id === this.localPlayerId) this.audio.playBail();
+        if (bailer.id === this.localPlayerId) this.audio.playBucket('fling', bailer.position);
       } else if (bailer.id === this.localPlayerId) {
         // SCOOP — just the dip, no thrown water.
-        this.audio.playSwimSplash(0.5);
+        this.audio.playBucket('scoop', bailer.position);
       }
     }
 
@@ -7753,21 +7748,6 @@ export class Game {
    *  audio (audio-02, b2.4d). Empty when the hull is dry or out of FX range. */
   getFloodEmitters(shipId: string): FloodEmitter[] {
     return this.floodFx?.getFloodEmitters(shipId) ?? [];
-  }
-
-  private findNearestFloodingShip(pos: THREE.Vector3, maxDist: number): Ship | null {
-    if (!this.state) return null;
-    let best: Ship | null = null;
-    let bestDist = maxDist;
-    for (const ship of this.state.ships) {
-      if (!ship.alive || (ship.waterLevel ?? 0) <= 0.02) continue;
-      const d = dist2D(pos.x, pos.z, ship.position.x, ship.position.z);
-      if (d < bestDist) {
-        bestDist = d;
-        best = ship;
-      }
-    }
-    return best;
   }
 
   /** Supply-wheel slot layout comes from ONE table (shared/wheel.ts). Four
