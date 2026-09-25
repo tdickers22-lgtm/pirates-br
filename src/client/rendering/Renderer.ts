@@ -5,6 +5,7 @@ import { PostFx } from './PostFx.js';
 import { initLightBudget, updateLightBudget } from './LightBudget.js';
 import { freezeStaticParent } from './three-util.js';
 import { ProgramWarmer, shaderErrorsForced } from './ProgramWarmup.js';
+import { shadowProxyPolicy, withShadowProxies } from './ShadowProxy.js';
 import { reportBeacon, setBeaconContext } from '../network/errorBeacon.js';
 import { clamp, smoothstep } from '../../shared/utils/index.js';
 import {
@@ -1737,7 +1738,9 @@ export class Renderer {
       // is what makes the gate hold for every caller.
       shadowMap.needsUpdate = true;
       const before = info.render.calls;
-      inner(lights, scene, camera);
+      // Casters one LOD coarser than they display (ShadowProxy.ts, b3.1h):
+      // swapped in for this depth pass only, restored before the main pass.
+      withShadowProxies(() => inner(lights, scene, camera));
       const drawn = info.render.calls - before;
       this.lastShadowPassCalls = drawn;
       this.shadowPassesRun += 1;
@@ -2258,6 +2261,8 @@ export class Renderer {
 
   /** Pre-pays shader program links so no frame of the load has to. */
   readonly programWarmer = new ProgramWarmer();
+  /** Shadow proxy policy switch + stats (test-perf-budget reads and mutates it). */
+  readonly shadowProxy = shadowProxyPolicy;
   readonly programFallback = new ProgramFallback();
 
   /** Render target used by the real scene pass, or null when rendering direct. */

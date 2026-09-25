@@ -54,6 +54,7 @@
  */
 import type * as THREE from 'three';
 import type { RenderQuality } from '../../rendering/QualityPreference.js';
+import { registerShadowCaster, shadowPassTally, type ShadowProxyMode } from '../../rendering/ShadowProxy.js';
 
 /** Shared empty rail for batches that carry no per-instance scales. */
 const EMPTY_SCALES = new Float32Array(0);
@@ -303,6 +304,62 @@ export function attachInstanceFarLod(
   batch.near = near;
   batch.far = far;
   batch.farApplied = false;
+  registerShadowCaster(batchShadowCaster(batch, near, far));
+}
+
+/** Frames a batch may sit detached before its caster is dropped (see gone()). */
+const SHADOW_CASTER_DETACHED_PASSES = 600;
+
+/**
+ * The shadow proxy for a batch with a far sibling (ShadowProxy.ts policy):
+ * drawing near, it casts the far geometry; drawing far, it casts nothing.
+ * `begin` touches only batches the depth pass would actually draw, and `end`
+ * restores exactly what `begin` changed, so the display swap above (and the
+ * radius gates that own `visible`) never see the shadow state.
+ */
+function batchShadowCaster(batch: InstanceLodBatch, near: LodGeometrySet, far: LodGeometrySet) {
+  const mesh = batch.mesh;
+  let state: 0 | 1 | 2 | 3 = 0; // 1 = castShadow dropped, 2 = far swapped in, 3 = near swapped in (mutation)
+  let detached = 0;
+  return {
+    begin(mode: ShadowProxyMode): boolean {
+      if (!mesh.castShadow || !mesh.visible || mesh.count === 0) return false;
+      if (mode === 'lod0') {
+        if (!batch.farApplied) return false;
+        mesh.geometry = near.geometry;
+        mesh.material = near.material;
+        state = 3;
+        return true;
+      }
+      if (batch.farApplied) {
+        mesh.castShadow = false;
+        state = 1;
+        shadowPassTally.silenced();
+      } else {
+        mesh.geometry = far.geometry;
+        mesh.material = far.material;
+        state = 2;
+        shadowPassTally.swapped();
+      }
+      return true;
+    },
+    end(): void {
+      if (state === 1) mesh.castShadow = true;
+      else if (state === 2) {
+        mesh.geometry = near.geometry;
+        mesh.material = near.material;
+      } else if (state === 3) {
+        mesh.geometry = far.geometry;
+        mesh.material = far.material;
+      }
+      state = 0;
+    },
+    gone(): boolean {
+      if (mesh.parent) { detached = 0; return false; }
+      detached += 1;
+      return detached > SHADOW_CASTER_DETACHED_PASSES;
+    },
+  };
 }
 
 /** Register a ground-cover batch: density-only, no pixel rule, steeper ramp. */
