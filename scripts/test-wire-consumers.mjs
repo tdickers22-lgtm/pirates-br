@@ -48,6 +48,10 @@ const KNOWN_DARK = {
     + '`case` yet. Declared here rather than left invisible: until c2 lands, '
     + 'every client pays ~70 B x 31 Hz for a message the switch drops. Delete '
     + 'this entry the moment NetworkClient reconciles against it.',
+  ship_founder_stage: 'b2.2g server half: settle / burst / plunge, once each per '
+    + 'founder (3 small reliable messages per sinking). The client half is b2.3g '
+    + '(founderFx: hatch air bursts, bubble column, vortex ring) and b2.4d (sinking '
+    + 'groan, air release, suction). Delete this entry when NetworkClient gets the case.',
 };
 
 function walk(dir, out = []) {
