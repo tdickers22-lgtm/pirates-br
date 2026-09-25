@@ -135,6 +135,7 @@ console.log('Grounding breach cap');
   const { ship, drive } = makeCharge(4.9, 7.5);
   let t = grind(physics, ship, drive, 12);
   const first = countOpenHoles(ship);
+  const firstArea = ship.holes.filter((h) => !h.patched).reduce((a, h) => a + (h.size ?? 1), 0);
   // Haul off into deep water and let the event go cold.
   const off = makeCharge(4.9, 7.5);
   ship.position = { ...off.ship.position };
@@ -142,8 +143,13 @@ console.log('Grounding breach cap');
   t = grind(physics, ship, { x: 0, y: 0, z: 0 }, SHIP.GROUND_EVENT_RESET_SEC + 2, t);
   // ...then run her aground again.
   grind(physics, ship, drive, 12, t);
+  // b2.2b: a hit within HOLE_ENLARGE_RADIUS of an open breach widens it (size + 1) instead of
+  // making a new entity, and the keel contact of a second beaching on the same bearing lands on
+  // the first event's wounds. "Costs again" is therefore graded on open breach area (sum of hole
+  // sizes, 1-3), which a widened wound raises just as a new hole does; the count alone cannot see it.
+  const area = (s) => s.holes.filter((h) => !h.patched).reduce((a, h) => a + (h.size ?? 1), 0);
   expect('a second, separate grounding opens the hull again',
-    countOpenHoles(ship) > first, `first=${first} after second=${countOpenHoles(ship)}`);
+    area(ship) > firstArea, `open holes ${first} -> ${countOpenHoles(ship)}, open area ${firstArea} -> ${area(ship)}`);
 }
 
 // ── 5. Nobody founders offscreen: berths shelter, bot crews are forgiven ──
