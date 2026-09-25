@@ -1,0 +1,388 @@
+{
+ "bodies": {
+  "female": {
+   "after": {
+    "chin": 1.489751935005188,
+    "crown": 1.7502480745315552,
+    "hand": 0.21832360056092628,
+    "handRatio": 1.1496336746809077,
+    "headCentre": 1.6200000047683716,
+    "headH": 0.2604961395263672,
+    "headJoint": 1.5023815631866455,
+    "headRatio": 6.750192552455153,
+    "height": 1.7583991009742022,
+    "sole": -0.00815102644264698
+   },
+   "before": {
+    "chin": 1.538089632987976,
+    "crown": 1.7666435241699219,
+    "hand": 0.19363832653645136,
+    "handRatio": 1.0100823236100898,
+    "headCentre": 1.652366578578949,
+    "headH": 0.2285538911819458,
+    "headJoint": 1.5495998859405518,
+    "headRatio": 7.766443274484692,
+    "height": 1.775050831027329,
+    "sole": -0.008407306857407093
+   },
+   "bones": [
+    "ball_l",
+    "ball_r",
+    "calf_l",
+    "calf_r",
+    "clavicle_l",
+    "clavicle_r",
+    "eye_l",
+    "eye_r",
+    "foot_l",
+    "foot_r",
+    "hand_l",
+    "hand_r",
+    "head",
+    "index_01_l",
+    "index_01_r",
+    "index_02_l",
+    "index_02_r",
+    "index_03_l",
+    "index_03_r",
+    "lowerarm_l",
+    "lowerarm_r",
+    "middle_01_l",
+    "middle_01_r",
+    "middle_02_l",
+    "middle_02_r",
+    "middle_03_l",
+    "middle_03_r",
+    "neck_01",
+    "pelvis",
+    "pinky_01_l",
+    "pinky_01_r",
+    "pinky_02_l",
+    "pinky_02_r",
+    "pinky_03_l",
+    "pinky_03_r",
+    "ring_01_l",
+    "ring_01_r",
+    "ring_02_l",
+    "ring_02_r",
+    "ring_03_l",
+    "ring_03_r",
+    "root",
+    "spine_01",
+    "spine_02",
+    "spine_03",
+    "thigh_l",
+    "thigh_r",
+    "thumb_01_l",
+    "thumb_01_r",
+    "thumb_02_l",
+    "thumb_02_r",
+    "thumb_03_l",
+    "thumb_03_r",
+    "upperarm_l",
+    "upperarm_r"
+   ],
+   "hair": [
+    "hair_buns",
+    "hair_buzzedfemale",
+    "hair_long"
+   ],
+   "leafBonesRemoved": 12,
+   "repointed": [
+    [
+     "T_Eye_Normal_png.png",
+     "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Eye_Normal.png"
+    ]
+   ]
+  },
+  "male": {
+   "after": {
+    "chin": 1.4897040128707886,
+    "crown": 1.7502959966659546,
+    "hand": 0.21834106161364422,
+    "handRatio": 1.149137774528007,
+    "headCentre": 1.6200000047683716,
+    "headH": 0.260591983795166,
+    "headJoint": 1.5144429206848145,
+    "headRatio": 6.751161683744631,
+    "height": 1.7592986160889268,
+    "sole": -0.009002619422972202
+   },
+   "before": {
+    "chin": 1.5765712261199951,
+    "crown": 1.8100768327713013,
+    "hand": 0.22357550667605064,
+    "handRatio": 1.1376997988904025,
+    "headCentre": 1.6933240294456482,
+    "headH": 0.23350560665130615,
+    "headJoint": 1.5998001098632812,
+    "headRatio": 7.792476012418655,
+    "height": 1.8195868385955691,
+    "sole": -0.009510005824267864
+   },
+   "bones": [
+    "ball_l",
+    "ball_r",
+    "calf_l",
+    "calf_r",
+    "clavicle_l",
+    "clavicle_r",
+    "eye_l",
+    "eye_r",
+    "foot_l",
+    "foot_r",
+    "hand_l",
+    "hand_r",
+    "head",
+    "index_01_l",
+    "index_01_r",
+    "index_02_l",
+    "index_02_r",
+    "index_03_l",
+    "index_03_r",
+    "lowerarm_l",
+    "lowerarm_r",
+    "middle_01_l",
+    "middle_01_r",
+    "middle_02_l",
+    "middle_02_r",
+    "middle_03_l",
+    "middle_03_r",
+    "neck_01",
+    "pelvis",
+    "pinky_01_l",
+    "pinky_01_r",
+    "pinky_02_l",
+    "pinky_02_r",
+    "pinky_03_l",
+    "pinky_03_r",
+    "ring_01_l",
+    "ring_01_r",
+    "ring_02_l",
+    "ring_02_r",
+    "ring_03_l",
+    "ring_03_r",
+    "root",
+    "spine_01",
+    "spine_02",
+    "spine_03",
+    "thigh_l",
+    "thigh_r",
+    "thumb_01_l",
+    "thumb_01_r",
+    "thumb_02_l",
+    "thumb_02_r",
+    "thumb_03_l",
+    "thumb_03_r",
+    "upperarm_l",
+    "upperarm_r"
+   ],
+   "hair": [
+    "hair_simpleparted",
+    "hair_beard",
+    "hair_buzzed",
+    "hair_long"
+   ],
+   "leafBonesRemoved": 12,
+   "repointed": [
+    [
+     "T_Eye_Normal_png.png",
+     "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Eye_Normal.png"
+    ],
+    [
+     "T_Hair_1_Normal_png.png",
+     "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Hair_1_Normal.png"
+    ]
+   ]
+  },
+  "stout": {
+   "after": {
+    "chin": 1.4897040128707886,
+    "crown": 1.7502959966659546,
+    "hand": 0.21834106161364422,
+    "handRatio": 1.149137774528007,
+    "headCentre": 1.6200000047683716,
+    "headH": 0.260591983795166,
+    "headJoint": 1.5144429206848145,
+    "headRatio": 6.751161683744631,
+    "height": 1.7592986160889268,
+    "sole": -0.009002619422972202
+   },
+   "before": {
+    "chin": 1.5765712261199951,
+    "crown": 1.8100768327713013,
+    "hand": 0.22357550667605064,
+    "handRatio": 1.1376997988904025,
+    "headCentre": 1.6933240294456482,
+    "headH": 0.23350560665130615,
+    "headJoint": 1.5998001098632812,
+    "headRatio": 7.792476012418655,
+    "height": 1.8195868385955691,
+    "sole": -0.009510005824267864
+   },
+   "bones": [
+    "ball_l",
+    "ball_r",
+    "calf_l",
+    "calf_r",
+    "clavicle_l",
+    "clavicle_r",
+    "eye_l",
+    "eye_r",
+    "foot_l",
+    "foot_r",
+    "hand_l",
+    "hand_r",
+    "head",
+    "index_01_l",
+    "index_01_r",
+    "index_02_l",
+    "index_02_r",
+    "index_03_l",
+    "index_03_r",
+    "lowerarm_l",
+    "lowerarm_r",
+    "middle_01_l",
+    "middle_01_r",
+    "middle_02_l",
+    "middle_02_r",
+    "middle_03_l",
+    "middle_03_r",
+    "neck_01",
+    "pelvis",
+    "pinky_01_l",
+    "pinky_01_r",
+    "pinky_02_l",
+    "pinky_02_r",
+    "pinky_03_l",
+    "pinky_03_r",
+    "ring_01_l",
+    "ring_01_r",
+    "ring_02_l",
+    "ring_02_r",
+    "ring_03_l",
+    "ring_03_r",
+    "root",
+    "spine_01",
+    "spine_02",
+    "spine_03",
+    "thigh_l",
+    "thigh_r",
+    "thumb_01_l",
+    "thumb_01_r",
+    "thumb_02_l",
+    "thumb_02_r",
+    "thumb_03_l",
+    "thumb_03_r",
+    "upperarm_l",
+    "upperarm_r"
+   ],
+   "hair": [
+    "hair_buzzed",
+    "hair_beard",
+    "hair_simpleparted"
+   ],
+   "leafBonesRemoved": 12,
+   "repointed": [
+    [
+     "T_Eye_Normal_png.png",
+     "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Eye_Normal.png"
+    ],
+    [
+     "T_Hair_1_Normal_png.png",
+     "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Hair_1_Normal.png"
+    ]
+   ]
+  }
+ },
+ "materials": {
+  "MI_Eyes": {
+   "a": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Eye_Brown.png",
+   "normal": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Eye_Normal.png"
+  },
+  "MI_Eyes.001": {
+   "a": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Eye_Brown.png",
+   "normal": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Eye_Normal.png"
+  },
+  "MI_Eyes.002": {
+   "a": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Eye_Brown.png",
+   "normal": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Eye_Normal.png"
+  },
+  "MI_Hair_1": {
+   "a": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Hair_1_BaseColor.png",
+   "normal": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Hair_1_Normal.png"
+  },
+  "MI_Hair_1.001": {
+   "basecolor": "assets-src/quaternius/ubc/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/T_Hair_1_BaseColor.png",
+   "normal": "assets-src/quaternius/ubc/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/T_Hair_1_Normal.png"
+  },
+  "MI_Hair_1.002": {
+   "basecolor": "assets-src/quaternius/ubc/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/T_Hair_1_BaseColor.png",
+   "normal": "assets-src/quaternius/ubc/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/T_Hair_1_Normal.png"
+  },
+  "MI_Hair_1.003": {
+   "basecolor": "assets-src/quaternius/ubc/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/T_Hair_1_BaseColor.png",
+   "normal": "assets-src/quaternius/ubc/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/T_Hair_1_Normal.png"
+  },
+  "MI_Hair_1.004": {
+   "basecolor": "assets-src/quaternius/ubc/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/T_Hair_1_BaseColor.png",
+   "normal": "assets-src/quaternius/ubc/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/T_Hair_1_Normal.png"
+  },
+  "MI_Hair_1.005": {
+   "a": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Hair_1_BaseColor.png",
+   "normal": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Hair_1_Normal.png"
+  },
+  "MI_Hair_1.006": {
+   "basecolor": "assets-src/quaternius/ubc/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/T_Hair_1_BaseColor.png",
+   "normal": "assets-src/quaternius/ubc/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/T_Hair_1_Normal.png"
+  },
+  "MI_Hair_1.007": {
+   "basecolor": "assets-src/quaternius/ubc/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/T_Hair_1_BaseColor.png",
+   "normal": "assets-src/quaternius/ubc/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/T_Hair_1_Normal.png"
+  },
+  "MI_Hair_1.008": {
+   "basecolor": "assets-src/quaternius/ubc/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/T_Hair_1_BaseColor.png",
+   "normal": "assets-src/quaternius/ubc/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/T_Hair_1_Normal.png"
+  },
+  "MI_Hair_2": {
+   "basecolor": "assets-src/quaternius/ubc/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/T_Hair_2_BaseColor.png",
+   "normal": "assets-src/quaternius/ubc/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/T_Hair_2_Normal.png"
+  },
+  "MI_Hair_2.001": {
+   "a": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Hair_2_BaseColor.png",
+   "normal": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Hair_2_Normal.png"
+  },
+  "MI_Hair_2.002": {
+   "basecolor": "assets-src/quaternius/ubc/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/T_Hair_2_BaseColor.png",
+   "normal": "assets-src/quaternius/ubc/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/T_Hair_2_Normal.png"
+  },
+  "MI_Hair_2.003": {
+   "basecolor": "assets-src/quaternius/ubc/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/T_Hair_2_BaseColor.png",
+   "normal": "assets-src/quaternius/ubc/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/T_Hair_2_Normal.png"
+  },
+  "MI_Superhero_Female": {
+   "a": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Female_Dark_BaseColor.png",
+   "normal": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Female_Normal.png",
+   "orm": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Female_Roughness.png"
+  },
+  "MI_Superhero_Male": {
+   "a": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Male_Dark.png",
+   "normal": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Male_Normal.png",
+   "orm": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Male_Roughness.png"
+  },
+  "MI_Superhero_Male.001": {
+   "a": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Male_Dark.png",
+   "normal": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Male_Normal.png",
+   "orm": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Male_Roughness.png"
+  }
+ },
+ "skeleton": "Quaternius UE-style 65 minus 12 leaf plus eye_l/eye_r",
+ "sources": [
+  "quaternius-universal-base-characters"
+ ],
+ "targets": {
+  "handRatio": 1.15,
+  "headRatio": 6.75,
+  "headY": 1.62
+ }
+}

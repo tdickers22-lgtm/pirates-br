@@ -155,6 +155,12 @@ export const LOGIC = [
   // KB brotli (BUNDLE_BUDGETS_KB), the menu shell in the entry closure, Game.ts a dynamic import that
   // index.html modulepreloads; --mutate (static Game import in main.ts) must FAIL. ~6 s, logic tier.
   plain('test-bundle-budget.mjs'),
+  // b3.2a: the CC0 character base (assets-src/quaternius/out/pirate_base_{male,female,stout}.glb): the
+  // 55-bone NAMED set, drawn head centre at PLAYER.HEAD_Y, crown <= HEIGHT + 3 cm, eye meshes on eye_l/r,
+  // UV0 everywhere, head:height 1:6.5-7, hands 1.1-1.2x, LICENSES.md rows + CC0 licence texts. Rest-pose
+  // skinned vertices, pure GLB parse, ~0.3 s. Red: --glb public/assets/models/pirate_base.glb (23 bones,
+  // 0 UVs, no eyes) and --glb on a build_pirates.py --raw export (head 1:7.79, centre 1.69).
+  quick(tsx('test-character-asset.mjs')),
   quick(tsx('test-ship-dynamics.mjs')),
   quick(tsx('test-ship-ladder.mjs')),
   quick(tsx('test-server-fixes.mjs')),

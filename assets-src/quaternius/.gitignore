@@ -1,0 +1,8 @@
+# Large binaries are restored (sha256-pinned) by `node assets-src/quaternius/fetch.mjs`;
+# the licence texts, the kit geometry (.gltf/.bin) and the stage outputs in out/ are committed.
+*.png
+*.jpg
+*.glb
+*.fbx
+!out/*.glb
+!out/*.png

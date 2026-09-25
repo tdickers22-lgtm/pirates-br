@@ -1,5 +1,9 @@
 // THE PIRATE RIG'S CONTRACT — pure node, no browser, no GPU, no THREE.
 //
+// LEGACY (b3.2a, D25): the v2 character is graded by scripts/test-character-asset.mjs (55-bone named
+// set, eyes, UVs, proportions). This suite now only guards pirate_base.glb, the v1 rig that stays the
+// ?rig=v1 fallback for one release; b3.2f retires it together with the file.
+//
 // WHY. RIG-01 replaces a 22-26 primitive box pirate (nine per-instance
 // materials, no skeleton, hand-lerped Eulers) with ONE skinned GLB built by
 // scripts/blender/pirate_rig.py. Everything downstream of that file assumes
