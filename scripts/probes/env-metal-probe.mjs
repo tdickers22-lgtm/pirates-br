@@ -12,7 +12,8 @@
 //      roughness 0.45 = forged iron) is put 3 m in front of the camera under the
 //      NOON sky, and the frame is drawn twice in one task: with
 //      scene.environment as shipped and with it set to null. The mean sRGB
-//      luminance of the chart's upper half (which mirrors the sky) must be
+//      luminance of the chart's centre (which mirrors the sky behind the camera,
+//      clear of the sun's own specular lobe) must be
 //      > 1.5x brighter with the env map.
 //   2. The env map is the LIVE sky and never per frame: holding noon for 3 s of
 //      rendered frames adds 0 captures; moving to night adds >= 1 capture and
@@ -51,8 +52,14 @@ try {
     console.log(`\n[${quality}]`);
     const page = await browser.newPage({ viewport: { width: 960, height: 540 } });
     page.on('pageerror', (e) => console.log('  [pageerror]', e.message));
-    await page.route('**/@vite/client', (route) =>
-      route.fulfill({ status: 200, contentType: 'application/javascript', body: 'export {};' }));
+    // Swallow only Vite's HMR socket so an edit elsewhere cannot full-reload
+    // the match. NOT a page.route stub of /@vite/client: in dev that module
+    // installs vite's `define` table, so an `export {}` stub left
+    // __GAME_SERVER_PORT__ undefined, Game.ts dialled its :8090 default and the
+    // page sat on "Waking the harbour... (attempt N)" forever (b3.1d2, measured
+    // 2026-09-25: same stall on HEAD; the menu appears in < 4 s without it).
+    const viteHost = new globalThis.URL(URL).host;
+    await page.routeWebSocket((u) => new globalThis.URL(u).host === viteHost, () => { /* never connect */ });
     await page.goto(`${URL}/?debug&forceinput&quality=${quality}`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#menu-solo-btn', { timeout: 240_000 });
     await page.click('#menu-solo-btn', { noWaitAfter: true });
@@ -64,16 +71,25 @@ try {
     });
     if (MUTATE) await page.evaluate(() => { window.__piratesBR.renderer.scene.environment = null; });
 
-    // Noon = the override with the highest sun; night = the lowest.
-    const sunAt = async (sec) => {
-      await page.evaluate((s) => window.__piratesBR.setDayNightOverride(s), sec);
-      await page.waitForTimeout(350);
-      return page.evaluate(() => window.__piratesBR.renderer.getSunDirection().y);
-    };
+    // Noon = the override with the highest sun; night = the lowest, found by a
+    // scan of one whole 960 s cycle. The read waits for two rendered frames, not
+    // a fixed 350 ms: on SwiftShader a frame can take longer than that, and the
+    // old read then returned the PREVIOUS override's sun. The old hard-coded
+    // night list (700..920 s) was daytime under DAY_NIGHT_START_OFFSET 0.47
+    // (sunY +0.76 at 700 s; deepest night is ~374 s), so no capture could follow.
+    const sunAt = async (sec) => page.evaluate(async (s) => {
+      window.__piratesBR.setDayNightOverride(s);
+      for (let i = 0; i < 2; i += 1) await new Promise((res) => requestAnimationFrame(() => res()));
+      return window.__piratesBR.renderer.getSunDirection().y;
+    }, sec);
     let noon = { sec: 0, y: -2 };
-    for (const sec of [-240, -120, 0, 120, 240, 345]) { const y = await sunAt(sec); if (y > noon.y) noon = { sec, y }; }
     let night = { sec: 0, y: 2 };
-    for (const sec of [700, 780, 854, 920]) { const y = await sunAt(sec); if (y < night.y) night = { sec, y }; }
+    for (let sec = -480; sec < 480; sec += 60) {
+      const y = await sunAt(sec);
+      if (y > noon.y) noon = { sec, y };
+      if (y < night.y) night = { sec, y };
+    }
+    if (!(noon.y > 0.8 && night.y < -0.5)) fail(`day/night scan found no noon/night (noon sunY ${noon.y.toFixed(2)}, night ${night.y.toFixed(2)})`);
     console.log(`  noon override ${noon.sec}s (sunY ${noon.y.toFixed(2)}), night ${night.sec}s (sunY ${night.y.toFixed(2)})`);
 
     await page.evaluate((s) => window.__piratesBR.setDayNightOverride(s), noon.sec);
@@ -96,7 +112,11 @@ try {
       chart.renderOrder = 999;
       scene.add(chart);
       chart.updateMatrixWorld(true);
-      const probe = at.clone().addScaledVector(camera.up, 0.3).project(camera);
+      // The chart's CENTRE, whose normal faces the camera: it mirrors the sky
+      // behind the camera. The upper half was sampled first and sat inside the
+      // noon sun's own specular lobe (232 lum with or without the env map), which
+      // grades the sun, not the environment (b3.1d2 diagnosis).
+      const probe = at.clone().project(camera);
       const gl = gl3.getContext();
       const W = gl.drawingBufferWidth, H = gl.drawingBufferHeight;
       const cx = Math.round((probe.x * 0.5 + 0.5) * W), cy = Math.round((probe.y * 0.5 + 0.5) * H);
