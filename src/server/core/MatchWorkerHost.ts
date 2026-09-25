@@ -20,13 +20,14 @@ import type { Match, MatchEndResult } from './Match.js';
 import type { ModeId } from '../../shared/constants/index.js';
 import type { GameState } from '../../shared/types/index.js';
 import type { MatchMirror, SocketOp } from './matchWorker.js';
+import { TICK_PHASES, type TickCost } from './TickProfiler.js';
 
 /** The Match surface LobbyServer uses. Match and MatchProxy both satisfy it. */
 export type MatchHandle = Pick<Match,
   | 'id' | 'start' | 'stop' | 'interrupt' | 'detachClient' | 'resumeClient' | 'removeClient'
   | 'takeOverBotHull' | 'retireBotHullBeforeHorn' | 'createCrew' | 'handleClientMessage'
   | 'isEnded' | 'endedAtMs' | 'isQuarantined' | 'isAwaitingHorn' | 'botCrewCount' | 'sinceHornSec'
-  | 'modeId' | 'humanCount' | 'crewSize' | 'simLagSeconds' | 'droppedTickCount'
+  | 'modeId' | 'humanCount' | 'crewSize' | 'simLagSeconds' | 'droppedTickCount' | 'tickCost'
   | 'markDisconnected' | 'resumeReplay' | 'onMatchEnd' | 'onFault'>;
 
 export interface MatchSpawnOpts { matchId: string; botCount: number; mode: ModeId }
@@ -180,6 +181,7 @@ export class MatchProxy implements MatchHandle {
     this.mirror = {
       endedAtMs: null, isEnded: false, isQuarantined: false, isAwaitingHorn: true, botCrewCount: 0,
       sinceHornSec: null, modeId: mode, humanCount: 0, crewSize: 1, simLagSeconds: 0, droppedTickCount: 0, tickCount: 0,
+      tickCost: { n: 0, p50Ms: 0, p99Ms: 0, maxMs: 0, phasesMs: Object.fromEntries(TICK_PHASES.map((p) => [p, 0])) as TickCost['phasesMs'] },
     };
   }
 
@@ -221,6 +223,7 @@ export class MatchProxy implements MatchHandle {
   crewSize(): number { return this.mirror.crewSize; }
   simLagSeconds(): number { return this.mirror.simLagSeconds; }
   droppedTickCount(): number { return this.mirror.droppedTickCount; }
+  tickCost(): TickCost { return this.mirror.tickCost; }
 
   /** Test hooks (host built with testHooks): stepped clock, manual ticks, fault injection. */
   debug(op: string, ...args: unknown[]): unknown { return this.w.callSync('debug', this.id, op, args); }

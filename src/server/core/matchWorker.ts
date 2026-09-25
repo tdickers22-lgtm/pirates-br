@@ -21,6 +21,7 @@ import type { WebSocket } from 'ws';
 import { Match } from './Match.js';
 import { SERVER_TICK_MS } from '../../shared/constants/index.js';
 import type { ModeId } from '../../shared/constants/index.js';
+import type { TickCost } from './TickProfiler.js';
 
 export interface MatchMirror {
   endedAtMs: number | null;
@@ -35,6 +36,9 @@ export interface MatchMirror {
   simLagSeconds: number;
   droppedTickCount: number;
   tickCount: number;
+  /** performance-13: ms/tick p50/p99 + per-phase means, for the keyed /health
+   *  detail. stats() recomputes at most every 64 ticks, so this is cheap. */
+  tickCost: TickCost;
 }
 
 /** One socket operation the lobby replays on the real ws. */
@@ -105,6 +109,7 @@ function mirrorOf(m: Match): MatchMirror {
     simLagSeconds: m.simLagSeconds(),
     droppedTickCount: m.droppedTickCount(),
     tickCount: (m as unknown as { tickCount: number }).tickCount ?? 0,
+    tickCost: m.tickCost(),
   };
 }
 
