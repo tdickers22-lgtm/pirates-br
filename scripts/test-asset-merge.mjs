@@ -83,7 +83,7 @@ globalThis.Request = class extends RealRequest {
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (input, init) => {
   const url = typeof input === 'string' ? input : input?.url ?? String(input);
-  const match = /\/assets\/models\/([^/?#]+)$/.exec(url);
+  const match = /\/assets\/models\/((?:packed\/)?[^/?#]+)$/.exec(url); // packed/ = the shipped tree (b3.1a)
   if (match) {
     const file = path.join(MODELS_DIR, match[1]);
     if (!existsSync(file)) return new Response(null, { status: 404, statusText: 'Not Found' });
