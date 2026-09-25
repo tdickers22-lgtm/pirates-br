@@ -38,6 +38,7 @@ import { FloodFx, type FloodEmitter, type FloodFxShip } from '../rendering/ship/
 import { FounderFx, type FounderFxShip } from '../rendering/ship/founderFx.js';
 import { applyHoldUnderwater, combineWaterDepth, eyeInsideHold, hatchCausticFlicker, holdEyeDepth, holdUnderwaterPalette, type WaterSource } from '../rendering/waterEnvironment.js';
 import { SoundEngine, type FootstepSurface } from '../audio/SoundEngine.js';
+import { AudioDirector } from '../audio/AudioDirector.js';
 import { NetworkClient } from '../network/NetworkClient.js';
 import { connectCopy, waitForRetry, type ConnectPhase } from '../network/connectPolicy.js';
 import { MenuController } from '../menu/MenuController.js';
@@ -563,17 +564,12 @@ export class Game {
   private readonly seaEvents = new SeaEventRenderer();
   private readonly combatFx = new CombatFx();
   private readonly audio = new SoundEngine();
+  /** Beds by physics + station foley (b2.4e): the one driver of setAmbience/setSailingState. */
+  private readonly audioDirector = new AudioDirector(this.audio);
   // Edge-detect state for sound triggers (chest carry, drowning, eating, sail/anchor changes).
   private prevCarryingChestId: string | null = null;
   private prevPlayerStateForAudio: string | null = null;
   private prevPocketUseCooldown = 0;
-  private prevAnchored: boolean | null = null;
-  private prevAnchorRaiseProgress: number | null = null;
-  private prevSailHeightForAudio: number | null = null;
-  private prevSailAngleForAudio: number | null = null;
-  private lastSailTrimSoundAt = 0;
-  private lastAnchorMoveSoundAt = 0;
-  private lastHelmTurnSoundAt = 0;
   private lastHullSplashAt = 0;
   private lastSwimStrokeAt = 0;
   private readonly remoteSwimAudioState = new Map<string, string>();
@@ -1818,13 +1814,6 @@ export class Game {
     this.inputSendTimer = 0;
     this.inputHeartbeatTimer = 0;
     this.lastSentInputSignature = '';
-    this.prevAnchored = null;
-    this.prevAnchorRaiseProgress = null;
-    this.prevSailHeightForAudio = null;
-    this.prevSailAngleForAudio = null;
-    this.lastSailTrimSoundAt = 0;
-    this.lastAnchorMoveSoundAt = 0;
-    this.lastHelmTurnSoundAt = 0;
     this.lastHullSplashAt = 0;
     this.lastSwimStrokeAt = 0;
     this.remoteSwimAudioState.clear();
@@ -7371,52 +7360,8 @@ export class Game {
       }
     }
 
-    // Sail/anchor change cues for the local ship — physical deck feedback instead of UI clicks.
-    if (localShip) {
-      if (this.prevAnchored !== null && this.prevAnchored !== localShip.anchored) {
-        this.audio.playAnchorChange(localShip.anchored);
-      }
-      this.prevAnchored = localShip.anchored;
-
-      const anchorProgress = THREE.MathUtils.clamp(localShip.anchorRaiseProgress ?? 0, 0, 1);
-      if (this.prevAnchorRaiseProgress !== null) {
-        const anchorDelta = Math.abs(anchorProgress - this.prevAnchorRaiseProgress);
-        const anchorMoving = localShip.anchored && anchorProgress > 0 && anchorProgress < 1 && anchorDelta > 0.0012;
-        if (anchorMoving && now - this.lastAnchorMoveSoundAt > 0.16) {
-          this.audio.playAnchorMovement(THREE.MathUtils.clamp(anchorDelta * 88 + 0.28, 0.32, 1.15));
-          this.lastAnchorMoveSoundAt = now;
-        }
-      }
-      this.prevAnchorRaiseProgress = anchorProgress;
-
-      const helmAxes = this.input.getMoveAxes();
-      const helmIntent = Math.abs(helmAxes.x);
-      const helmMotion = Math.abs(localShip.angularVelocity);
-      if (player?.atHelm && (helmIntent > 0 || helmMotion > 0.006)) {
-        const helmAmount = THREE.MathUtils.clamp(helmIntent * 0.55 + helmMotion * 4.4 + localShipMotion * 0.18, 0.25, 1.15);
-        const helmInterval = THREE.MathUtils.clamp(0.34 - helmAmount * 0.16, 0.14, 0.34);
-        if (now - this.lastHelmTurnSoundAt > helmInterval) {
-          this.audio.playHelmTurn(helmAmount);
-          this.lastHelmTurnSoundAt = now;
-        }
-      }
-
-      if (this.prevSailHeightForAudio !== null && this.prevSailAngleForAudio !== null) {
-        const heightDelta = Math.abs(localShip.sailHeight - this.prevSailHeightForAudio);
-        const angleDelta = Math.abs(angleWrap(localShip.sailAngle - this.prevSailAngleForAudio));
-        if ((heightDelta > 0.055 || angleDelta > 0.18) && now - this.lastSailTrimSoundAt > 0.36) {
-          this.audio.playSailTrim(THREE.MathUtils.clamp(heightDelta * 7 + angleDelta * 1.6, 0.35, 1.25));
-          this.lastSailTrimSoundAt = now;
-        }
-      }
-      this.prevSailHeightForAudio = localShip.sailHeight;
-      this.prevSailAngleForAudio = localShip.sailAngle;
-    } else {
-      this.prevAnchored = null;
-      this.prevAnchorRaiseProgress = null;
-      this.prevSailHeightForAudio = null;
-      this.prevSailAngleForAudio = null;
-    }
+    // Anchor/capstan/wheel/sail/cannon-load foley moved to AudioDirector (b2.4e), positioned
+    // at each station and driven from updateNavalAudioAndFx.
 
     // Cannon launch — local player just got fired out of a ship cannon.
     if (player) {
@@ -7626,38 +7571,29 @@ export class Game {
       wreck ? dist2D(cam.x, cam.z, wreck.position.x, wreck.position.z) : null,
       wreck ? wreck.position : null,
     );
-    const nearShore01 = Number.isFinite(nearestEdge)
-      ? THREE.MathUtils.clamp(1 - THREE.MathUtils.clamp(nearestEdge / 70, 0, 1), 0, 1)
-      : 0;
-    // rain01 is the SAME field the world-space rain draws from, so the downpour
-    // you hear starts and stops with the drops you see (the engine's default
-    // guess — storminess × 0.85 — had it raining audibly in clear weather deep
-    // inside the safe zone).
-    this.audio.setAmbience({
+    // Beds by physics + station foley (b2.4e, audio-06 / vm:audio:3): wind by APPARENT wind
+    // (the same sampleLocalWind the physics sails on, minus the hull's velocity), 3 ocean
+    // layers by sea state, surf by shore distance, creak by heel + load, bow slap, and the
+    // anchor/capstan/wheel/sail/cannon-load one-shots placed at their stations. rain01 is the
+    // SAME field the world-space rain draws from, so the downpour starts with the drops.
+    const aboardShip = player?.onShipId ? this.shipsById.get(player.onShipId) ?? null : null;
+    const atHelm = !!player?.atHelm;
+    this.audioDirector.update({
+      dt: _dt,
+      time: t,
+      listener: cam,
       nightFactor,
       storminess,
-      nearShore01,
       rain01: THREE.MathUtils.clamp(this.stormRainIntensity, 0, 1),
       swimming: player?.state === 'swimming',
+      shoreDistM: Number.isFinite(nearestEdge) ? Math.max(0, nearestEdge) : Infinity,
+      storm: this.state.storm ?? null,
+      aboardShip,
+      crewShip: localShip,
+      ships: this.shipsById.values(),
+      atHelm,
+      helmIntent: atHelm ? Math.abs(this.input.getMoveAxes().x) : 0,
     });
-
-    // Sailing bed — reflects the ship the player is physically standing on.
-    const aboardShip = player?.onShipId ? this.shipsById.get(player.onShipId) ?? null : null;
-    if (aboardShip) {
-      const stats = SHIP_STATS[aboardShip.type];
-      const speed = Math.hypot(aboardShip.velocity.x, aboardShip.velocity.z);
-      const speed01 = THREE.MathUtils.clamp(speed / Math.max(stats.maxSpeed, 0.001), 0, 1);
-      const heel01 = THREE.MathUtils.clamp(Math.abs(aboardShip.roll ?? 0) / 0.3, 0, 1);
-      const roughness01 = THREE.MathUtils.clamp(storminess * 0.8 + heel01 * 0.4, 0, 1);
-      this.audio.setSailingState({ speed01, roughness01, heel01, luffing: !!aboardShip.luffing });
-    } else {
-      // Not aboard: the creak is silent unless a hull is within 15 m (hullCreakStrain).
-      let nearHullM = Infinity;
-      for (const ship of this.shipsById.values()) {
-        nearHullM = Math.min(nearHullM, dist2D(cam.x, cam.z, ship.position.x, ship.position.z) - SHIP_STATS[ship.type].length * 0.5);
-      }
-      this.audio.setSailingState({ speed01: 0, roughness01: storminess * 0.8, heel01: 0, luffing: false, aboard: false, nearHullM });
-    }
 
     // Breach jets and boil (b2.3b, holes-08): every hull within 70 m with an
     // open hole, judged by the SHARED flood predicate (ship/floodFx.ts), so a
