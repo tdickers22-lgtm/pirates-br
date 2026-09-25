@@ -10,7 +10,6 @@ import {
   getBridgeDeckY,
   getIslandDistRatio,
   gerstnerHeight,
-  gerstnerVerticalVelocity,
   getStormWaveIntensity,
   geyserEruptionLevel,
   WAVE_PARAMS,
@@ -118,12 +117,146 @@ import {
   type AnchorPhase, type AnchorState,
 } from '../../shared/anchor.js';
 
-// ── Ship wave-riding dynamics tuning ─────────────────────────────────────────
-/** Near-critical damping for the heave spring (k = PHYSICS.BUOYANCY_SPRING). */
-const HEAVE_DAMPING = 3.8;
-/** Wave-attitude spring: pitch/roll chase the sampled wave slope. */
-const ATTITUDE_STIFFNESS = 4;
-const ATTITUDE_DAMPING = 3.8;
+// ── Sea-keeping (b2.1e: physics-09, physics-10, liveplay-02) ─────────────────
+//
+// MULTI-POINT BUOYANCY. Each hull floats on 7 x 3 loft stations (7 along the
+// waterline, port / centre / starboard at the local half-beam), every one
+// sampling the LIVE Gerstner field including the storm swell. The stations'
+// weighted least-squares plane is the sea the hull is lying in; a small hull
+// follows short chop that a galleon's long footprint averages away.
+//
+// OWN MOTION. On top of that plane each hull carries her own heave / roll /
+// pitch mode, a mass-spring-damper built from her real numbers: heave from the
+// waterplane stiffness rho g A_wp against mass + added mass, roll from the
+// righting moment m g GM against I = m (0.4 B)^2 (T = 2 pi 0.4 B / sqrt(g GM):
+// sloop 3.5 s, brig 4.9 s, galleon 7.0 s), pitch from the longitudinal
+// stiffness. The mode is driven by MOMENTS: the sail's side force times its
+// heeling arm, the turn (m v omega about the keel, outward), the flood list,
+// point loads (applyPointLoad) and a share of the wave plane's own
+// acceleration (the hull's inertia lagging the sea), and it rings down with
+// damping ratio 0.3 in roll after any disturbance.
+const SEA_G = 9.81;
+const SEA_RHO = 1025;
+/** Waterplane-area coefficient of the lofted hulls: A_wp = C_wp L B. */
+const WATERPLANE_COEF = 0.7;
+/** Transverse metacentric height (m), all three classes. */
+export const SEAKEEPING_GM = 1.3;
+const ROLL_GYRATION_BEAM = 0.4;
+const PITCH_GYRATION_LENGTH = 0.25;
+const HEAVE_ADDED_MASS = 0.8;
+const PITCH_ADDED_INERTIA = 0.5;
+export const ROLL_ZETA = 0.3;
+const PITCH_ZETA = 0.45;
+const HEAVE_ZETA = 0.5;
+/** Share of the wave plane's own acceleration the hull's inertia resists. A
+ *  share of 1 is the bare linear oscillator (a galleon would then resonate
+ *  with the 5 s chop and roll 3 deg off the sea); the rest of the forcing is
+ *  the pressure field carrying the hull with it. */
+const WAVE_INERTIA_COUPLING = 0.12;
+/** Design heel with full drive on the beam at wind 1 (rad): the heeling arm
+ *  is sized from it, F_side x arm = m g GM sin(heel). */
+const DESIGN_HEEL: Readonly<Record<ShipType, number>> = { sloop: 0.155, brigantine: 0.117, galleon: 0.08 };
+/** A hull lying alongside a pier: the berth is sheltered water and the
+ *  mooring lines hold her, so she takes this share of the open-sea heave and
+ *  slope (liveplay-02: +-1 m of berth heave next to a fixed pier). */
+export const MOORING_WAVE_SHARE = 0.18;
+/** Anchored in open water she holds her head to the rode: slope share. */
+const ANCHOR_SLOPE_SHARE = 0.3;
+/** Bow slam: the forefoot, clear of the sea, re-enters it closing faster
+ *  than this (m/s) relative to the water surface. */
+const SLAM_CLOSING_SPEED = 1.0;
+/** How far clear of the surface the forefoot must have been (m). */
+const SLAM_EMERGENCE = 0.15;
+/** Slams and green water are storm events: below this sea state the calm
+ *  swell never publishes one. */
+const SEA_EVENT_MIN_SEA_STATE = 0.25;
+const SEA_EVENT_COOLDOWN = 0.8;
+
+export interface SeakeepingStation { x: number; z: number; w: number }
+export interface SeakeepingParams {
+  stations: SeakeepingStation[];
+  sumW: number; sumWXX: number; sumWZZ: number;
+  waterplaneArea: number;
+  heaveOmega: number; rollOmega: number; pitchOmega: number;
+  /** Righting stiffness, N m / rad (roll, pitch) and N / m (heave). */
+  kRoll: number; kPitch: number; kHeave: number;
+  /** Height of the sail's centre of effort over the keel's lateral centre, m. */
+  heelArm: number;
+  bowZ: number; bowDraft: number; freeboard: number;
+}
+
+function buildSeakeeping(type: ShipType): SeakeepingParams {
+  const stats = SHIP_STATS[type];
+  const hull = HULL_PARAMS[type];
+  const L = stats.length;
+  const B = stats.width;
+  const stations: SeakeepingStation[] = [];
+  for (let i = 0; i < 7; i++) {
+    const z = ((i - 3) / 3) * 0.45 * L;
+    // Loft half-beam: full amidships, fining to ~40% at the 0.45 L stations.
+    const halfBeam = 0.5 * B * Math.sqrt(Math.max(0.12, 1 - (z / (0.5 * L)) ** 2));
+    for (const side of [-1, 0, 1]) stations.push({ x: side * 0.8 * halfBeam, z, w: halfBeam });
+  }
+  let sumW = 0; let sumWXX = 0; let sumWZZ = 0;
+  for (const s of stations) { sumW += s.w; sumWXX += s.w * s.x * s.x; sumWZZ += s.w * s.z * s.z; }
+  const waterplaneArea = WATERPLANE_COEF * L * B;
+  const kHeave = SEA_RHO * SEA_G * waterplaneArea;
+  const kRoll = hull.mass * SEA_G * SEAKEEPING_GM;
+  const rollInertia = hull.mass * (ROLL_GYRATION_BEAM * B) ** 2;
+  // Longitudinal metacentric height of a box-like waterplane: BM_L = L^2 / (12 T).
+  const draft = Math.max(0.5, hull.mass / (SEA_RHO * waterplaneArea));
+  const gmL = (L * L) / (12 * draft);
+  const kPitch = hull.mass * SEA_G * gmL;
+  const pitchInertia = hull.mass * (1 + PITCH_ADDED_INERTIA) * (PITCH_GYRATION_LENGTH * L) ** 2;
+  return {
+    stations, sumW, sumWXX, sumWZZ, waterplaneArea,
+    heaveOmega: Math.sqrt(kHeave / (hull.mass * (1 + HEAVE_ADDED_MASS))),
+    rollOmega: Math.sqrt(kRoll / rollInertia),
+    pitchOmega: Math.sqrt(kPitch / pitchInertia),
+    kRoll, kPitch, kHeave,
+    heelArm: (kRoll * Math.sin(DESIGN_HEEL[type])) / hull.maxDrive,
+    bowZ: 0.45 * L,
+    bowDraft: draft,
+    freeboard: getShipDeckY(0, stats),
+  };
+}
+
+export const SEAKEEPING: Readonly<Record<ShipType, SeakeepingParams>> = {
+  sloop: buildSeakeeping('sloop'),
+  brigantine: buildSeakeeping('brigantine'),
+  galleon: buildSeakeeping('galleon'),
+};
+
+/** The weighted least-squares plane of the live sea under a hull's 21
+ *  stations: height at her centre, and the roll / pitch that plane imposes in
+ *  the hull's own conventions (+roll lifts +x, +pitch dips the bow). */
+export function waveAttitudePlane(ship: Ship, t: number, seaState = 0): { y: number; roll: number; pitch: number } {
+  const sk = SEAKEEPING[ship.type];
+  const cosR = Math.cos(ship.rotation);
+  const sinR = Math.sin(ship.rotation);
+  let swh = 0; let swxh = 0; let swzh = 0;
+  for (const s of sk.stations) {
+    const h = gerstnerHeight(
+      ship.position.x + s.x * cosR + s.z * sinR,
+      ship.position.z + s.z * cosR - s.x * sinR,
+      t, WAVE_PARAMS, seaState,
+    );
+    swh += s.w * h; swxh += s.w * s.x * h; swzh += s.w * s.z * h;
+  }
+  return { y: swh / sk.sumW, roll: Math.atan(swxh / sk.sumWXX), pitch: -Math.atan(swzh / sk.sumWZZ) };
+}
+
+/** Wind heel from the moment balance: the sail's side force (the drive force
+ *  on the beam, falling to nothing dead downwind) on the heeling arm against
+ *  the righting moment m g GM. Leeward: the sign of -sin(relative wind). */
+export function sailHeelAngle(type: ShipType, fSail: number, offWind: number, signedRelative: number): number {
+  const sk = SEAKEEPING[type];
+  const moment = Math.max(0, fSail) * Math.abs(Math.sin(offWind)) * sk.heelArm;
+  const heel = Math.asin(clamp(moment / sk.kRoll, 0, 0.6));
+  return -Math.sign(Math.sin(signedRelative)) * heel;
+}
+
+export type SeaEvent = { shipId: string; kind: 'slam' | 'green_water'; strength: number; x: number; y: number; z: number };
 /** A hull's own contact chain lies inside her widest timber by no more than
  *  this, so two hulls lying alongside always overlap a little before they are
  *  truly pressed together. Below it the resolution is a SPRING (a slow nudge,
@@ -614,6 +747,9 @@ export class PhysicsSystem {
   private anchorStates = new Map<string, AnchorState>();
   /** Bites this update (dropping -> biting), for the crew stagger (Match). */
   anchorBites: Array<{ shipId: string; speed: number }> = [];
+  /** Bow slams and green water over the rail this update (b2.1e), for the
+   *  spray FX and the storm audio. Reset each update. */
+  seaEvents: SeaEvent[] = [];
   /** The anchor phase of a hull ('raised' for one never seen). */
   getAnchorPhase(shipId: string): AnchorPhase {
     return this.anchorStates.get(shipId)?.phase ?? 'raised';
@@ -626,6 +762,12 @@ export class PhysicsSystem {
    *  the boolean it produces (`Ship.aground`), never the clock. */
   private shipDynamics = new Map<string, {
     pitchVel: number; rollVel: number; heaveVel: number;
+    /** Own-motion mode (b2.1e): offsets from the wave plane, and the plane's
+     *  previous samples for its finite-difference acceleration. */
+    rollPsi: number; pitchPsi: number; heavePsi: number;
+    planePrev: { y: number; roll: number; pitch: number; vy: number; vr: number; vp: number; x: number; z: number; t: number } | null;
+    loadMass: number; loadMx: number; loadMz: number;
+    bowRel: number | null; railRel: number | null; seaEventCooldown: number; turnHeel: number;
     agroundFor: number; agroundArming: number;
     /** The list she carried into her founder, captured ONCE by beginFounder so
      *  the wreck goes down by the end she was actually holed in (and not by
@@ -807,6 +949,7 @@ export class PhysicsSystem {
   private updateShips(dt: number, t: number, ships: Ship[], players: Player[], islands: Island[], seaRocks: SeaRock[], storm: StormState | null) {
     this.rebuildEnvSafeShips(t, ships, players, islands, storm);
     this.anchorBites.length = 0;
+    this.seaEvents.length = 0;
     const helmedShipIds = new Set<string>();
     const helmsmanByShip = new Map<string, string>();
     const humanHelmShipIds = new Set<string>();
@@ -1067,25 +1210,11 @@ export class PhysicsSystem {
         if (ship.velocity.z * sz > 0) ship.velocity.z = 0;
       }
 
-      // Buoyancy — a spring-damper heave (not a bare lerp) so the hull carries
-      // real vertical momentum riding swells. ship.heave publishes the residual
-      // surface detail the smoothing filtered out; the renderer adds it back so
-      // hulls sit exactly on the visible Gerstner surface.
+      // Buoyancy and attitude are ONE multi-point model (b2.1e), stepped
+      // after the collisions below (updateShipSeakeeping). The local storm
+      // sea-state (0 calm, 1 raging) boosts every wave sample for this hull.
       const dyn = this.getShipDynamics(ship.id);
-      // Local storm sea-state (0 calm → 1 raging) boosts every wave sample for
-      // this hull: buoyancy target, attitude sampling and hole waterlines all
-      // ride the same boosted sea, so ships inside the storm genuinely heave.
       const seaState = stormSeaState(storm, ship.position.x, ship.position.z);
-      const waveY = gerstnerHeight(ship.position.x, ship.position.z, t, WAVE_PARAMS, seaState);
-      // A flooding hull rides lower — the bilge water pushes the buoyancy target
-      // down by up to FREEBOARD_DROP, dipping more sections under (the SoT spiral).
-      const buoyTarget = waveY - clamp(ship.waterLevel ?? 0, 0, 1) * FLOODING.FREEBOARD_DROP;
-      const surfaceVelocity = gerstnerVerticalVelocity(ship.position.x, ship.position.z, t,
-        WAVE_PARAMS, seaState, ship.velocity.x, ship.velocity.z);
-      dyn.heaveVel += ((buoyTarget - ship.position.y) * PHYSICS.BUOYANCY_SPRING
-        - (dyn.heaveVel - surfaceVelocity) * HEAVE_DAMPING) * dt;
-      ship.position.y += dyn.heaveVel * dt;
-      ship.heave = clamp(buoyTarget - ship.position.y, -2, 2);
 
       // Ship-island collision
       //
@@ -1148,12 +1277,14 @@ export class PhysicsSystem {
       // 5.2 deg in a full gale, i.e. the tempest could not lean the deck far
       // enough for a crew to notice it. 0.14 rad (8 deg) at seaState 1; calm
       // water is untouched at 0.05.
-      const windHeelCap = 0.05 * (1 + seaState * 1.8);
-      const windHeel = clamp(
-        -Math.sin(signedRelative) * sailDeployment * wind.strength * windHeelCap,
-        -windHeelCap, windHeelCap,
-      );
-      this.updateShipWaveAttitude(ship, stats, t, dt, windHeel, seaState);
+      // HEEL IS A MOMENT BALANCE (physics-10): side force x arm against
+      // m g GM. Canvas that is luffing or struck makes no side force.
+      const windHeel = ship.luffing || sailDeployment <= 0.08
+        ? 0
+        : sailHeelAngle(ship.type, fSail, offWind, signedRelative);
+      const moored = !!ship.anchored
+        && islands.some((isl) => !!isl.dock && berthFrameSideOf(isl.dock, ship.position.x, ship.position.z) !== 0);
+      this.updateShipSeakeeping(ship, stats, t, dt, windHeel, seaState, moored);
 
       if (ship.onFire) {
         ship.fireTimer = Math.max(0, ship.fireTimer - dt);
@@ -3086,7 +3217,11 @@ export class PhysicsSystem {
   private getShipDynamics(shipId: string) {
     let dyn = this.shipDynamics.get(shipId);
     if (!dyn) {
-      dyn = { pitchVel: 0, rollVel: 0, heaveVel: 0, agroundFor: 0, agroundArming: 0, founderRoll: 0, founderTrim: 0 };
+      dyn = {
+        pitchVel: 0, rollVel: 0, heaveVel: 0, rollPsi: 0, pitchPsi: 0, heavePsi: 0, planePrev: null,
+        loadMass: 0, loadMx: 0, loadMz: 0, bowRel: null, railRel: null, seaEventCooldown: 0, turnHeel: 0,
+        agroundFor: 0, agroundArming: 0, founderRoll: 0, founderTrim: 0,
+      };
       this.shipDynamics.set(shipId, dyn);
     }
     return dyn;
@@ -3111,60 +3246,148 @@ export class PhysicsSystem {
       + shipLocalUpY(local.x, getShipDeckY(ship.position.y, stats) - ship.position.y, local.z, ship);
   }
 
-  private updateShipWaveAttitude(
+  /** Flood water, cargo or any weight standing in the hull THIS tick: a point
+   *  load of `mass` kg at hull-local `local` (x port+, z bow+). Consumed by the
+   *  next sea-keeping step: she sinks m / (rho A_wp) and lists / trims toward
+   *  it by the moment over her righting stiffness. Callers re-apply each tick
+   *  (the flood model's water is a live quantity, not an accumulator). */
+  applyPointLoad(ship: Ship, local: { x: number; y?: number; z: number }, mass: number): void {
+    if (!(mass > 0) || !Number.isFinite(local.x) || !Number.isFinite(local.z)) return;
+    const dyn = this.getShipDynamics(ship.id);
+    dyn.loadMass += mass;
+    dyn.loadMx += mass * local.x;
+    dyn.loadMz += mass * local.z;
+  }
+
+  /** A blow to the hull (a ram, a broadside, a slam): angular rates in rad/s
+   *  and a heave rate in m/s added to her own motion, which then rings down at
+   *  her natural periods. */
+  applyHullImpulse(ship: Ship, impulse: { rollRate?: number; pitchRate?: number; heaveRate?: number }): void {
+    const dyn = this.getShipDynamics(ship.id);
+    dyn.rollVel += impulse.rollRate ?? 0;
+    dyn.pitchVel += impulse.pitchRate ?? 0;
+    dyn.heaveVel += impulse.heaveRate ?? 0;
+  }
+
+  private updateShipSeakeeping(
     ship: Ship,
     stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS],
     t: number,
     dt: number,
     windHeel: number,
-    seaState = 0,
+    seaState: number,
+    moored: boolean,
   ) {
     const dyn = this.getShipDynamics(ship.id);
-    const halfL = stats.length * 0.4;
-    const halfW = stats.width * 0.4;
-    const bow = this.toShipWorld(0, halfL, ship);
-    const stern = this.toShipWorld(0, -halfL, ship);
-    // +x is PORT (sideOfLocalX); the roll math below is unchanged.
-    const port = this.toShipWorld(halfW, 0, ship);
-    const starboard = this.toShipWorld(-halfW, 0, ship);
-    const bowY = gerstnerHeight(bow.x, bow.z, t, WAVE_PARAMS, seaState);
-    const sternY = gerstnerHeight(stern.x, stern.z, t, WAVE_PARAMS, seaState);
-    const starboardY = gerstnerHeight(starboard.x, starboard.z, t, WAVE_PARAMS, seaState);
-    const portY = gerstnerHeight(port.x, port.z, t, WAVE_PARAMS, seaState);
+    const sk = SEAKEEPING[ship.type];
+    const plane = waveAttitudePlane(ship, t, seaState);
+    const heaveShare = moored ? MOORING_WAVE_SHARE : 1;
+    const slopeShare = moored ? MOORING_WAVE_SHARE : ship.anchored ? ANCHOR_SLOPE_SHARE : 1;
+    const seaY = plane.y * heaveShare;
+    const seaRoll = plane.roll * slopeShare;
+    const seaPitch = plane.pitch * slopeShare;
+
+    // The plane's own acceleration, by finite difference at the fixed tick. A
+    // teleport (spawn, respawn tow), a first tick or a clock that did not
+    // advance by exactly this tick (a match restart, a rewound fixture clock)
+    // restarts the history: the sea plane is a function of t, so without this
+    // a clock jump would lift the hull through the crew standing on her.
+    const prev = dyn.planePrev;
+    let accY = 0; let accR = 0; let accP = 0;
+    let vy = 0; let vr = 0; let vp = 0;
+    if (prev && dt > 0 && Math.abs(t - prev.t - dt) < 0.5 * dt
+      && Math.hypot(ship.position.x - prev.x, ship.position.z - prev.z) < 40 * dt + 1) {
+      vy = (seaY - prev.y) / dt; vr = (seaRoll - prev.roll) / dt; vp = (seaPitch - prev.pitch) / dt;
+      accY = clamp((vy - prev.vy) / dt, -4, 4);
+      accR = clamp((vr - prev.vr) / dt, -1.5, 1.5);
+      accP = clamp((vp - prev.vp) / dt, -1.5, 1.5);
+    } else {
+      // First tick, spawn or teleport: she keeps the height and attitude she
+      // was placed with and SETTLES into the sea through her own mode, never a
+      // one-tick snap (crew already standing on the deck stay on it).
+      dyn.heavePsi = clamp(ship.position.y - seaY, -3, 3);
+      dyn.rollPsi = clamp((ship.roll ?? 0) - seaRoll, -0.5, 0.5);
+      dyn.pitchPsi = clamp((ship.pitch ?? 0) - seaPitch, -0.4, 0.4);
+      dyn.heaveVel = 0; dyn.rollVel = 0; dyn.pitchVel = 0;
+    }
+    dyn.planePrev = { y: seaY, roll: seaRoll, pitch: seaPitch, vy, vr, vp, x: ship.position.x, z: ship.position.z, t };
 
     const cosR = Math.cos(ship.rotation);
     const sinR = Math.sin(ship.rotation);
     const forwardSpeed = sinR * ship.velocity.x + cosR * ship.velocity.z;
     const speedFrac = clamp(Math.abs(forwardSpeed) / Math.max(1, stats.maxSpeed), 0, 1.15);
 
-    // Slight bow-up trim at speed; turn heel leans the hull OUTWARD in a hard turn.
-    // Storm seas produce steeper sampled slopes — let the targets breathe a
-    // little wider so heavy weather genuinely pitches the deck (still inside
-    // the client renderer's defensive clamps of ±0.5 / ±0.6).
+    // Point loads (applyPointLoad) this tick: sinkage and the list toward them.
+    const loadSink = dyn.loadMass / (SEA_RHO * sk.waterplaneArea);
+    const loadRoll = -(dyn.loadMx * SEA_G) / sk.kRoll;
+    const loadPitch = (dyn.loadMz * SEA_G) / sk.kPitch;
+    dyn.loadMass = 0; dyn.loadMx = 0; dyn.loadMz = 0;
+
+    // The water standing in her is part of her attitude, not a client flourish:
+    // the list follows the holed rail and the flooded end (SINK-01), and the
+    // bilge water pushes her down by up to FREEBOARD_DROP.
+    const list = floodListTargets(ship, t, seaState);
+    const floodSink = clamp(ship.waterLevel ?? 0, 0, 1) * FLOODING.FREEBOARD_DROP;
+    const calm = ship.anchored ? ANCHOR_SLOPE_SHARE : 1;
+    const turnHeel = shipTurnHeel(ship.angularVelocity, speedFrac);
+    // The turn's heeling moment builds with the drift angle, not in one tick:
+    // a first-order lag at half the roll frequency keeps the swing into the
+    // turn from overshooting the 3 deg the steady turn earns.
+    dyn.turnHeel += (turnHeel - dyn.turnHeel) * (1 - Math.exp(-dt * sk.rollOmega * 0.5));
+    const eqRoll = (dyn.turnHeel + windHeel) * calm + list.roll + loadRoll;
+    const eqPitch = -speedFrac * 0.035 * calm + list.trim + loadPitch;
+    const eqHeave = -floodSink - clamp(loadSink, 0, stats.height);
+
+    const stepMode = (psi: number, vel: number, eq: number, omega: number, zeta: number, seaAcc: number) => {
+      const acc = omega * omega * (eq - psi) - 2 * zeta * omega * vel - WAVE_INERTIA_COUPLING * seaAcc;
+      const v = vel + acc * dt;
+      return { psi: psi + v * dt, vel: v };
+    };
+    const r = stepMode(dyn.rollPsi, dyn.rollVel, eqRoll, sk.rollOmega, ROLL_ZETA, accR);
+    const p = stepMode(dyn.pitchPsi, dyn.pitchVel, eqPitch, sk.pitchOmega, PITCH_ZETA, accP);
+    const h = stepMode(dyn.heavePsi, dyn.heaveVel, eqHeave, sk.heaveOmega, HEAVE_ZETA, accY);
+    dyn.rollPsi = clamp(r.psi, -0.5, 0.5); dyn.rollVel = r.vel;
+    dyn.pitchPsi = clamp(p.psi, -0.4, 0.4); dyn.pitchVel = p.vel;
+    dyn.heavePsi = clamp(h.psi, -3, 3); dyn.heaveVel = h.vel;
+
+    // Storm seas let the deck breathe wider, inside the renderer's defensive
+    // clamps of +-0.5 / +-0.6.
     const pitchCap = 0.35 + seaState * 0.1;
     const rollCap = 0.45 + seaState * 0.08;
-    // An anchored hull holds nearly flat — berthed ships used to heel with
-    // every passing wave, so identical docks showed randomly tilted parks.
-    const anchorCalm = ship.anchored ? 0.3 : 1;
-    // The water standing in her is part of her attitude, not a client flourish:
-    // the list follows the holed rail and the flooded end (SINK-01).
-    const list = floodListTargets(ship, t, seaState);
-    const targetPitch = clamp(
-      (Math.atan2(sternY - bowY, stats.length * 0.8) - speedFrac * 0.035) * anchorCalm + list.trim,
-      -pitchCap, pitchCap,
-    );
-    const turnHeel = shipTurnHeel(ship.angularVelocity, speedFrac);
-    const targetRoll = clamp(
-      (Math.atan2(portY - starboardY, stats.width * 0.8) + turnHeel + windHeel) * anchorCalm + list.roll,
-      -rollCap, rollCap,
-    );
+    ship.pitch = clamp(seaPitch + dyn.pitchPsi, -pitchCap, pitchCap);
+    ship.roll = clamp(seaRoll + dyn.rollPsi, -rollCap, rollCap);
+    ship.position.y = seaY + dyn.heavePsi;
+    // ship.heave is the RESIDUAL: the short sea at her centre that the
+    // 21-station plane averaged away. The renderer adds it back so the hull
+    // sits on the visible surface; a moored hull takes her berth's share.
+    const centreY = gerstnerHeight(ship.position.x, ship.position.z, t, WAVE_PARAMS, seaState);
+    ship.heave = clamp((centreY - plane.y) * heaveShare, -2, 2);
 
-    const pitch = ship.pitch ?? 0;
-    const roll = ship.roll ?? 0;
-    dyn.pitchVel += ((targetPitch - pitch) * ATTITUDE_STIFFNESS - dyn.pitchVel * ATTITUDE_DAMPING) * dt;
-    dyn.rollVel += ((targetRoll - roll) * ATTITUDE_STIFFNESS - dyn.rollVel * ATTITUDE_DAMPING) * dt;
-    ship.pitch = clamp(pitch + dyn.pitchVel * dt, -0.45, 0.45);
-    ship.roll = clamp(roll + dyn.rollVel * dt, -0.55, 0.55);
+    // Slam and green water (storm FX + audio). Relative immersion of the bow
+    // waterline point (< 0 = the forefoot is clear of the sea), and the sea
+    // against the LOWER rail amidships (green water once it tops it).
+    dyn.seaEventCooldown = Math.max(0, dyn.seaEventCooldown - dt);
+    const bow = this.toShipWorld(0, sk.bowZ, ship);
+    const bowSea = gerstnerHeight(bow.x, bow.z, t, WAVE_PARAMS, seaState) * heaveShare;
+    const bowRel = bowSea - (ship.position.y - sk.bowZ * Math.sin(ship.pitch));
+    const prevRel = dyn.bowRel;
+    dyn.bowRel = bowRel;
+    const railX = (ship.roll >= 0 ? -0.5 : 0.5) * stats.width;
+    const rail = this.toShipWorld(railX, 0, ship);
+    const railY = ship.position.y + sk.freeboard + railX * Math.sin(ship.roll);
+    const railRel = gerstnerHeight(rail.x, rail.z, t, WAVE_PARAMS, seaState) * heaveShare - railY;
+    const prevRail = dyn.railRel;
+    dyn.railRel = railRel;
+    if (prevRel !== null && prevRail !== null && dt > 0 && dyn.seaEventCooldown <= 0 && !moored && seaState >= SEA_EVENT_MIN_SEA_STATE) {
+      const closing = (bowRel - prevRel) / dt;
+      if (prevRel < -SLAM_EMERGENCE && bowRel >= -SLAM_EMERGENCE && closing > SLAM_CLOSING_SPEED) {
+        this.seaEvents.push({ shipId: ship.id, kind: 'slam', strength: closing, x: bow.x, y: bowSea, z: bow.z });
+        dyn.seaEventCooldown = SEA_EVENT_COOLDOWN;
+      } else if (prevRail <= 0 && railRel > 0) {
+        this.seaEvents.push({ shipId: ship.id, kind: 'green_water', strength: railRel + Math.max(0, railRel - prevRail), x: rail.x, y: railY, z: rail.z });
+        dyn.seaEventCooldown = SEA_EVENT_COOLDOWN;
+      }
+    }
   }
 
   /**
