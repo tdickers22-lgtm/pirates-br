@@ -366,15 +366,17 @@ function turnedWithWater(waterLevel) {
   const physics = new PhysicsSystem();
   const ship = makeShip('sloop', { sailHeight: 0, waterLevel });
   const helm = { id: 'helm', atHelm: true, onShipId: ship.id, state: 'eliminated', respawnProtectionTimer: 0, shipBoundaryGraceTimer: 0 };
-  const start = ship.rotation;
-  for (let i = 0; i < 3 * 60; i++) {
+  // Authority is the SETTLED turn rate: since b2-ask-08 the water is also yaw
+  // inertia, so a swamped hull takes longer to swing up (graded in
+  // test-flood-trim section 6); 10 s lets both hulls reach their own rate.
+  for (let i = 0; i < 10 * 60; i++) {
     ship.velocity.x = Math.sin(ship.rotation) * 12;
     ship.velocity.z = Math.cos(ship.rotation) * 12;
     ship.waterLevel = waterLevel;
     applyShipRudderSteering(ship, DT, 1, 1);
     physics.update(DT, i * DT, [ship], [helm], [], [], []);
   }
-  return Math.abs(angleWrap(ship.rotation - start));
+  return Math.abs(ship.angularVelocity);
 }
 
 {

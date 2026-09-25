@@ -6,7 +6,7 @@ import { truceSparesContact, truceBlocksBounty } from '../../shared/truce.js';
 import type { GangwayPlan } from '../../shared/interactions.js';
 import { DOCK_DECK_RISE, toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, getShipFloorYAt, getShipHoldHalfWidth, isInsideShipHoldFootprint, countOpenHoles, shipLocalUpY } from '../../shared/interactions.js';
 import { drawnIslandSurfaceY } from '../../shared/terrainGrid.js';
-import { beginShipFounder, floodListTargets, openShipHoles, stepShipFounder, updateShipFlooding } from './FloodSystem.js';
+import { beginShipFounder, floodListTargets, floodWaterMass, openShipHoles, stepShipFounder, updateShipFlooding } from './FloodSystem.js';
 import { floodSettle } from '../../shared/flooding/floodModel.js';
 import {
   getBridgeDeckY,
@@ -490,7 +490,12 @@ export function applyShipRudderSteering(ship: Ship, dt: number, steer: number, a
   // Creep: with no way on, full helm still swings her at RUDDER_CREEP_OMEGA.
   const creep = rp.damp0 * RUDDER_CREEP_OMEGA * (ship.rudderAngle / SHIP.RUDDER_MAX_ANGLE) * authority * waterAuthority;
   const moment = -(lift * rp.lever) - creep;
-  ship.angularVelocity = (rp.inertia * ship.angularVelocity + moment * dt) / (rp.inertia + damp * dt);
+  // Water in the hold is MASS as well as drag (b2-ask-08): the yaw inertia
+  // carries it (scaled with the hull's own mass), so a swamped hull swings up
+  // slower. The damping is hydrodynamic and stays, so her settled rate is the
+  // rudder's; only the rise is longer.
+  const inertia = rp.inertia * (1 + floodWaterMass(ship) / HULL_PARAMS[ship.type].mass);
+  ship.angularVelocity = (inertia * ship.angularVelocity + moment * dt) / (inertia + damp * dt);
 
   // A HULL ON THE GROUND IS NOT BECALMED, SHE IS PINNED, AND SHE PIVOTS. With
   // way as the only input a beached ship would only creep while her grounding
@@ -983,13 +988,18 @@ export class PhysicsSystem {
       // implicitly with the hull drag. A hard turn costs 15-30% of her speed.
       // In stays (luffing) the canvas is backed and she pivots on her keel;
       // that swing is not a drawing turn, so it carries no drift-angle drag.
-      const turnDragCoef = ship.luffing ? 0 : hull.mass * RUDDER_PARAMS[ship.type].driftDrag * Math.abs(ship.angularVelocity);
+      // FLOOD WATER IS MASS (b2-ask-08): the water aboard rides with the hull,
+      // so the surge / lateral momentum carries hull.mass + floodWaterMass.
+      // Drag and canvas force are unchanged, so her settled speed is the
+      // flood-penalty one; she just gathers (and sheds) way slower.
+      const mEff = hull.mass + floodWaterMass(ship);
+      const turnDragCoef = ship.luffing ? 0 : mEff * RUDDER_PARAMS[ship.type].driftDrag * Math.abs(ship.angularVelocity);
       const fwdDragCoef = dragMult * (hull.c1 + (hull.c2 + luffC2) * Math.abs(currentFwd)) + turnDragCoef;
-      let forwardSpeed = (currentFwd * hull.mass + fSail * dt) / (hull.mass + fwdDragCoef * dt);
+      let forwardSpeed = (currentFwd * mEff + fSail * dt) / (mEff + fwdDragCoef * dt);
       // The keel: lateral resistance >= 25x the forward drag (KEEL_LATERAL_RATIO),
       // so turning redirects the momentum instead of skidding it away.
       const latDragCoef = hull.cLat1 + hull.cLat2 * Math.abs(currentLat);
-      let lateralSpeed = (currentLat * hull.mass) / (hull.mass + latDragCoef * dt);
+      let lateralSpeed = (currentLat * mEff) / (mEff + latDragCoef * dt);
       // The keel is a FOIL, not a brake (b2.1d): the sideways way it takes out
       // is mostly turned along her length (KEEL_REDIRECT of that energy), the
       // rest is its own induced drag. Without this a swinging hull skidded her

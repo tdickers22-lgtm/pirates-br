@@ -21,7 +21,9 @@
 //      not count as "not settled").
 //
 // Logic tier (pure node, ~3 s: two 75 s beam-sea runs plus a 20 s heading search).
-import { PhysicsSystem } from '../src/server/systems/PhysicsSystem.ts';
+import { PhysicsSystem, applyShipRudderSteering } from '../src/server/systems/PhysicsSystem.ts';
+import { floodWaterMass } from '../src/server/systems/FloodSystem.ts';
+import { HULL_PARAMS } from '../src/shared/sailing.ts';
 import { SHIP_STATS, FLOODING } from '../src/shared/constants/index.ts';
 
 let failures = 0;
@@ -150,6 +152,9 @@ function rollStats(fill, rotation, seconds = 60) {
   console.log(`  beam heading ${beam.toFixed(2)} rad: dry rms ${deg(dry.rms)} deg period ${dry.period.toFixed(2)} s; fill 0.5 rms ${deg(half.rms)} deg period ${half.period.toFixed(2)} s mean ${deg(half.mean)} deg`);
   expect('fill 0.5 rolls >= 1.2x the dry hull in the same beam sea', half.rms >= 1.2 * dry.rms,
     `ratio ${(half.rms / Math.max(1e-9, dry.rms)).toFixed(2)}`);
+  // Free surface + the water's own mass: the swamped hull rolls SLOWER.
+  expect('fill 0.5 rolls with a longer period than the dry hull (ratio > 1)', half.period > dry.period,
+    `period ${dry.period.toFixed(2)} s -> ${half.period.toFixed(2)} s, ratio ${(half.period / Math.max(1e-9, dry.period)).toFixed(2)}`);
   expect('the half-full hull is still finite and inside the list ceiling', Number.isFinite(half.mean) && Math.abs(half.mean) <= 0.3,
     `mean ${deg(half.mean)} deg`);
 }
@@ -188,6 +193,43 @@ console.log('\nSection 5: a blow at fill 0.5 settles within 6 s');
   expect('the blow reached ~0.1 rad', peak >= 0.06, `peak ${peak.toFixed(3)} rad (twins differed by ${pre.toFixed(4)} before)`);
   expect('6-10 s after the blow she is back within 0.01 rad of her untouched twin', late <= 0.01,
     `max |diff| ${late.toFixed(4)} rad after 6 s`);
+}
+
+// ── 6: the water is MASS: she gathers way and swings slower (b2-ask-08) ────
+console.log('\nSection 6: fill 0.8 adds mass to surge and yaw');
+for (const type of ['sloop', 'galleon']) {
+  const m = HULL_PARAMS[type].mass;
+  const w = floodWaterMass(makeShip(type, { waterLevel: 0.8 }));
+  console.log(`  ${type}: hull ${m.toFixed(0)} kg, water at fill 0.8 ${w.toFixed(0)} kg (x${((m + w) / m).toFixed(2)})`);
+  // Surge from rest under full canvas: speed gained in the first 2 s (drag is
+  // negligible from rest, so this is F / m).
+  const gain = (fill) => {
+    const physics = new PhysicsSystem();
+    const ship = makeShip(type, { waterLevel: fill });
+    let t = run(physics, [ship], 0, 3, () => { ship.waterLevel = fill; ship.velocity.x = 0; ship.velocity.z = 0; ship.angularVelocity = 0; });
+    ship.sailHeight = 1;
+    run(physics, [ship], t, 2, () => { ship.waterLevel = fill; ship.angularVelocity = 0; });
+    return Math.hypot(ship.velocity.x, ship.velocity.z);
+  };
+  const dry = gain(0); const wet = gain(0.8);
+  expect(`${type}: 2 s from rest at fill 0.8 she makes <= 1/1.2 of the dry hull's way`, dry > 0.05 && wet * 1.2 <= dry,
+    `dry ${dry.toFixed(3)} m/s, fill 0.8 ${wet.toFixed(3)} m/s, ratio ${(dry / Math.max(1e-9, wet)).toFixed(2)}`);
+  // Yaw: full helm at a held 4 m/s, time to 63% of her own rate after 12 s.
+  const rise = (fill) => {
+    const ship = makeShip(type, { waterLevel: fill, rotation: 0 });
+    const rates = [];
+    for (let i = 0; i < Math.round(12 / TICK); i += 1) {
+      ship.velocity.x = Math.sin(ship.rotation) * 4; ship.velocity.z = Math.cos(ship.rotation) * 4;
+      applyShipRudderSteering(ship, TICK, 1);
+      ship.rotation += ship.angularVelocity * TICK;
+      rates.push(Math.abs(ship.angularVelocity));
+    }
+    const target = 0.63 * rates[rates.length - 1];
+    return rates.findIndex((r) => r >= target) * TICK;
+  };
+  const rDry = rise(0); const rWet = rise(0.8);
+  expect(`${type}: the yaw rate rises slower at fill 0.8 (63% rise >= 1.15x dry)`, rDry > 0 && rWet >= 1.15 * rDry,
+    `dry ${rDry.toFixed(2)} s, fill 0.8 ${rWet.toFixed(2)} s`);
 }
 
 console.log(failures === 0 ? '\nAll flood-trim assertions passed' : `\n${failures} flood-trim assertion(s) FAILED`);
