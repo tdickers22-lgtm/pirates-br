@@ -20,6 +20,17 @@
 // resident at LOD0 twice more, with fresh buffers and texture sources (the shape
 // of an evict/re-ensure leak). The phone row MUST then fail; the run exits 1.
 //
+// PER-FAMILY TEXTURE ROWS (b3.1g, D27, critique gap 4): every texture reachable
+// from a scene material is charged to the family AssetLibrary tagged on it
+// (texture.userData.assetFamily); untagged ones (terrain, ocean, sky, env map,
+// UI) are `shared`. Each family is graded on its OWN row of FAMILY_TEXTURE_MB in
+// the tier column the profile runs (high / balanced / low + iPad / phone), and
+// the table's columns must sum to FAMILY_TEXTURE_TOTALS_MB. The desktopHigh and
+// desktopBalanced profiles carry only these rows and the texture total.
+// PIRATES_BR_MUTATE_FAMILY_TEX=<family>: that family's reading goes 1 MB over
+// its row -> that row (and only it) FAILS. Dev server only (the walk imports
+// memoryCensus.ts by source path); --prod prints a loud skip.
+//
 // Stack: its own 3101 (vite) / 8091 (server, map seed 20260801) unless one is
 // already answering there. ONE headless SwiftShader Chromium, closed in finally.
 // Run: node scripts/run-all-tests.mjs --only memory-budget   (or directly).
@@ -29,7 +40,7 @@ import { chromium } from 'playwright';
 import { browserArgs, describeGl } from './lib/browser-args.mjs';
 import { DEVICE_PROFILES, newDeviceContext, READ_DEVICE_VERDICT, DEVICE_EXPECTED_VERDICT } from './lib/perf-scenes.mjs';
 import { ensureDevClient, stopDevClient } from './lib/dev-client.mjs';
-import { MEMORY_BUDGETS } from './lib/budgets.mjs';
+import { MEMORY_BUDGETS, MODEL_FAMILIES, FAMILY_TEXTURE_MB, FAMILY_TEXTURE_ROW_OF, FAMILY_TEXTURE_TOTALS_MB, FAMILY_TEXTURE_DEVIATIONS_MB } from './lib/budgets.mjs';
 
 const SERVER_PORT = process.env.PIRATES_BR_SERVER_PORT ?? '8091';
 const CLIENT_URL = (process.env.PIRATES_BR_URL ?? 'http://127.0.0.1:3101').replace(/\/$/, '');
@@ -42,12 +53,65 @@ const MUTATE = process.argv.includes('--mutate') || process.env.PIRATES_BR_MUTAT
  *  The mutation needs the dev server (it imports the census module by source path). */
 const PROD = process.argv.includes('--prod') && !MUTATE;
 const PROD_DIR = '/tmp/pbr-memory-dist';
-const PROFILES = (process.env.PIRATES_MEMORY_PROFILES ?? (MUTATE ? 'phone' : 'phone,ipad,desktopLow')).split(',');
+const PROFILES = (process.env.PIRATES_MEMORY_PROFILES ?? (MUTATE ? 'phone' : 'phone,ipad,desktopLow,desktopBalanced,desktopHigh')).split(',');
+const MUTATE_FAMILY_TEX = process.env.PIRATES_BR_MUTATE_FAMILY_TEX ?? null;
+/** The D27 texture column each profile is graded in (iPad grades the low column). */
+const TEX_COLUMN = { phone: 'phone', ipad: 'low', desktopLow: 'low', desktopBalanced: 'balanced', desktopHigh: 'high' };
 /** b3.1b: an Air-class desktop pinned to the low tier at the harness's 960x540 @1 window (no
  *  device emulation: desktop UA, fine pointer). Graded against MEMORY_BUDGETS.desktopLow. */
 const DESKTOP_PROFILES = {
   desktopLow: { label: 'desktop 960x540 @1, ?quality=low', query: '&quality=low', quality: 'low', viewport: { width: 960, height: 540 } },
+  // b3.1g: graded on the per-family texture rows and the texture column total only.
+  desktopBalanced: { label: 'desktop 960x540 @1, ?quality=balanced', query: '&quality=balanced', quality: 'balanced', viewport: { width: 960, height: 540 } },
+  desktopHigh: { label: 'desktop 960x540 @1, ?quality=high', query: '&quality=high', quality: 'high', viewport: { width: 960, height: 540 } },
 };
+
+/** In the page: resident texture bytes per D27 family (unique texture sources on scene materials). */
+const FAMILY_TEXTURES = async () => {
+  const mod = await import('/src/client/debug/memoryCensus.ts');
+  const scene = window.__piratesBR.renderer.scene;
+  const seen = new Map();
+  const add = (t) => { if (t?.isTexture && !t.isRenderTargetTexture) { const k = t.source ?? t; if (!seen.has(k)) seen.set(k, t); } };
+  add(scene.background); add(scene.environment);
+  scene.traverse((o) => {
+    const mats = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
+    for (const m of mats) for (const k of Object.keys(m)) add(m[k]);
+    for (const u of mats.flatMap((m) => Object.values(m.uniforms ?? {}))) add(u?.value);
+  });
+  const bytes = {}; let tagged = 0;
+  for (const t of seen.values()) {
+    const fam = t.userData?.assetFamily ?? 'shared';
+    if (t.userData?.assetFamily) tagged += 1;
+    bytes[fam] = (bytes[fam] ?? 0) + mod.textureBytes(t).bytes;
+  }
+  return { bytes, tagged, textures: seen.size };
+};
+
+function gradeFamilyTextures(id, fam) {
+  const col = TEX_COLUMN[id];
+  const byRow = {};
+  for (const [f, b] of Object.entries(fam.bytes)) {
+    const row = FAMILY_TEXTURE_ROW_OF[f] ?? f;
+    byRow[row] = (byRow[row] ?? 0) + b / 2 ** 20;
+  }
+  if (MUTATE_FAMILY_TEX) {
+    const row = FAMILY_TEXTURE_ROW_OF[MUTATE_FAMILY_TEX] ?? MUTATE_FAMILY_TEX;
+    if (!FAMILY_TEXTURE_MB[row]) throw new Error(`PIRATES_BR_MUTATE_FAMILY_TEX: no family ${MUTATE_FAMILY_TEX}`);
+    byRow[row] = FAMILY_TEXTURE_MB[row][col] + 1;
+    console.log(`      [MUTATED: ${row} textures -> ${byRow[row]} MB, 1 MB over its ${col} row]`);
+  }
+  console.log(`      family textures (${col} column, ${fam.textures} textures, ${fam.tagged} tagged): ${Object.entries(byRow).map(([f, mb]) => `${f} ${mb.toFixed(1)}`).join(', ')} MB`);
+  expect(`[${id}] family texture census is not vacuous (>= 1 GLB texture tagged with its family)`, fam.tagged > 0 && fam.textures > 3, JSON.stringify(fam));
+  for (const f of Object.keys(byRow)) expect(`[${id}] texture family ${f} has a D27 row`, !!FAMILY_TEXTURE_MB[f]);
+  for (const [f, row] of Object.entries(FAMILY_TEXTURE_MB)) {
+    const mb = byRow[f] ?? 0;
+    const dev = MUTATE_FAMILY_TEX ? null : FAMILY_TEXTURE_DEVIATIONS_MB[`${f}.${col}`];
+    if (dev && mb > row[col]) {
+      console.log(`      ! textures ${f} ${mb.toFixed(1)} MB over its ${col} row ${row[col]} MB: declared deviation up to ${dev.upTo} MB (owner ${dev.owner})`);
+      expect(`[${id}] textures ${f} ${mb.toFixed(1)} MB <= declared deviation ${dev.upTo} MB (${col})`, mb <= dev.upTo);
+    } else expect(`[${id}] textures ${f} ${mb.toFixed(1)} MB <= ${row[col]} MB (${col})`, mb <= row[col]);
+  }
+}
 if ([SERVER_PORT, new URL(CLIENT_URL).port].some((p) => ['3000', '8090', '8080'].includes(p))) {
   throw new Error('test-memory-budget never runs on 3000/8090 (the owner plays there) or 8080');
 }
@@ -101,8 +165,8 @@ const TOUR = async ([tourMs]) => {
 async function censusFor(browser, id) {
   const desktop = DESKTOP_PROFILES[id];
   const profile = desktop ?? DEVICE_PROFILES[id];
-  const budget = MEMORY_BUDGETS[id];
-  if (!profile || !budget) throw new Error(`no profile/budget row for ${id}`);
+  const budget = MEMORY_BUDGETS[id] ?? null; // desktopBalanced / desktopHigh: family rows + texture total only
+  if (!profile || !TEX_COLUMN[id] || (!budget && !desktop)) throw new Error(`no profile/budget row for ${id}`);
   const context = desktop
     ? await browser.newContext({ viewport: desktop.viewport, deviceScaleFactor: 1 })
     : await newDeviceContext(browser, profile);
@@ -158,9 +222,16 @@ async function censusFor(browser, id) {
       // (render targets: 0 is honest on the low tier a device gets: no post-fx, no shadow map)
       c.counts.geometries > 50 && c.counts.textures > 3 && c.drawingBufferBytes > 0 && c.geometryBytes > 1e6,
       JSON.stringify(c.counts));
-    expect(`[${id}] GPU resident ${c.mb.gpu} MB <= ${budget.gpuMB} MB`, c.mb.gpu <= budget.gpuMB);
-    expect(`[${id}] textures ${c.mb.textures} MB <= ${budget.texturesMB} MB`, c.mb.textures <= budget.texturesMB);
-    expect(`[${id}] JS heap ${c.mb.heap} MB <= ${budget.heapMB} MB (${c.heapSource})`, c.mb.heap <= budget.heapMB);
+    if (budget) {
+      expect(`[${id}] GPU resident ${c.mb.gpu} MB <= ${budget.gpuMB} MB`, c.mb.gpu <= budget.gpuMB);
+      expect(`[${id}] textures ${c.mb.textures} MB <= ${budget.texturesMB} MB`, c.mb.textures <= budget.texturesMB);
+      expect(`[${id}] JS heap ${c.mb.heap} MB <= ${budget.heapMB} MB (${c.heapSource})`, c.mb.heap <= budget.heapMB);
+    } else {
+      const cap = FAMILY_TEXTURE_TOTALS_MB[TEX_COLUMN[id]];
+      expect(`[${id}] textures ${c.mb.textures} MB <= ${cap} MB (D27 ${TEX_COLUMN[id]} residency)`, c.mb.textures <= cap);
+    }
+    if (PROD) console.log('      ! per-family texture rows SKIPPED under --prod (the walk imports memoryCensus.ts by source path; run without --prod)');
+    else gradeFamilyTextures(id, await page.evaluate(FAMILY_TEXTURES));
     expect(`[${id}] no page errors`, errors.length === 0, errors.slice(0, 3).join(' | '));
     return c;
   } finally {
@@ -170,6 +241,12 @@ async function censusFor(browser, id) {
 
 async function main() {
   console.log(`Resident memory budget (${PROFILES.join('/')}) — GL: ${describeGl()}`);
+  // b3.1g: the allocation table must sum to the D27 residency column (a [realloc] never raises a sum).
+  for (const [col, total] of Object.entries(FAMILY_TEXTURE_TOTALS_MB)) {
+    const sum = Object.values(FAMILY_TEXTURE_MB).reduce((s, r) => s + r[col], 0);
+    expect(`family texture rows sum to the ${col} total (${sum} = ${total} MB)`, sum === total);
+  }
+  expect('every model family has a texture row', MODEL_FAMILIES.every((f) => FAMILY_TEXTURE_MB[FAMILY_TEXTURE_ROW_OF[f] ?? f]));
   const started = [];
   let browser;
   try {
