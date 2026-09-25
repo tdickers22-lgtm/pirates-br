@@ -26,7 +26,7 @@
 process.env.PIRATES_BR_MAP_SEED = process.env.PIRATES_BR_MAP_SEED || '20260801';
 
 import { Match } from '../src/server/core/Match.ts';
-import { PLAYER } from '../src/shared/constants/index.ts';
+import { PLAYER, SHIP_STATS } from '../src/shared/constants/index.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -82,17 +82,27 @@ console.log('The tide brings her in as she is:');
   expect('the captain is holding a respawn on his hull',
     captain.state === 'respawning', `state=${captain.state}`);
 
-  const deadline = match.t + 35;
-  while (match.t < deadline) match.tick();
-
-  const inside = dist2(hull.position, { x: state.storm.centerX, z: state.storm.centerZ })
+  // Graded at the moment the tide sets her down: since b2.2a (be07b684) a
+  // hull flooded through Torricelli breaches keeps filling after the tow, by
+  // design (she is towed as she is, holes open), so the clamp is read on the
+  // tick she comes inside, not 25 s later.
+  const isInside = () => dist2(hull.position, { x: state.storm.centerX, z: state.storm.centerZ })
     <= state.storm.safeRadius;
+  let waterAtTow = null;
+  const deadline = match.t + 35;
+  while (match.t < deadline) {
+    match.tick();
+    if (waterAtTow === null && isInside()) waterAtTow = hull.waterLevel;
+  }
+
+  const inside = isInside();
   expect('the tide brought her inside the wall', inside,
     `d=${dist2(hull.position, { x: 0, z: 0 }).toFixed(1)} safeRadius=${state.storm.safeRadius}`);
   expect('...still holed — a tow is not a refit', hull.holes.length >= 4,
     `holes=${hull.holes.length}`);
   expect('...still wet, and only bailed to the survivable clamp',
-    hull.waterLevel > 0 && hull.waterLevel <= 0.45, `waterLevel=${hull.waterLevel.toFixed(3)}`);
+    waterAtTow !== null && waterAtTow > 0 && waterAtTow <= 0.45,
+    `waterLevel at the tow=${waterAtTow?.toFixed(3)}, now=${hull.waterLevel.toFixed(3)}`);
 }
 
 // ── ...BUT THE TIDE IS NOT A PUMP ────────────────────────────────────────────
@@ -108,9 +118,17 @@ console.log('\nA derelict already going down is not rescued:');
   const [captain] = state.players;
   const hull = state.ships.find((s) => s.id === captain.shipId);
 
+  // GOING DOWN means breaches under her waterline: since the b2.2a Torricelli
+  // model (be07b684) water finds its level, so the old fixture's centreline
+  // holes at y = 0.2 settle near 0.66 and never sink a 0.7 hull (she plateaus
+  // and the tide rightly takes her at the grace). Four size-2 wounds in her
+  // sides 0.6 m under the waterline are a hull that founders in ~2 s.
+  const { width, length } = SHIP_STATS[hull.type];
   hull.position = { x: state.storm.safeRadius + 200, y: 0.05, z: 0 };
   hull.anchored = false;
-  hull.holes = [1, 2, 3, 4].map((id) => ({ id, x: 0, y: 0.2, z: id * 1.5 - 3, patched: false }));
+  hull.holes = [0, 1, 2, 3].map((i) => ({
+    id: i + 1, x: (i % 2 ? -1 : 1) * width * 0.5, y: -0.6, z: ((i >> 1) - 0.5) * length * 0.2, patched: false, size: 2,
+  }));
   hull.nextHoleId = 5;
   hull.waterLevel = 0.7;
   captain.position = { ...hull.position };
