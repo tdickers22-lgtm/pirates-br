@@ -29,8 +29,8 @@ import { Match } from '../src/server/core/Match.ts';
 
 let failures = 0;
 function expect(label, ok, detail = '') {
-  if (ok) console.log(`  ok  ${label}${detail ? `  (${detail})` : ''}`);
-  else { console.error(`  FAIL ${label}${detail ? `\n       ${detail}` : ''}`); failures += 1; }
+  if (ok) console.log(`  ✓ ${label}${detail ? `  (${detail})` : ''}`);
+  else { console.error(`  ✗ FAIL: ${label}${detail ? `\n       ${detail}` : ''}`); failures += 1; }
 }
 const DEG = Math.PI / 180;
 const TICK = 0.016;
