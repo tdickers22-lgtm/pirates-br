@@ -52,7 +52,7 @@ export const GENERATOR_PATTERNS = [
 ];
 
 /** asset.generator values a script-built GLB may carry. */
-export const EXPORTER_ALLOW = /Khronos glTF Blender I\/O|gltfpack|glTF-Transform/;
+export const EXPORTER_ALLOW = /Khronos glTF Blender I\/O|gltfpack|glTF-Transform|pirates-br _pirate_clips\.py/; // b3.2b: the clip library is written by the in-repo pure-Python writer (no Blender mesh, animation only)
 export const LICENSE_OK = /^(?:CC0(?:[- ]1\.0)?|CC[- ]BY(?:[- ](?:3\.0|4\.0))?)$/i;
 
 /**
