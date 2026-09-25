@@ -1,5 +1,10 @@
 import * as THREE from 'three';
 import { budgeted } from './FrameBudget.js';
+import { assets, type AssetName } from '../assets/AssetLibrary.js';
+import {
+  applyViewmodelMaterialSettings, makeHeldWeaponMesh, makePocketPreviewMesh, type PocketPreviewKind,
+} from './factories/WeaponMeshFactory.js';
+import { makeCarpentersHammerMesh, toolGlbReady, type ToolGlbName } from './factories/MiscMeshFactory.js';
 /**
  * THE SHADER BILL IS DEFERRED TO FIRST DRAW. This pays it on purpose instead.
  *
@@ -272,6 +277,97 @@ type Owed = { mesh: THREE.Mesh; key: string; material: THREE.Material };
  * Pre-pays three's deferred first-use work for every material the scene is
  * about to draw, and holds back anything it has not paid for yet.
  */
+/**
+ * WARM PROXIES: WHAT IS NOT IN THE GRAPH YET (b3.1e).
+ *
+ * The sync walk pays what sits in the scene, hidden or not. The viewmodel is
+ * the one family that is BUILT on first use instead of pooled: the first time a
+ * player draws the blunderbuss, ViewmodelController clones the GLB, gives it the
+ * viewmodel material settings (`|viewmodel-noclip` in the program key) and the
+ * frame that shows it took the link. Measured on the --no-khr tour before this:
+ * blunderbuss_body, 2854 ms in one frame of play under SwiftShader.
+ *
+ * So while the no-extension sync path runs, one hidden group holds a copy of
+ * every held weapon, pocket item and tool built by the SAME factories with the
+ * SAME viewmodel settings. Its materials are clones (a tool GLB clone shares the
+ * library's materials, and a proxy must never flip depthTest on those). Budget
+ * lights inside read `visible = false` and sit under a hidden branch, so the
+ * light counts in every program key are untouched. When the boost drops the
+ * group leaves the scene WITHOUT disposing anything: three keeps a program while
+ * a live material uses it, so the real viewmodel later acquires the linked one.
+ * A weapon or tool whose GLB has not landed yet is built as its primitive and
+ * rebuilt once the file is in.
+ */
+const WARM_WEAPON_IDS = ['cutlass', 'flintlock', 'flintknock', 'eye_of_reach', 'blunderbuss'] as const;
+const WARM_POCKET_KINDS: readonly PocketPreviewKind[] = [
+  'banana', 'wood', 'coconut', 'mango', 'meat', 'powder_keg', 'shovel', 'chest', 'bucket', 'compass',
+  'spyglass', 'lantern', 'axe',
+];
+/** Frames between checks for a GLB that landed since the last proxy build. */
+const PROXY_RECHECK_FRAMES = 30;
+
+function proxyOf(root: THREE.Object3D): THREE.Object3D {
+  root.traverse((node) => {
+    const mesh = node as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    mesh.material = Array.isArray(mesh.material) ? mesh.material.map((m) => m.clone()) : mesh.material.clone();
+  });
+  applyViewmodelMaterialSettings(root);
+  return root;
+}
+
+class WarmProxies {
+  readonly root = (() => {
+    const group = new THREE.Group();
+    group.name = 'program-warm-proxies';
+    group.visible = false;
+    return group;
+  })();
+  /** tag -> true once the final (GLB, not primitive) proxy is in. */
+  private readonly done = new Map<string, THREE.Object3D>();
+  private recheckIn = 0;
+  built = 0;
+
+  update(scene: THREE.Scene, on: boolean): void {
+    if (!on) {
+      if (this.root.parent) this.root.removeFromParent();
+      return;
+    }
+    if (this.root.parent !== scene) scene.add(this.root);
+    if (this.recheckIn-- > 0) return;
+    this.recheckIn = PROXY_RECHECK_FRAMES;
+    for (const id of WARM_WEAPON_IDS) {
+      const tag = `weapon:${id}`;
+      const final = assets.has(id as AssetName);
+      this.place(tag, final, () => makeHeldWeaponMesh(id));
+    }
+    for (const kind of WARM_POCKET_KINDS) {
+      this.place(`pocket:${kind}`, false, () => makePocketPreviewMesh(kind), true);
+    }
+    this.place('tool:hammer', false, () => makeCarpentersHammerMesh(1), true);
+  }
+
+  /** Build (or rebuild) one proxy. `pendingAware`: the builder marks an
+   *  unfinished GLB with userData.toolGlbPending, so final = not pending. */
+  private place(tag: string, final: boolean, build: () => THREE.Object3D, pendingAware = false): void {
+    const have = this.done.get(tag);
+    if (have && (have.userData.warmFinal as boolean)) return;
+    if (have && !pendingAware && !final) return;
+    if (have && pendingAware) {
+      const pending = have.userData.toolGlbPending as ToolGlbName | undefined;
+      if (!pending) { have.userData.warmFinal = true; return; }
+      if (!toolGlbReady(pending)) return;
+    }
+    const next = proxyOf(build());
+    next.name = `warm:${tag}`;
+    next.userData.warmFinal = pendingAware ? !next.userData.toolGlbPending : final;
+    if (have) have.removeFromParent();
+    this.root.add(next);
+    this.done.set(tag, next);
+    this.built += 1;
+  }
+}
+
 export class ProgramWarmer {
   /** Program keys whose first use has been paid — never charged again. */
   private readonly paid = new Set<string>();
@@ -291,6 +387,7 @@ export class ProgramWarmer {
 
   private boosted = false;
   private guard = true;
+  private readonly proxies = new WarmProxies();
   /** No-extension restore mode — see SERIAL RESTORE. */
   private serial = false;
   private serialChunk = 1;
@@ -321,6 +418,10 @@ export class ProgramWarmer {
     serial: false, serialLinks: 0, serialMs: 0,
     /** b3.1e no-extension warm-up: running this frame, programs linked, ms spent. */
     sync: false, syncLinks: 0, syncMs: 0,
+    /** Warm proxies built (b3.1e): held weapons, pocket items and tools. */
+    proxies: 0,
+    /** Longest single sync-path frame slice, ms (the countdown's worst hitch). */
+    syncWorstFrameMs: 0,
   };
 
   /** Run the serial no-extension warmer (context restore only). No effect where
@@ -403,6 +504,8 @@ export class ProgramWarmer {
     // playing) and stays the pre-warmer path otherwise.
     const sync = !parallel && !this.serial && this.boosted;
     this.stats.sync = sync;
+    this.proxies.update(scene, sync);
+    this.stats.proxies = this.proxies.built;
     if (!parallel && !this.serial && !sync) {
       this.stats.active = false;
       this.stats.heldNow = 0;
@@ -688,6 +791,7 @@ export class ProgramWarmer {
     this.stats.heldNow = this.held.length;
     this.stats.lastMs = +(performance.now() - startedAt).toFixed(2);
     if (this.stats.lastMs > this.stats.worstMs) this.stats.worstMs = this.stats.lastMs;
+    if (sync && this.stats.lastMs > this.stats.syncWorstFrameMs) this.stats.syncWorstFrameMs = this.stats.lastMs;
   }
 
   /** Give every held-back material its flag back. Call after `render()`. */
