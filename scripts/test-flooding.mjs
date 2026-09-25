@@ -1141,7 +1141,7 @@ console.log('\nThe SoT bucket (b2.2d, holes-05): scoop in the hold water, throw 
     let seq = 0;
     const press = (yawRel, pitch) => {
       match.t += 1; player.bailScoopProgress = 0; seq += 1;
-      match.applyInput(client, { seq, yaw: ship.rotation + yawRel, pitch, useItem: true }, 1 / 30);
+      match.applyInput(client, { seq, yaw: ship.rotation + yawRel, pitch, useItem: true, slot: null }, 1 / 30);
       player.bailScoopProgress = 0;
     };
     const settle = (seconds) => { const end = match.t + seconds; while (match.t < end) { match.t += 1 / 30; match.processBailReturns?.(); } };
