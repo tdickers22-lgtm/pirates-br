@@ -78,6 +78,7 @@ const READ = (shipId) => {
   let stranded = 0;
   let shallow = 0;
   let worstPiece = null;
+  let graded = 0;
   let cx = 0;
   let cz = 0;
   for (const b of debris) {
@@ -90,13 +91,14 @@ const READ = (shipId) => {
     const surf = g.ocean.getSurfaceY(b.x, b.z);
     const ground = g.founderFxSources?.groundY?.(b.x, b.z) ?? -Infinity;
     if (ground > surf - 1.2) { shallow += 1; continue; }
+    graded += 1;
     const dev = Math.abs(b.y - surf);
     if (dev > worstFloat) { worstFloat = dev; worstPiece = { kind: b.kind, age: +b.age.toFixed(2), y: +b.y.toFixed(3), surf: +surf.toFixed(3), vy: +b.vy.toFixed(3) }; }
   }
   const info = g.renderer.renderer.info.render;
   return {
     progress: ship ? ship.sinkProgress : null, sinking: !!ship?.sinking, alive: ship ? ship.alive !== false : false,
-    hullY, stats, debris: debris.length, stranded, shallow, worstPiece, worstFloat, cx, cz, calls: info.calls, tris: info.triangles,
+    hullY, stats, debris: debris.length, stranded, shallow, graded, worstPiece, worstFloat, cx, cz, calls: info.calls, tris: info.triangles,
   };
 };
 
@@ -173,29 +175,99 @@ async function main() {
     const before = await page.evaluate(READ, cam.shipId);
     await page.screenshot({ path: `${OUT}/0-before.png` });
 
-    await page.evaluate(() => window.__piratesBR.network.send({ type: 'dev_scuttle', ts: Date.now(), payload: {} }));
+    // In-page recorder: every rendered frame reads the founder and keeps the
+    // FIRST sample at or past each target (progress < 1), so a slow poll from
+    // here (SwiftShader ~3 fps, one screenshot can stall ~1 s, and the plunge
+    // runs 0.7 -> 1 in well under a second) can no longer skip a capture.
+    // The grades read these samples; the PNGs are best-effort at the next poll.
     const targets = [0.15, 0.45, 0.75, 0.93];
-    const caps = [];
+    await page.evaluate(({ src, shipId, targets }) => {
+      // eslint-disable-next-line no-eval
+      const read = (0, eval)(`(${src})`);
+      const rec = { samples: [], frames: 0, stop: false };
+      window.__founderRec = rec;
+      const tick = () => {
+        if (rec.stop) return;
+        rec.frames += 1;
+        try {
+          const g = window.__piratesBR;
+          const ship = g.state.ships.find((s) => s.id === shipId);
+          const p = ship ? ship.sinkProgress : null;
+          const next = targets[rec.samples.length];
+          if (next !== undefined && p !== null && p !== undefined && p >= next && p < 1) {
+            const r = read(shipId);
+            // One frame may cross two targets (the plunge): it fills both.
+            while (targets[rec.samples.length] !== undefined && p >= targets[rec.samples.length]) {
+              rec.samples.push({ target: targets[rec.samples.length], frame: rec.frames, ...r });
+            }
+          }
+        } catch (e) { rec.error = String(e); }
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    }, { src: READ.toString(), shipId: cam.shipId, targets });
+
+    const fps = await page.evaluate(() => new Promise((res) => {
+      let n = 0; const t0 = performance.now();
+      const f = () => { n += 1; if (performance.now() - t0 < 3000) requestAnimationFrame(f); else res(n / ((performance.now() - t0) / 1000)); };
+      requestAnimationFrame(f);
+    }));
+    console.log(`  frame rate before the scuttle: ${fps.toFixed(2)} fps`);
+    const t0 = Date.now();
+    await page.evaluate(() => window.__piratesBR.network.send({ type: 'dev_scuttle', ts: Date.now(), payload: {} }));
+    const shots = [];
     const deadline = Date.now() + 120_000;
     let goneAt = null;
+    let lastPark = 0;
     while (Date.now() < deadline) {
-      await park();
-      const r = await page.evaluate(READ, cam.shipId);
-      const next = targets[caps.length];
-      if (next !== undefined && r.progress !== null && r.progress >= next && r.progress < 1) {
-        const name = `${caps.length + 1}-p${Math.round(next * 100)}`;
+      if (Date.now() - lastPark > 1000) { await park(); lastPark = Date.now(); }
+      const r = await page.evaluate(() => {
+        const g = window.__piratesBR;
+        const rec = window.__founderRec;
+        const ship = g.state.ships.find((s) => s.id === g.state.players.find((p) => p.id === g.localPlayerId)?.shipId)
+          ?? null;
+        return { n: rec.samples.length, error: rec.error ?? null, progress: ship ? ship.sinkProgress : null, alive: ship ? ship.alive !== false : false };
+      });
+      while (shots.length < r.n) {
+        const name = `${shots.length + 1}-p${Math.round(targets[shots.length] * 100)}`;
         await page.screenshot({ path: `${OUT}/${name}.png` });
-        caps.push({ name, ...r });
-        console.log(`  capture ${name}: progress ${r.progress.toFixed(3)} hullY ${r.hullY?.toFixed(2)} debris ${r.debris} stats ${JSON.stringify(r.stats)} calls ${r.calls}`);
+        shots.push(name);
       }
       if (r.progress === null || r.progress >= 1 || !r.alive) {
         if (goneAt === null) goneAt = Date.now();
         if (Date.now() - goneAt > 4000) break;
       }
-      await page.waitForTimeout(120);
+      await page.waitForTimeout(60);
+    }
+    const recOut = await page.evaluate(() => { const rec = window.__founderRec; rec.stop = true; return { samples: rec.samples, frames: rec.frames, error: rec.error ?? null }; });
+    if (recOut.error) console.log(`  [recorder] ${recOut.error}`);
+    console.log(`  founder took ${((Date.now() - t0) / 1000 - 4).toFixed(1)} s over ${recOut.frames} rendered frames`);
+    const caps = recOut.samples.map((c, k) => ({ name: shots[k] ?? `${k + 1}-p${Math.round(c.target * 100)}`, ...c }));
+    for (const c of caps) {
+      console.log(`  capture ${c.name}: frame ${c.frame} progress ${c.progress.toFixed(3)} hullY ${c.hullY?.toFixed(2)} debris ${c.debris} stats ${JSON.stringify(c.stats)} calls ${c.calls}`);
     }
     const after = await page.evaluate(READ, cam.shipId);
     await page.screenshot({ path: `${OUT}/5-aftermath.png` });
+    // FounderFx's own draw cost, same frame and same camera: render the scene
+    // with its debris and ring meshes shown, then hidden (perf-budget row for
+    // "a founder in view": 2 instanced debris draws + <= 2 ring draws).
+    const cost = await page.evaluate(() => {
+      const g = window.__piratesBR;
+      const fx = g.founderFx;
+      const objs = [fx.barrels, fx.boxes, ...fx.rings.map((r) => r.mesh)];
+      const vis = objs.map((o) => o.visible);
+      const r = g.renderer.renderer;
+      const auto = r.info.autoReset;
+      r.info.autoReset = false;
+      const count = () => { r.info.reset(); r.render(g.renderer.scene, g.renderer.camera); return { calls: r.info.render.calls, tris: r.info.render.triangles }; };
+      const shown = count();
+      objs.forEach((o) => { o.visible = false; });
+      const hidden = count();
+      objs.forEach((o, k) => { o.visible = vis[k]; });
+      r.info.autoReset = auto;
+      return { shown, hidden, visibleObjs: vis.filter(Boolean).length };
+    });
+    console.log(`  FounderFx draw cost: ${JSON.stringify(cost)}`);
     await page.waitForTimeout(5000);
     await park();
     const later = await page.evaluate(READ, cam.shipId);
@@ -216,13 +288,19 @@ async function main() {
     check('wreckage afloat after the burst (capture 2)', (caps[1]?.debris ?? 0) > 0 && (caps[1]?.stats?.drawn ?? 0) > 0, `${caps[1]?.debris ?? 0}`);
     check('wreckage afloat after she is gone (aftermath)', after.hullY === null && after.debris > 0 && (after.stats?.drawn ?? 0) > 0,
       `hull ${after.hullY} debris ${after.debris}`);
-    check('every settled open-water piece rides the live sea (|y - surface| <= 0.6 m)', after.debris > 0 && after.worstFloat <= 0.6 && later.worstFloat <= 0.6,
-      `${after.worstFloat.toFixed(3)} / ${later.worstFloat.toFixed(3)} m`);
+    // Non-vacuous: at least one open-water piece aged 3-26 s must be graded.
+    check('every settled open-water piece rides the live sea (|y - surface| <= 0.6 m)',
+      after.graded + later.graded > 0 && after.worstFloat <= 0.6 && later.worstFloat <= 0.6,
+      `${after.worstFloat.toFixed(3)} / ${later.worstFloat.toFixed(3)} m over ${after.graded} / ${later.graded} graded pieces`);
     const moved = Math.hypot(later.cx - after.cx, later.cz - after.cz);
     check('the wreck drifts on the water (centroid moves over 5 s)', later.debris > 0 && moved > 0.05, `${moved.toFixed(2)} m`);
+    const dCalls = cost.shown.calls - cost.hidden.calls;
+    const dTris = cost.shown.tris - cost.hidden.tris;
+    check('FounderFx with a founder in view costs 1-4 draws and < 20k tris (debris 2 instanced + <= 2 rings, no lights)',
+      dCalls >= 1 && dCalls <= 4 && dTris < 20_000, `+${dCalls} draws, +${dTris} tris, ${cost.visibleObjs} fx meshes visible`);
     const peak = Math.max(...caps.map((c) => c.calls));
     console.log(`  draw calls: before ${before.calls}, founder peak ${peak}, aftermath ${after.calls} (FounderFx adds <= 2 debris + ${2} ring draws)`);
-    writeFileSync(`${OUT}/report.json`, JSON.stringify({ cam, before, caps, after, later, results }, null, 2));
+    writeFileSync(`${OUT}/report.json`, JSON.stringify({ cam, before, caps, after, later, cost, results }, null, 2));
   } finally {
     if (browser) await browser.close().catch(() => {});
     await teardown();

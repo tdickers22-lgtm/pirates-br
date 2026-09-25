@@ -7685,7 +7685,9 @@ export class Game {
       const sinkers = this.founderFxShips;
       sinkers.length = 0;
       for (const s of this.state.ships) if (s.sinking && s.sinkProgress < 1) sinkers.push(s);
-      this.founderFx.update(_dt, t, sinkers, cam, this.founderFxSources);
+      // The frame's true interval (presentDt), not the 50 ms-clamped sim dt:
+      // FounderFx substeps it so wreckage ages and floats in real time.
+      this.founderFx.update(this.presentDt, t, sinkers, cam, this.founderFxSources);
     }
 
     // Flooding loop — the ship you're on if it's taking water, else the nearest

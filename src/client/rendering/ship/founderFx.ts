@@ -34,6 +34,10 @@ export const FOUNDER_BURST_F: readonly [number, number] = [0.1, 0.3];
 export const FOUNDER_PLUNGE_F = 0.7;
 /** Seconds a piece of wreckage stays afloat. */
 export const DEBRIS_LIFE_S = 30;
+/** Longest frame FounderFx honours (a hitch or a background tab is not replayed). */
+export const FOUNDER_DT_CAP = 0.25;
+/** Float integration substep: a slow frame is split, not clamped, so debris age runs in real time. */
+export const FOUNDER_SUBSTEP = 0.05;
 /** Seconds of the last DEBRIS_LIFE_S over which it waterlogs and goes under. */
 export const DEBRIS_SINK_OUT_S = 3;
 /** Seconds the bubble column boils over the plunge. */
@@ -389,7 +393,9 @@ export class FounderFx {
   }
 
   update(dt: number, t: number, ships: readonly FounderFxShip[], cam: THREE.Vector3, src: FounderFxSources): void {
-    const step = Math.min(0.05, Math.max(0, dt));
+    // Whole frame time (capped) so ages and the 30 s life run in real time
+    // even at a few fps; the float integration below substeps it at 0.05 s.
+    const step = Math.min(FOUNDER_DT_CAP, Math.max(0, dt));
     for (const ship of ships) {
       if (!ship.sinking) continue;
       const p = ship.sinkProgress ?? 0;
@@ -523,9 +529,11 @@ export class FounderFx {
       windZ: Math.cos(w.direction) * w.strength * WIND_MS,
       vortex,
     };
+    const subs = Math.max(1, Math.ceil(step / FOUNDER_SUBSTEP - 1e-9));
+    const h = step / subs;
     for (let i = this.bodies.length - 1; i >= 0; i -= 1) {
       const b = this.bodies[i];
-      stepFloatingBody(b, step, env);
+      for (let k = 0; k < subs; k += 1) stepFloatingBody(b, h, env);
       if (b.age >= DEBRIS_LIFE_S) this.bodies.splice(i, 1);
     }
     this.draw(step);
