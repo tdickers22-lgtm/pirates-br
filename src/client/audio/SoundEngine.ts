@@ -2,6 +2,9 @@ import * as THREE from 'three';
 import type { Vec3 } from '../../shared/types/index.js';
 import { finiteClamp } from '../../shared/utils/index.js';
 import { AudioLifecycle, audioParamStats, finiteDistance, finitePos, safeSet } from './audioLifecycle.js';
+import { AUDIO_BUSES, buildAudioCore, type AudioBusName, type AudioCoreNodes } from './AudioCore.js';
+import { DECODED_CAP_BYTES, SampleBank, decodeAudioDataCompat } from './SampleBank.js';
+import { VOICE_PRIORITY, VoiceAllocator, type AudioTier } from './VoiceAllocator.js';
 
 /** A looped, filtered-noise voice with an optional tremolo/gust LFO on its gain. */
 interface LoopVoice {
@@ -413,12 +416,39 @@ export function hullCreakStrain(s: { aboard: boolean; nearHullM?: number; heel01
   return base * (1 - Math.max(0, d) / HULL_CREAK_RANGE_M);
 }
 
+/** Audio device class from the page (b2.4b): `?quality=` pins the voice tier; otherwise a
+ *  coarse-pointer phone is 'low', a tablet 'balanced', a desktop 'high'. Touch devices get the
+ *  40 MB decoded-PCM cap, desktops 64 MB. Node (no window) = desktop/high. */
+export function detectAudioDevice(): { tier: AudioTier; phone: boolean } {
+  try {
+    if (typeof window === 'undefined') return { tier: 'high', phone: false };
+    const q = new URLSearchParams(window.location?.search ?? '').get('quality');
+    const coarse = typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches;
+    const minSide = Math.min(window.screen?.width ?? 1920, window.screen?.height ?? 1080);
+    const tier: AudioTier = q === 'low' || q === 'balanced' || q === 'high'
+      ? q
+      : coarse ? (minSide < 600 ? 'low' : 'balanced') : 'high';
+    return { tier, phone: coarse };
+  } catch {
+    return { tier: 'high', phone: false };
+  }
+}
+
 export class SoundEngine {
   private ctx: AudioContext | null = null;
+  /** b2.4b bus graph (null before the first gesture). */
+  private core: AudioCoreNodes | null = null;
+  /** UI chrome bus: joins master after the world filter (never muffled, occluded or ducked). */
+  private busUi: GainNode | null = null;
+  private readonly busVolumes: Record<AudioBusName, number> = { sfx: 1, ambience: 1, music: 1, ui: 1 };
+  private readonly device = detectAudioDevice();
+  /** Concurrent sample-voice cap, 64/40/24 by tier, priority x gain stealing. */
+  readonly voices = new VoiceAllocator(this.device.tier);
+  /** Decoded CC0 samples (D31); null until the first gesture creates the context. */
+  private bank: SampleBank<AudioBuffer> | null = null;
   private master: GainNode | null = null;
   private busDry: GainNode | null = null;
   private busReverb: GainNode | null = null;
-  private compressor: DynamicsCompressorNode | null = null;
   /** Master tone shaping for the whole world — swept down when the listener submerges. */
   private worldFilter: BiquadFilterNode | null = null;
   private convolver: ConvolverNode | null = null;
@@ -632,24 +662,14 @@ export class SoundEngine {
       this.ctx = new Ctor();
       const ctx = this.ctx;
 
-      this.compressor = ctx.createDynamicsCompressor();
-      safeSet(this.compressor.threshold, 'value', -14);
-      safeSet(this.compressor.knee, 'value', 16);
-      safeSet(this.compressor.ratio, 'value', 3.4);
-      safeSet(this.compressor.attack, 'value', 0.005);
-      safeSet(this.compressor.release, 'value', 0.18);
-
-      this.master = ctx.createGain();
-      safeSet(this.master.gain, 'value', this.muted ? 0 : this.masterVolume);
-      this.master.connect(this.compressor);
-      this.compressor.connect(ctx.destination);
-
-      // World filter — wide open above water, swept down to a muffle when submerged.
-      this.worldFilter = ctx.createBiquadFilter();
-      this.worldFilter.type = 'lowpass';
-      safeSet(this.worldFilter.frequency, 'value', 20000);
-      safeSet(this.worldFilter.Q, 'value', 0.4);
-      this.worldFilter.connect(this.master);
+      // Bus graph (b2.4b AudioCore): master -> glue -> limiter -> out; sfx / ambience / music
+      // levels behind the world filter, the ui level straight into master (audio-11).
+      const core = buildAudioCore(ctx, this.muted ? 0 : this.masterVolume);
+      this.core = core;
+      this.master = core.master;
+      this.worldFilter = core.worldFilter;
+      for (const bus of AUDIO_BUSES) safeSet(core.levels[bus].gain, 'value', this.busVolumes[bus]);
+      this.busUi = core.levels.ui;
 
       // Wet (reverb) bus — two parallel convolvers so the space can crossfade
       // between open air and cave without swapping a live buffer (which clicks).
@@ -667,17 +687,17 @@ export class SoundEngine {
       this.busReverb.connect(this.wetCave);
       this.wetOutdoor.connect(this.convolver);
       this.wetCave.connect(this.convolverCave);
-      this.convolver.connect(this.worldFilter);
-      this.convolverCave.connect(this.worldFilter);
+      this.convolver.connect(core.levels.sfx);
+      this.convolverCave.connect(core.levels.sfx);
 
       this.busDry = ctx.createGain();
       safeSet(this.busDry.gain, 'value', 1);
-      this.busDry.connect(this.worldFilter);
+      this.busDry.connect(core.levels.sfx);
 
       // Ambient bed bus — looped ambience routes through here so booms can duck it.
       this.busBed = ctx.createGain();
       safeSet(this.busBed.gain, 'value', 1);
-      this.busBed.connect(this.worldFilter);
+      this.busBed.connect(core.levels.ambience);
 
       // Music bus. It sits BEHIND the world (post-worldFilter, so it muffles
       // when you go under) and behind its own duck node, which combat and
@@ -687,17 +707,18 @@ export class SoundEngine {
       this.musicDuck = ctx.createGain();
       safeSet(this.musicDuck.gain, 'value', 1);
       this.busMusic.connect(this.musicDuck);
-      this.musicDuck.connect(this.worldFilter);
+      this.musicDuck.connect(core.levels.music);
       // One generous send for the whole score — a concertina in a taproom, not
-      // in a laboratory. Tapped post-duck so a ducked tune loses its tail too.
+      // in a laboratory. Tapped post-duck AND post-slider so a ducked or muted tune loses its tail too.
       this.musicSend = ctx.createGain();
       safeSet(this.musicSend.gain, 'value', 0.34);
-      this.musicDuck.connect(this.musicSend);
+      core.levels.music.connect(this.musicSend);
       this.musicSend.connect(this.busReverb);
       // Notes routed straight at the music bus must not add a second send.
       this.ownSendNodes.add(this.busMusic);
 
       this.noise = this.createNoiseBuffer(ctx);
+      this.startSampleBank(ctx);
     }
     const state = this.ctx.state as string;
     if (state === 'suspended' || state === 'interrupted') void this.ctx.resume().catch(() => {});
@@ -710,6 +731,112 @@ export class SoundEngine {
   setVolume(volume: number): void {
     this.masterVolume = finiteClamp(volume, 0, 1, this.masterVolume);
     if (this.master) safeSet(this.master.gain, 'value', this.muted ? 0 : this.masterVolume);
+  }
+
+  /** Per-bus slider (Music / Effects / Ambience / UI), 0..1. Master stays on setVolume. */
+  setBusVolume(bus: AudioBusName, volume: number): void {
+    if (!AUDIO_BUSES.includes(bus)) return;
+    this.busVolumes[bus] = finiteClamp(volume, 0, 1, this.busVolumes[bus]);
+    const level = this.core?.levels[bus];
+    if (level) safeSet(level.gain, 'value', this.busVolumes[bus]);
+  }
+
+  getBusVolume(bus: AudioBusName): number {
+    return AUDIO_BUSES.includes(bus) ? this.busVolumes[bus] : 0;
+  }
+
+  /** Voice-cap tier (the renderer's quality class). */
+  setAudioTier(tier: AudioTier): void {
+    this.voices.setTier(tier, this.ctx?.currentTime ?? 0);
+  }
+
+  /** Sample-bank census for tests and the memory census. */
+  getSampleStats(): { decodedBytes: number; capBytes: number; activeVoices: number; voiceCap: number } | null {
+    const bank = this.bank;
+    return bank
+      ? { decodedBytes: bank.decodedBytes, capBytes: bank.capBytes, activeVoices: this.voices.active, voiceCap: this.voices.cap }
+      : null;
+  }
+
+  /** Created inside the unlock gesture: manifest, then the boot tier, then the match tier. Zones
+   *  load on first request. Every failure leaves the procedural voices in charge. */
+  private startSampleBank(ctx: AudioContext): void {
+    if (this.bank || typeof fetch !== 'function' || typeof location === 'undefined') return;
+    const bank = new SampleBank<AudioBuffer>({
+      fetchBytes: async (url) => {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
+        return res.arrayBuffer();
+      },
+      decode: (bytes) => decodeAudioDataCompat<AudioBuffer>(ctx as never, bytes),
+      nowMs: () => performance.now(),
+    }, { capBytes: this.device.phone ? DECODED_CAP_BYTES.phone : DECODED_CAP_BYTES.desktop, baseUrl: '/assets/audio/' });
+    this.bank = bank;
+    void bank.loadManifest('/assets/audio/manifest.json').then((ok) => {
+      if (!ok) return;
+      bank.preloadTier('boot');
+      bank.preloadTier('match');
+    });
+  }
+
+  /**
+   * Play a one-shot sample for `key` (manifest key, e.g. 'wood.crack'). Returns false when no
+   * decoded variant exists yet (missing, failed or still loading): the caller then plays its
+   * procedural voice. Returns true when the sample played OR the voice allocator dropped it for
+   * a louder / more important voice (a dropped voice must not fall back and build nodes anyway).
+   */
+  playSample(
+    key: string,
+    opts: { volume?: number; pos?: SoundPos | null; bus?: AudioBusName; rate?: number; priority?: number; when?: number } = {},
+  ): boolean {
+    const ctx = this.ctx;
+    const bank = this.bank;
+    if (!ctx || !bank || typeof key !== 'string') return false;
+    try {
+      const pick = bank.pick(key);
+      if (!pick) return false;
+      const bus: AudioBusName = opts?.bus && AUDIO_BUSES.includes(opts.bus) ? opts.bus : 'sfx';
+      let dest: AudioNode | null;
+      let distanceGain = 1;
+      if (bus === 'ui') dest = this.busUi;
+      else if (bus === 'ambience') dest = this.busBed;
+      else if (bus === 'music') dest = this.busMusic;
+      else if (opts?.pos && finitePos(opts.pos) && this.listenerKnown) {
+        const p = opts.pos;
+        const d = Math.hypot(p.x - this.listenerPos.x, p.y - this.listenerPos.y, p.z - this.listenerPos.z);
+        const sp = this.makeSpatialDest(d, p);
+        dest = sp.dest;
+        distanceGain = sp.gain;
+      } else dest = this.busDry;
+      if (!dest) return false;
+      const level = finiteClamp(opts?.volume ?? 1, 0, 4, 1) * distanceGain;
+      const rate = finiteClamp(opts?.rate ?? 1, 0.25, 4, 1);
+      const now = ctx.currentTime;
+      const when = Math.max(now, finiteClamp(opts?.when ?? now, now, now + 30, now));
+      const src = ctx.createBufferSource();
+      const id = this.voices.acquire({
+        priority: finiteClamp(opts?.priority ?? (bus === 'ui' ? VOICE_PRIORITY.ui : VOICE_PRIORITY.world), 0, 100, VOICE_PRIORITY.world),
+        gain: level,
+        now,
+        duration: when - now + pick.buffer.duration / rate + 0.05,
+        stop: () => { try { src.stop(); } catch { /* never started or already ended */ } },
+      });
+      if (id === null) return true;
+      const gain = ctx.createGain();
+      safeSet(gain.gain, 'value', level);
+      src.buffer = pick.buffer;
+      safeSet(src.playbackRate, 'value', rate);
+      src.connect(gain);
+      gain.connect(dest);
+      src.onended = () => { this.voices.release(id); try { gain.disconnect(); } catch { /* gone */ } };
+      src.start(when);
+      return true;
+    } catch (err) {
+      // Counted where test-sound-finite looks (audioFaults), then the caller plays its fallback.
+      this.backstopFaults += 1;
+      if (this.backstopFaults <= 3) console.warn('[Audio] playSample failed (fallback used):', err);
+      return false;
+    }
   }
 
   setMuted(muted: boolean): void {
@@ -1638,18 +1765,23 @@ export class SoundEngine {
   }
 
   // ── UI / chrome (fully dry: reverb on a click muddies the whole UI) ──
+  // UI rides the ui bus (b2.4b, audio-11): straight into master, past the world filter, so a
+  // click is never muffled underwater or ducked by a broadside. Sample first, procedural fallback.
   playUiClick(): void {
     if (!this.ctx) return;
+    if (this.playSample('ui.click', { bus: 'ui', volume: 0.6 })) return;
     const now = this.ctx.currentTime;
-    this.playTone(now, 1320, 880, 0.04, 0.16, 'square', 0, undefined, 0);
-    this.playTone(now + 0.005, 660, 660, 0.05, 0.08, 'triangle', 0, undefined, 0);
-    this.playNoise(now, 0.02, 6000, 1.4, 0.04, 'highpass', undefined, 0);
+    const ui = this.busUi ?? undefined;
+    this.playTone(now, 1320, 880, 0.04, 0.16, 'square', 0, ui, 0);
+    this.playTone(now + 0.005, 660, 660, 0.05, 0.08, 'triangle', 0, ui, 0);
+    this.playNoise(now, 0.02, 6000, 1.4, 0.04, 'highpass', ui, 0);
   }
 
   playUiHover(): void {
     if (!this.ctx) return;
+    if (this.playSample('ui.hover', { bus: 'ui', volume: 0.35 })) return;
     const now = this.ctx.currentTime;
-    this.playTone(now, 1400, 1600, 0.04, 0.06, 'sine', 0, undefined, 0);
+    this.playTone(now, 1400, 1600, 0.04, 0.06, 'sine', 0, this.busUi ?? undefined, 0);
   }
 
   // ── Storm wind (ambient, looped) ─────────────────────────────────
@@ -3403,7 +3535,13 @@ export class SoundEngine {
   private ramp(param: AudioParam, value: number, time = 0.3): void {
     const ctx = this.ctx;
     if (!ctx) return;
-    safeSet(param, 'linear', value, ctx.currentTime + time);
+    // Per-frame callers used to append one linearRamp per frame with no cancel, so every param
+    // carried a growing queue of future events (audio-03). Cancel, anchor at the current value,
+    // ramp: the queue holds at most two events and the approach is a smooth glide.
+    const now = ctx.currentTime;
+    safeSet(param, 'cancel', 0, now);
+    safeSet(param, 'set', param.value, now);
+    safeSet(param, 'linear', value, now + time);
   }
 
   /** Sidechain-ish duck of every ambient bed for a boom. depth ~0.5 ≈ -6dB. */
