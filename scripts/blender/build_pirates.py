@@ -9,6 +9,9 @@ Stages (one module each, run in this order; later slices append theirs):
                                    (geometry + skin + material slots, images not embedded: the shipped
                                    atlas is baked in b3.2e) and pirate_base.report.json; --renders writes
                                    the R1 review sheet to docs/asset-sheets/characters/r1/.
+  clips (b3.2b, _pirate_clips.py)  UAL1+UAL2 Standard retargeted onto the male rest, game clip ids, 30 fps grid,
+                                   root motion only on roll/vault/slide, gap clips as keyed layers
+                                   -> public/assets/models/pirate_clips.glb (also: python3 scripts/blender/_pirate_clips.py)
 Inputs are restored by `node assets-src/quaternius/fetch.mjs` (sha256-pinned, CC0).
 """
 import json
@@ -165,6 +168,9 @@ def main():
     with open(os.path.join(OUT, "pirate_base.report.json"), "w") as f:
         json.dump(report, f, indent=1, sort_keys=True)
     print(json.dumps({b: report["bodies"][b]["after"] for b in built}, indent=1))
+    if not RAW:   # b3.2b clips: UAL1+2 retargeted onto the male rest just written (pure Python, no bpy)
+        import _pirate_clips
+        print("clips", json.dumps(_pirate_clips.build()))
 
     if "--renders" not in ARGS:
         return
