@@ -65,6 +65,19 @@ function liveMatch(id, botCount = 0) {
   match.state.phase = 'playing';
   return match;
 }
+/** A match on a PINNED map (b2 gate). The hull sections park her at fixed spots
+ *  ((0, 360..420) from a parked eye) and grade the gale, not the chart; unseeded,
+ *  about one map in sixteen put a sea rock or an island there (seed 47514: two rock
+ *  holes at 318 m, she stalled outside the wall, foundered and the swimmer died to
+ *  the storm), so those sections flaked by map draw. Seed 15838 is open water along
+ *  that column. The env seed is restored at once, so every other match stays random. */
+function pinnedMatch(id, seed = 15838) {
+  const prev = process.env.PIRATES_BR_MAP_SEED;
+  process.env.PIRATES_BR_MAP_SEED = String(seed);
+  try { return liveMatch(id); } finally {
+    if (prev === undefined) delete process.env.PIRATES_BR_MAP_SEED; else process.env.PIRATES_BR_MAP_SEED = prev;
+  }
+}
 function join(match, name = 'Skipper') {
   const joined = match.addHumanClient(makeFakeWs(), name);
   const player = match.state.players.find((p) => p.id === joined.playerId);
@@ -198,7 +211,7 @@ console.log('The wind is a local fact: prevailing inside, a gale out of the stor
 // ══ 2. A hull caught outside the wall can get home ════════════════════════════
 console.log('\nA crew caught outside the wall can outrun it home');
 {
-  const match = liveMatch('outrun');
+  const match = pinnedMatch('outrun');
   const { player, ship, client } = join(match);
   const storm = closeTheRing(match, 300);
   // The parked ring says phase 2, so it bills at phase 2 — closeTheRing only
@@ -636,7 +649,7 @@ console.log('\nA respawn inside the tempest gets seconds to make sail, and no mo
 const STORM_MAX_EDGE_SPEED = 8;
 console.log('\nThe tempest bills the hull, not the crew standing on her');
 {
-  const match = liveMatch('storm-bills-the-hull');
+  const match = pinnedMatch('storm-bills-the-hull');
   const { player, ship } = join(match, 'Bosun');
   const storm = closeTheRing(match, 300);
   storm.damagePerSec = STORM_PHASES[1].dmgPerSec;
