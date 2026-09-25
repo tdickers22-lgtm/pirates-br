@@ -105,8 +105,10 @@ expect('storm-14 Game hands over the CAMERA while spectating or in free cam',
   && /getWeatherAnchor:/.test(gameSrc));
 
 // ── storm-15: the leak gate is a sea-state, not a weather number ───────────
+// b2.3b moved the breach gate into ship/floodFx.ts; Game hands it the drawn
+// surface as its surfaceY source (the old inline `const waveY =` is gone).
 expect('storm-15 hull-leak submersion reads the DRAWN surface',
-  /const waveY = this\.ocean\.getSurfaceY\(/.test(gameSrc));
+  /surfaceY: \([^)]*\) => this\.ocean\.getSurfaceY\(/.test(gameSrc));
 expect('storm-15 no gerstnerHeight call in Game is fed the weather number',
   !/gerstnerHeight\([\s\S]{0,200}?storminess\s*\)/.test(gameSrc));
 
