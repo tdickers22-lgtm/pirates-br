@@ -255,8 +255,11 @@ function simulateBail({ holes, bailers, seconds, start = 0.5 }) {
   const oneVsOne = simulateBail({ holes: 1, bailers: 1, seconds: 20 });
   expect('one bailer net-drains against one hole', oneVsOne < 0.5, `water=${oneVsOne.toFixed(3)}`);
 
-  const oneVsTwo = simulateBail({ holes: 2, bailers: 1, seconds: 20 });
-  expect('one bailer cannot keep up with two holes (rising)', oneVsTwo > 0.5, `water=${oneVsTwo.toFixed(3)}`);
+  // PLAN 3.6 design race: one bailer beats one small hole, loses to three
+  // small. (Two small holes on a settled sloop is now a near-hold for one
+  // bailer, which is the point of BAIL_RATE beating a hole 0.2 m under.)
+  const oneVsThree = simulateBail({ holes: 3, bailers: 1, seconds: 20 });
+  expect('one bailer cannot keep up with three small holes (rising)', oneVsThree > 0.5, `water=${oneVsThree.toFixed(3)}`);
 
   const twoVsTwo = simulateBail({ holes: 2, bailers: 2, seconds: 20 });
   expect('two bailers beat two holes', twoVsTwo < 0.5, `water=${twoVsTwo.toFixed(3)}`);

@@ -146,6 +146,11 @@ export const LOGIC = [
   quick(tsx('test-ship-ladder.mjs')),
   quick(tsx('test-server-fixes.mjs')),
   quick(tsx('test-flooding.mjs')),
+  // b2.2a: the shared Torricelli flood model (Q = K A sqrt(2 g h_eff), wash
+  // margin, inside head), section-7 founder windows, loft fill tables, the
+  // PLAN 3.6 bail race and the time-to-founder table (~1.5 s; held rows exit
+  // at equilibrium).
+  quick(tsx('test-flood-model.mjs')),
   // HULL-01: cannonball-vs-hull parity with the drawn wale (swept swim-hull
   // skin, stem crossings, deck-vs-breach classification).
   quick(tsx('test-projectile-hull-parity.mjs')),

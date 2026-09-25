@@ -55,11 +55,20 @@ function founderTime(type, holes, { bail = 0, limit = 3600 } = {}) {
   const ship = makeShip(type, holes);
   const s0 = gerstnerHeight(0, 0, 0, WAVE_PARAMS);
   let t = 0;
+  let step = 0;
+  let lastCheck = ship.waterLevel ?? 0;
   while ((ship.waterLevel ?? 0) < 1 && t < limit) {
     ship.position.y = s0 - floodSettle(type, ship.waterLevel);
     ship.waterLevel = Math.max(0, ship.waterLevel - bail * DT);
     updateShipFlooding(ship, 0, DT);
     t += DT;
+    // Calm sea + settle from the fill alone = an autonomous 1-D system, so a
+    // level that has not risen over 10 s sits at its equilibrium: held. Keeps
+    // the suite inside the quick tier instead of walking 3600 s per hold.
+    if (++step % 600 === 0) {
+      if (ship.waterLevel <= lastCheck + 1e-7) return Infinity;
+      lastCheck = ship.waterLevel;
+    }
   }
   return t >= limit ? Infinity : t;
 }
@@ -164,6 +173,22 @@ console.log('\nStock hulls never pump themselves dry; a reinforced hull keeps a 
   expect('stock patched hull at 0.5 is still >= 0.5 after 60 s', stock.waterLevel >= 0.5, `water=${stock.waterLevel.toFixed(3)}`);
   const want = 0.5 - FLOODING.BAIL_RATE * SHIP_UPGRADES.REINFORCED_PUMP_FACTOR * 60;
   expect('reinforced hull drains at 0.25x BAIL_RATE', Math.abs(reinf.waterLevel - want) < 1e-6, `water=${reinf.waterLevel.toFixed(4)}`);
+}
+
+console.log('\nDesign race (PLAN 3.6): one bailer vs small holes, bailer + pump vs three small');
+{
+  const smallDeep = holeIngress('sloop', holeSizeArea(1), 0.2);
+  expect('one bailer beats one small sloop hole 0.2 m under (live swell)', FLOODING.BAIL_RATE > smallDeep,
+    `bail=${FLOODING.BAIL_RATE} Q(small, 0.2 m)=${smallDeep.toFixed(4)}`);
+  expect('bucket cycle (scoop + heave) delivers BAIL_RATE within 5%',
+    Math.abs(FLOODING.BAIL_SCOOP_VOLUME / (2 * FLOODING.BAIL_SCOOP_TIME) - FLOODING.BAIL_RATE) / FLOODING.BAIL_RATE < 0.05,
+    `cycle=${(FLOODING.BAIL_SCOOP_VOLUME / (2 * FLOODING.BAIL_SCOOP_TIME)).toFixed(4)}/s`);
+  for (const type of CLASSES) {
+    expect(`${type}: one bailer holds one small waterline hole`, !Number.isFinite(founderTime(type, waterlineHoles(type, 1, 1), { bail: FLOODING.BAIL_RATE })));
+    expect(`${type}: bailer + pump hold three small waterline holes`, !Number.isFinite(founderTime(type, waterlineHoles(type, 3, 1), { bail: FLOODING.BAIL_RATE + FLOODING.PUMP_RATE })));
+  }
+  const s3 = founderTime('sloop', waterlineHoles('sloop', 3, 1), { bail: FLOODING.BAIL_RATE });
+  expect('sloop: one bailer still loses to three small waterline holes', Number.isFinite(s3), `t=${Number.isFinite(s3) ? s3.toFixed(0) : 'held'} s`);
 }
 
 console.log('\nTime-to-founder table (s; calm, holes on the waterline, settle in the loop)');

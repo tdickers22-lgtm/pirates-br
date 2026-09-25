@@ -533,17 +533,22 @@ export const FLOODING = {
   LIST_WEIGHT_MAX: 1.5,
   /** Per hull-class scale on K (bigger hull, slower to fill). */
   INGRESS_CLASS_SCALE: { sloop: 1.0, brigantine: 0.83, galleon: 0.70 } as Record<ShipType, number>,
-  /** One player bails this much water-level/sec (beats one open hole, loses to two). */
-  BAIL_RATE: 0.014,
+  /** One player bails this much water-level/sec. Design race (PLAN 3.6) under
+   *  the Torricelli law: beats one small hole the swell holds 0.2 m under
+   *  (sloop small hole: 0.0079/s on the waterline, 0.0177/s at 0.2 m), loses
+   *  to three small on a sloop's waterline (0.0237/s) and to a medium hole
+   *  once it sits 0.1 m under (0.0247/s); bailer + pump holds three small.
+   *  The medium-hole "loses slowly" race is tuned with the hole sizes (b2.2b). */
+  BAIL_RATE: 0.019,
   /** Physical bucket bailing is a SCOOP → CARRY → HEAVE cycle: press once to
    *  fill the empty bucket (water drops BAIL_SCOOP_VOLUME), press again to heave
    *  it over the side. Each action locks for BAIL_SCOOP_TIME, so a full cycle is
    *  ~2×BAIL_SCOOP_TIME and clears BAIL_SCOOP_VOLUME → a diligent bailer's net
-   *  rate (~0.014/s) still beats one open hole (0.0075/s) and loses to two
-   *  (0.015/s), so a real breach demands repair, not just bailing (matches
-   *  BAIL_RATE + the code comment; the old 0.03 let one bailer out-drain two holes). */
+   *  rate (~0.019/s) matches BAIL_RATE: it beats one small hole the swell holds
+   *  0.2 m under (0.0177/s) and loses to three small or one submerged medium,
+   *  so a real breach demands repair, not just bailing. */
   BAIL_SCOOP_TIME: 0.6,
-  BAIL_SCOOP_VOLUME: 0.017,
+  BAIL_SCOOP_VOLUME: 0.023,
   /** Passive bilge pump drain (x BAIL_RATE) on a STOCK hull: none. Water
    *  stays until someone bails it (D15, holes-10); hull_reinforcement keeps
    *  SHIP_UPGRADES.REINFORCED_PUMP_FACTOR. */
