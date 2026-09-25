@@ -429,6 +429,37 @@ console.log('First-person viewmodel');
   expect('ViewmodelController: held tools posed through toolPose', /const cfg = toolPose\(tool, \{/.test(vm) && !/tool === 'compass'\n?\s*\/\//.test(vm));
 }
 
+// b2.3h (animations-13, vm:animations:3): the repair hammer and the bucket throw.
+{
+  const P = await import('../src/client/rendering/viewmodel/poses.ts');
+  const mutate = process.env.PIRATES_BR_MUTATE_HAMMER === 'flip';
+  const angle = (ph) => (mutate ? -1 : 1) * P.hammerSwingAngle(ph);
+  const face = (ph) => P.hammerFacePoint(angle(ph));
+  const hit = face(P.HAMMER_IMPACT_PHASE);
+  const gap = hit[2] - P.REPAIR_PLANK_FACE_Z;
+  expect('hammer: at impact the striking face is within 3 cm of the plank face (and not through it)', gap >= -0.002 && gap <= 0.03, `gap ${(gap * 100).toFixed(2)} cm`);
+  const before = face(P.HAMMER_IMPACT_PHASE - 0.01);
+  expect('hammer: the face is moving TOWARD the plank (-z) into impact, head leading', before[2] - hit[2] > 0.002, `dz over the last 1% of the blow ${((before[2] - hit[2]) * 100).toFixed(2)} cm`);
+  const raised = face(0.5);
+  expect('hammer: the raise cocks the head back toward the eye, well off the plank', raised[2] - P.REPAIR_PLANK_FACE_Z > 0.08, `raised gap ${(raised[2] - P.REPAIR_PLANK_FACE_Z).toFixed(3)} m`);
+  let minGap = Infinity;
+  for (let ph = 0; ph < 1; ph += 0.002) minGap = Math.min(minGap, face(ph)[2] - P.REPAIR_PLANK_FACE_Z);
+  expect('hammer: the face never passes through the plank over a blow', minGap > -0.003, `min gap ${(minGap * 100).toFixed(2)} cm`);
+  expect('hammer: blow count 2/3/4 for HOLE_REPAIR_TIME 1.6/2.4/3.2 s', [1.6, 2.4, 3.2].map(P.repairBlowsFor).join() === '2,3,4');
+  let impacts = 0;
+  for (let k = 0, prev = 0; k <= 400; k++) { const ph = P.repairBlowPhase(k / 400, 3); if (prev < P.HAMMER_IMPACT_PHASE && ph >= P.HAMMER_IMPACT_PHASE) impacts++; prev = ph; }
+  expect('hammer: a size-2 hole gets exactly 3 impacts before progress reaches 1', impacts === 3, `${impacts} impacts`);
+  const N = 12;
+  expect('bucket: full and idle shows the water, empty idle does not', P.bucketWaterShown(0, true) && !P.bucketWaterShown(0, false));
+  expect('bucket throw: the disc is gone once the pour starts', P.bucketWaterShown(0.95, false) && !P.bucketWaterShown(0.5, false));
+  const d0 = P.bucketThrowDroplet(0, N, 1 - 0.3, false), d1 = P.bucketThrowDroplet(0, N, 1 - 0.95, false);
+  expect('bucket throw: water leaves the bucket going AWAY from the eye (-z) and comes down', !!d0 && !!d1 && d1[2] < d0[2] - 0.5 && d1[1] < d0[1] + 0.2, d0 && d1 ? `z ${d0[2].toFixed(2)} -> ${d1[2].toFixed(2)}, y ${d0[1].toFixed(2)} -> ${d1[1].toFixed(2)}` : 'null droplet');
+  expect('bucket throw: no water in the air on a scoop or at rest', !P.bucketThrowDroplet(0, N, 0.5, true) && !P.bucketThrowDroplet(0, N, 0, false));
+  const vmSrc = readFileSync('src/client/rendering/ViewmodelController.ts', 'utf8');
+  expect('ViewmodelController: repair swings the hammer pivot through hammerSwingAngle on the server blow phase',
+    /hammerSwingAngle\(phase\)/.test(vmSrc) && /repairBlowPhase\(/.test(vmSrc) && /makeCarpentersHammerMesh\(0\)/.test(vmSrc));
+}
+
 const ms = performance.now() - t0;
 console.log(`\n${checks - failures}/${checks} checks, ${ms.toFixed(0)} ms`);
 if (failures) { console.error(`FAIL: ${failures} inversion check(s)`); process.exit(1); }

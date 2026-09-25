@@ -1,6 +1,7 @@
 /** Assorted standalone meshes: nameplates, projectiles, upgrade stations, mermaid. */
 import * as THREE from 'three';
 import type { Projectile, ShipUpgradeType } from '../../../shared/types/index.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { AVATAR_RIG } from './PlayerMeshFactory.js';
 
 /** Floating name label (billboard) that hovers over an opponent's head. */
@@ -72,13 +73,81 @@ export function hudAnchorLocal(
 }
 
 /**
- * The carpenter's hammer a pirate swings while `hullRepairProgress > 0`
- * (avatar-08). Two meshes, ~120 triangles, built only when a repair actually
- * starts and disposed the frame it ends — so the low tier pays two draws per
- * VISIBLY repairing crewmate and nothing at all the rest of the match. Held by
- * ViewmodelController on the world hand, never in the first-person viewmodel.
+ * FLOOD-LOOP TOOL GLBs (b2.3h, assets-06): tool_bucket, tool_planks and
+ * tool_hammer from `scripts/blender/build_tools.py`, each in the SAME frame as
+ * the primitive it replaces. They are fetched on first use (not boot, not
+ * world: a match can pass without anyone bailing), and until the file lands
+ * the primitive covers, exactly like the hero weapons' queue window. Each file
+ * carries three LODs as `<node>`, `<node>_lod1`, `<node>_lod2`; a clone keeps
+ * one of them and drops the `_lodN` suffix, so `bucket-water`, `hammer-head`
+ * and `hammer-haft` resolve on every tier. LOD0 is the first-person viewmodel,
+ * LOD1 a crewmate's hand in third person.
+ *
+ * Geometry and the atlas texture are SHARED by every clone (userData
+ * .sharedGeometry: never dispose it); materials are copied per clone because
+ * applyViewmodelMaterialSettings turns depthTest off on what it is handed.
  */
-export function makeCarpentersHammerMesh(): THREE.Group {
+export type ToolGlbName = 'tool_bucket' | 'tool_planks' | 'tool_hammer';
+const toolScenes = new Map<ToolGlbName, THREE.Group>();
+const toolLoading = new Set<ToolGlbName>();
+let toolLoader: GLTFLoader | null = null;
+
+export function requestToolGlb(name: ToolGlbName): void {
+  if (toolScenes.has(name) || toolLoading.has(name) || typeof document === 'undefined') return;
+  toolLoading.add(name);
+  toolLoader ??= new GLTFLoader();
+  toolLoader.loadAsync(`/assets/models/${name}.glb`)
+    .then((gltf) => { toolScenes.set(name, gltf.scene); })
+    .catch(() => { /* the primitive stays; a failed fetch is not retried this session */ });
+}
+
+export function toolGlbReady(name: ToolGlbName): boolean {
+  return toolScenes.has(name);
+}
+
+/** Test/probe seam: hand the library a parsed scene without a fetch. */
+export function registerToolGlb(name: ToolGlbName, scene: THREE.Group): void {
+  toolScenes.set(name, scene);
+}
+
+/** A clone of one LOD of the tool, or null while the file is in flight. */
+export function cloneToolGlb(name: ToolGlbName, lod: 0 | 1 | 2 = 0): THREE.Group | null {
+  const src = toolScenes.get(name);
+  if (!src) { requestToolGlb(name); return null; }
+  const root = src.clone(true);
+  const drop: THREE.Object3D[] = [];
+  root.traverse((o) => {
+    const m = /_lod(\d)$/.exec(o.name);
+    const level = m ? Number(m[1]) : 0;
+    if (!(o as THREE.Mesh).isMesh) return;
+    if (level !== lod) { drop.push(o); return; }
+    if (m) o.name = o.name.slice(0, -m[0].length);
+    const mesh = o as THREE.Mesh;
+    if (o.name === 'bucket-water') {
+      mesh.material = new THREE.MeshStandardMaterial({
+        color: 0x2f7a8c, roughness: 0.12, metalness: 0.05, transparent: true, opacity: 0.86,
+      });
+    } else {
+      mesh.material = Array.isArray(mesh.material) ? mesh.material.map((x) => x.clone()) : mesh.material.clone();
+    }
+    mesh.castShadow = true;
+  });
+  for (const o of drop) o.removeFromParent();
+  root.userData.sharedGeometry = true;
+  root.userData.toolGlb = name;
+  return root;
+}
+
+/**
+ * The carpenter's hammer: tool_hammer.glb (forged head with a split claw,
+ * octagonal hickory haft, wedge; grip at the origin, head +Y, face -Z). The
+ * two-mesh primitive below is the in-flight fallback, ~120 triangles, marked
+ * `userData.toolGlbPending` so the holder rebuilds once the file lands. LOD1
+ * for a crewmate's hand (third person), LOD0 in the first-person repair.
+ */
+export function makeCarpentersHammerMesh(lod: 0 | 1 | 2 = 1): THREE.Group {
+  const glb = cloneToolGlb('tool_hammer', lod);
+  if (glb) { glb.name = 'carpenters-hammer'; return glb; }
   const group = new THREE.Group();
   const haft = new THREE.Mesh(
     new THREE.CylinderGeometry(0.017, 0.021, 0.32, 6),
@@ -96,6 +165,7 @@ export function makeCarpentersHammerMesh(): THREE.Group {
   headMesh.castShadow = true;
   group.add(headMesh);
   group.name = 'carpenters-hammer';
+  group.userData.toolGlbPending = 'tool_hammer';
   return group;
 }
 

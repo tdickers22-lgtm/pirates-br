@@ -117,6 +117,11 @@ export const MATERIAL_FAMILIES: Readonly<Record<string, DetailFamily>> = {
   Atlas_cannon: 'flat',
   Atlas_capstan: 'flat',
   Atlas_cutlass: 'flat',
+  // b2.3h flood-loop tools (build_tools.py): atlas bodies, the bucket's water disc.
+  Atlas_tool_bucket: 'flat',
+  Atlas_tool_planks: 'flat',
+  Atlas_tool_hammer: 'flat',
+  'Water_Tool.001': 'flat',
   Atlas_eye_of_reach: 'flat',
   Atlas_flintknock: 'flat',
   Atlas_flintlock: 'flat',

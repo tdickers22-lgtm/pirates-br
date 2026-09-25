@@ -484,6 +484,7 @@ export const LOGIC = [
   //                                 address, the pivots, and the far LOD. PIRATES_BR_MUTATE_HERO is its red
   //                                 proof (WEAPON-01 / HWGLB-01, lane 5.3)
   quick({ file: 'test-hero-assets.mjs', cmd: ['node', 'scripts/test-hero-assets.mjs'] }),
+  quick({ file: 'test-tool-assets.mjs', cmd: ['node', 'scripts/test-tool-assets.mjs'] }), // b2.3h: bucket/planks/hammer GLBs: LOD bands, named nodes, pivots, factory wiring (<0.1 s)
   //   glb-census --check          — the models README's counts vs disk + ASSET_NAMES/FAR_ASSET_NAMES
   //                                 (64 / 63 / 61 / 56 were all quoted as the contract; assets-20, lane 2.5)
   quick({ file: 'glb-census.mjs', cmd: ['node', 'scripts/glb-census.mjs', '--check'] }),

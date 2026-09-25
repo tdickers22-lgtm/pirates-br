@@ -11,7 +11,7 @@ import type { ClientInteractKind } from '../core/Game.js';
 import type { InputManager } from '../input/InputManager.js';
 import type { MapRenderer } from '../ui/MapRenderer.js';
 import { applyViewmodelMaterialSettings, makeHeldWeaponMesh, makePocketPreviewMesh, type PocketPreviewKind } from './factories/WeaponMeshFactory.js';
-import { makeCarpentersHammerMesh } from './factories/MiscMeshFactory.js';
+import { makeCarpentersHammerMesh, toolGlbReady, type ToolGlbName } from './factories/MiscMeshFactory.js';
 import { makeViewHand, applyViewHandTeamColor } from './factories/PlayerMeshFactory.js';
 import { registerBudgetLight } from './LightBudget.js';
 import { CUTLASS_VIEW_CHARGE_TIME } from './PlayerAnimator.js';
@@ -23,6 +23,17 @@ import {
   drawDelta, muzzleTipFor, toolPose, recoilEnvelope, recoilSpecFor, reloadChoreography, slashRibbonPose, weaponPose,
   type Pose6,
 } from './viewmodel/poses.js';
+import {
+  REPAIR_BLOW_S, repairBlowsFor, repairBlowPhase, hammerSwingAngle, HAMMER_IMPACT_PHASE,
+  REPAIR_HAMMER_PIVOT, bucketWaterShown, bucketThrowDroplet,
+} from './viewmodel/poses.js';
+
+/** A held mesh built from the primitive while its tool GLB was in flight. */
+function toolGlbArrived(mesh: THREE.Object3D | null | undefined): boolean {
+  const pending = mesh?.userData.toolGlbPending as ToolGlbName | undefined;
+  return !!pending && toolGlbReady(pending);
+}
+const BUCKET_DROPLETS = 12;
 
 // MIN_OFF_AXIS (the long-tool off-axis floor) now lives in viewmodel/poses.ts as TOOL_MIN_OFF_AXIS.
 
@@ -253,6 +264,14 @@ export class ViewmodelController {
   /** 0→1 draw-in for a freshly equipped weapon/tool (kills the teleport swap). */
   private localViewDrawTimer = 1;
   private localViewPocketDrawTimer = 1;
+  /** b2.3h repair: both fists follow the plank and the swinging hammer. */
+  private repairHandGrips: { left: HandGrip | null; right: HandGrip | null } | null = null;
+  /** Replication-rate estimate of the hole's repair time (s) -> blows 2/3/4. */
+  private repairProgPrev = 0;
+  private repairProgAt = 0;
+  private repairTimeEst = 2.4;
+  /** Water leaving the bucket on a throw: one instanced draw, hidden when idle. */
+  private bucketSpray: THREE.InstancedMesh | null = null;
   /** Swim-stroke clock for the first-person crawl arms. */
   private swimStrokePhase = 0;
 
@@ -773,13 +792,45 @@ export class ViewmodelController {
     }
   }
 
+  /** The bucketful in the air on a throw: one instanced draw in camera space. */
+  private syncBucketSpray(scoop: number, filled: boolean) {
+    const parent = this.localViewPocketRoot.parent;
+    if (!parent) return;
+    let spray = this.bucketSpray;
+    let any = false;
+    for (let i = 0; i < BUCKET_DROPLETS && !any; i++) any = !!bucketThrowDroplet(i, BUCKET_DROPLETS, scoop, filled);
+    if (!any) { if (spray) spray.visible = false; return; }
+    if (!spray) {
+      spray = new THREE.InstancedMesh(
+        new THREE.IcosahedronGeometry(1, 1),
+        new THREE.MeshStandardMaterial({ color: 0x3f8a9c, roughness: 0.1, metalness: 0.05, transparent: true, opacity: 0.78 }),
+        BUCKET_DROPLETS,
+      );
+      spray.name = 'bucket-spray';
+      spray.frustumCulled = false;
+      applyViewmodelMaterialSettings(spray);
+      this.bucketSpray = spray;
+    }
+    if (spray.parent !== parent) parent.add(spray);
+    const m = new THREE.Matrix4();
+    for (let i = 0; i < BUCKET_DROPLETS; i++) {
+      const d = bucketThrowDroplet(i, BUCKET_DROPLETS, scoop, filled);
+      if (d) m.makeScale(d[3], d[3] * 0.8, d[3] * 1.4).setPosition(d[0], d[1], d[2]);
+      else m.makeScale(0, 0, 0);
+      spray.setMatrixAt(i, m);
+    }
+    spray.instanceMatrix.needsUpdate = true;
+    spray.visible = true;
+  }
+
   /** Free a held item's geometries and materials — a repair that starts and
    *  stops every few seconds would otherwise leak one hammer per cycle. */
   private disposeHeldItem(root: THREE.Object3D) {
     root.traverse((o) => {
       const m = o as THREE.Mesh;
       if (!m.isMesh) return;
-      m.geometry?.dispose();
+      // Tool GLB clones share the library's geometry (b2.3h): materials only.
+      if (!root.userData.sharedGeometry) m.geometry?.dispose();
       const mat = m.material as THREE.Material | THREE.Material[];
       if (Array.isArray(mat)) for (const x of mat) x.dispose();
       else mat?.dispose();
@@ -821,11 +872,12 @@ export class ViewmodelController {
       return false;
     }
     let item = existing;
-    if (!item || ud.heldItemKind !== kind) {
+    if (!item || ud.heldItemKind !== kind || toolGlbArrived(item)) {
       if (existing) { this.disposeHeldItem(existing); existing.removeFromParent(); }
+      // Third person takes LOD1 of the tool GLBs (b2.3h).
       item = kind === 'hammer'
-        ? makeCarpentersHammerMesh()
-        : makePocketPreviewMesh(kind as PocketPreviewKind);
+        ? makeCarpentersHammerMesh(1)
+        : makePocketPreviewMesh(kind as PocketPreviewKind, 1);
       item.name = 'held-item';
       rightHand.add(item);
       ud.heldItemKind = kind;
@@ -994,7 +1046,8 @@ export class ViewmodelController {
     }
     this.placeHands(
       this.ensurePocketHands(),
-      this.localViewPocketKind ? this.pocketGrips(this.localViewPocketKind) : { left: null, right: null },
+      this.repairHandGrips
+        ?? (this.localViewPocketKind ? this.pocketGrips(this.localViewPocketKind) : { left: null, right: null }),
     );
     return true;
   }
@@ -1007,6 +1060,8 @@ export class ViewmodelController {
       this.localViewPocketKind = null;
       return false;
     }
+    this.repairHandGrips = null;
+    if (this.bucketSpray) this.bucketSpray.visible = false;
     if (player.atCannon || player.atHelm) {
       this.localViewPocketRoot.visible = false;
       this.localViewPocketKind = null;
@@ -1036,37 +1091,77 @@ export class ViewmodelController {
       this.localViewPocketRoot.rotation.set(-0.18 + trudge * 0.5, 0 + sway * 0.18, 0);
       return true;
     }
-    // Hull repair: hammer a fresh PLANK over the breach while holding [X]. The
-    // down-strikes are driven by the server's hullRepairProgress (one plank/swing),
-    // so the wood-and-hammer motion the user asked for reads in first person.
-    if ((player.hullRepairProgress ?? 0) > 0.001) {
+    // Hull repair (b2.3h, animations-13): TWO hands. The left presses a plank
+    // from the bundle flat against the breach (it does not move), the right
+    // swings the claw hammer from the wrist: raise, drive with the head
+    // leading, rebound. The blows are the server's: HOLE_REPAIR_TIME is 2/3/4
+    // blows of 0.8 s by hole size, the blow count comes from how fast the
+    // replicated hullRepairProgress climbs, and the face meets the plank at
+    // HAMMER_IMPACT_PHASE of every blow (test-anim-no-inversion hammer case).
+    const repairProgress = player.hullRepairProgress ?? 0;
+    if (repairProgress > 0.001) {
       const kind: PocketPreviewKind = 'wood';
       let mesh = this.localViewPocketRoot.getObjectByName('local-pocket') as THREE.Group | null;
-      if (!mesh || this.localViewPocketKind !== kind) {
+      if (!mesh || this.localViewPocketKind !== kind || !mesh.userData.repair
+        || toolGlbArrived(mesh.getObjectByName('repair-plank')) || toolGlbArrived(mesh.getObjectByName('carpenters-hammer'))) {
         mesh?.removeFromParent();
-        mesh = makePocketPreviewMesh(kind);
+        mesh = new THREE.Group();
         mesh.name = 'local-pocket';
-        mesh.rotation.y = Math.PI;
-        mesh.scale.setScalar(1.3);
+        mesh.userData.repair = true;
+        const plank = makePocketPreviewMesh('wood', 0);
+        plank.name = 'repair-plank';
+        // Bundle frame: width x, thickness y, length z. Stand it on the hull:
+        // length runs across the screen (x), the broad face looks back at the
+        // eye (+z), its top face at REPAIR_PLANK_FACE_Z.
+        plank.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(
+          new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1), new THREE.Vector3(1, 0, 0)));
+        mesh.add(plank);
+        const pivot = new THREE.Group();
+        pivot.name = 'repair-hammer-pivot';
+        pivot.position.set(REPAIR_HAMMER_PIVOT[0], REPAIR_HAMMER_PIVOT[1], REPAIR_HAMMER_PIVOT[2]);
+        pivot.add(makeCarpentersHammerMesh(0));
+        mesh.add(pivot);
         applyViewmodelMaterialSettings(mesh);
         this.localViewPocketRoot.add(mesh);
         this.localViewPocketKind = kind;
+        this.repairProgPrev = repairProgress;
+        this.repairProgAt = this.view.ocean.getTime();
       }
-      // DISCRETE BLOWS, not a 16Hz buzz: a 0.45s raise → strike → bounce cycle
-      // so the plank is hammered on rather than vibrated against the hull.
       const t = this.view.ocean.getTime();
-      const cycle = (t / 0.45) % 1;
-      const raise = THREE.MathUtils.smoothstep(cycle, 0, 0.62) ** 0.6;   // easeOut lift
-      const strike = THREE.MathUtils.clamp((cycle - 0.62) / 0.18, 0, 1) ** 2; // easeIn drive
-      const bounce = Math.sin(THREE.MathUtils.clamp((cycle - 0.8) / 0.2, 0, 1) * Math.PI) * 0.25;
-      const blow = strike - bounce;
+      if (repairProgress > this.repairProgPrev + 1e-4) {
+        const dt = t - this.repairProgAt;
+        if (dt > 0.02 && dt < 0.5) {
+          const est = dt / (repairProgress - this.repairProgPrev);
+          if (Number.isFinite(est)) this.repairTimeEst += (THREE.MathUtils.clamp(est, 0.8, 4.8) - this.repairTimeEst) * 0.35;
+        }
+        this.repairProgPrev = repairProgress;
+        this.repairProgAt = t;
+      } else if (repairProgress < this.repairProgPrev - 1e-4) {
+        this.repairProgPrev = repairProgress;
+        this.repairProgAt = t;
+      }
+      // Snapshots arrive in steps; extrapolate up to one blow so the swing is smooth.
+      const lead = Math.min(REPAIR_BLOW_S, t - this.repairProgAt) / this.repairTimeEst;
+      const blows = repairBlowsFor(this.repairTimeEst);
+      const phase = repairBlowPhase(Math.min(1, repairProgress + lead), blows);
+      const swing = hammerSwingAngle(phase);
+      const pivot = mesh.getObjectByName('repair-hammer-pivot');
+      if (pivot) pivot.rotation.set(swing, 0, 0);
+      // The plank takes the blow: a 6 mm shove right after impact, nothing else moves.
+      const jolt = phase > HAMMER_IMPACT_PHASE ? Math.exp(-(phase - HAMMER_IMPACT_PHASE) * 40) * 0.006 : 0;
       this.localViewPocketRoot.visible = true;
-      this.localViewPocketRoot.position.set(
-        0.16,
-        -0.34 + raise * 0.12 - blow * 0.16,
-        -0.5 + raise * 0.02 - blow * 0.08,
-      );
-      this.localViewPocketRoot.rotation.set(-0.5 - raise * 0.9 + blow * 1.35, 0.28, 0.12);
+      this.localViewPocketRoot.position.set(0.04, -0.27, -0.56 - jolt);
+      this.localViewPocketRoot.rotation.set(-0.06, 0.12, 0.02);
+      const c = Math.cos(swing), sn = Math.sin(swing);
+      const gy = -0.03; // fist 3 cm down the haft from the grip origin
+      this.repairHandGrips = {
+        left: { pos: [-0.1, -0.02, 0.05], rot: [0.5 - Math.PI / 2, -0.2, -0.12], scale: 1.15 },
+        right: {
+          pos: [REPAIR_HAMMER_PIVOT[0], REPAIR_HAMMER_PIVOT[1] + gy * c, REPAIR_HAMMER_PIVOT[2] + gy * sn],
+          rot: [swing + 0.5 - Math.PI / 2, 0.16, 0.1],
+          scale: 1.15,
+        },
+      };
       return true;
     }
     // Only show the in-hand keg + place animation when the server would ACTUALLY
@@ -1173,7 +1268,7 @@ export class ViewmodelController {
       if (tool && !(tool === 'spyglass' && this.view.spyglassActive)) {
         const kind = tool as PocketPreviewKind;
         let mesh = this.localViewPocketRoot.getObjectByName('local-pocket') as THREE.Group | null;
-        if (!mesh || this.localViewPocketKind !== kind) {
+        if (!mesh || this.localViewPocketKind !== kind || mesh.userData.repair || toolGlbArrived(mesh)) {
           mesh?.removeFromParent();
           mesh = makePocketPreviewMesh(kind);
           mesh.name = 'local-pocket';
@@ -1183,10 +1278,14 @@ export class ViewmodelController {
           this.localViewPocketRoot.add(mesh);
           this.localViewPocketKind = kind;
         }
-        // The bucket only shows water once you've scooped a bucketful.
+        // The bucket shows water once it has gone under on the scoop, and the
+        // water leaves it on the throw: the disc goes at the pour and the
+        // bucketful flies out of the mouth in an arc (b2.3h).
         if (tool === 'bucket') {
+          const scoop = player.bailScoopProgress ?? 0;
           const water = mesh.getObjectByName('bucket-water');
-          if (water) water.visible = !!player.bucketFilled;
+          if (water) water.visible = bucketWaterShown(scoop, !!player.bucketFilled);
+          this.syncBucketSpray(scoop, !!player.bucketFilled);
         }
         const time = this.view.ocean.getTime();
         const moveAxes = this.view.input.getMoveAxes();

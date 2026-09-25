@@ -493,3 +493,91 @@ export function slashRibbonPose(side: 1 | -1, p: number): RibbonPose {
     opacity: 0.98 * Math.sin(u ** 0.6 * Math.PI) ** 0.6,
   };
 }
+
+// ── b2.3h: the flood loop in first person (hammer blows, bucket throw) ──────
+
+/** One hammer blow lasts 0.8 s: the server's HOLE_REPAIR_TIME 1.6/2.4/3.2 s is
+ *  2/3/4 blows by hole size, so blows = round(repairTime / 0.8). */
+export const REPAIR_BLOW_S = 0.8;
+export function repairBlowsFor(repairTime: number): number {
+  return THREE.MathUtils.clamp(Math.round(repairTime / REPAIR_BLOW_S), 1, 6);
+}
+/** Blow phase 0..1 from the replicated hullRepairProgress (0..1). The head
+ *  meets the plank at HAMMER_IMPACT_PHASE of every blow, so the last impact
+ *  lands before the server closes the hole at progress 1. */
+export function repairBlowPhase(progress: number, blows: number): number {
+  const x = THREE.MathUtils.clamp(progress, 0, 1) * blows;
+  return x - Math.floor(x);
+}
+export const HAMMER_IMPACT_PHASE = 0.72;
+const HAMMER_RAISED = 1.25;   // rad about the wrist X axis: head cocked back toward the eye
+const HAMMER_STRUCK = -0.12;  // at impact: haft near upright, face square to the plank
+const HAMMER_REST = 0.2;      // rebound settles here, and the next raise starts here
+/** Hammer angle about the wrist's X axis (root space; + = head back toward the
+ *  eye, - = head driven into the plank). Raise eases out, the drive eases IN
+ *  (accelerating into the nail), a short rebound after impact. */
+export function hammerSwingAngle(phase: number): number {
+  const p = phase - Math.floor(phase);
+  if (p < 0.55) {
+    const t = p / 0.55;
+    return HAMMER_REST + (HAMMER_RAISED - HAMMER_REST) * (1 - (1 - t) * (1 - t));
+  }
+  if (p < HAMMER_IMPACT_PHASE) {
+    const t = (p - 0.55) / (HAMMER_IMPACT_PHASE - 0.55);
+    return HAMMER_RAISED + (HAMMER_STRUCK - HAMMER_RAISED) * t * t;
+  }
+  const t = (p - HAMMER_IMPACT_PHASE) / (1 - HAMMER_IMPACT_PHASE);
+  return HAMMER_STRUCK + (HAMMER_REST - HAMMER_STRUCK) * Math.sin(t * Math.PI * 0.5);
+}
+/** The plank pressed against the breach, in the repair root's space: its broad
+ *  face looks back at the eye (+Z) at this depth. */
+export const REPAIR_PLANK_FACE_Z = 0.028;
+/** Where the hammer's striking face sits in the tool's own frame (tool_hammer.glb:
+ *  grip at the origin, head centre y 0.16, face 0.074 toward -Z). */
+export const HAMMER_FACE_LOCAL: readonly [number, number, number] = [0, 0.16, -0.074];
+/** The right wrist (hammer pivot) in the repair root's space, placed so the
+ *  face lands 1.2 cm proud of the plank (the nail head) at the struck angle. */
+export const REPAIR_HAMMER_PIVOT: readonly [number, number, number] = [
+  0.05,
+  -0.12,
+  REPAIR_PLANK_FACE_Z + 0.012 - (HAMMER_FACE_LOCAL[1] * Math.sin(HAMMER_STRUCK) + HAMMER_FACE_LOCAL[2] * Math.cos(HAMMER_STRUCK)),
+];
+/** The hammer's striking face in the repair root's space at swing angle `a`. */
+export function hammerFacePoint(a: number): [number, number, number] {
+  const [, y, z] = HAMMER_FACE_LOCAL;
+  const c = Math.cos(a), s = Math.sin(a);
+  return [REPAIR_HAMMER_PIVOT[0], REPAIR_HAMMER_PIVOT[1] + y * c - z * s, REPAIR_HAMMER_PIVOT[2] + y * s + z * c];
+}
+
+/** bailScoopProgress runs 1 -> 0 over 0.6 s after each press. */
+export const BAIL_ACTION_S = 0.6;
+export const BUCKET_POUR_START = 0.22;
+export const BUCKET_POUR_END = 0.62;
+/** Is the water disc in the bucket drawn? Full and idle: yes. Scooping: once
+ *  the dip has passed the bottom (the bucket has gone under). Throwing: only
+ *  until the pour starts; after that the water is in the air. */
+export function bucketWaterShown(bailScoopProgress: number, bucketFilled: boolean): boolean {
+  const prog = THREE.MathUtils.clamp(bailScoopProgress, 0, 1);
+  const anim = 1 - prog;
+  if (prog <= 0.01) return bucketFilled;
+  return bucketFilled ? anim > 0.45 : anim < BUCKET_POUR_START;
+}
+/** The water leaving the bucket on a throw: droplet i of n, camera space
+ *  [x, y, z, size], or null before it leaves / after the throw. It leaves the
+ *  mouth at the top of the fling going up and away and falls under gravity. */
+export function bucketThrowDroplet(i: number, n: number, bailScoopProgress: number, bucketFilled: boolean): [number, number, number, number] | null {
+  const prog = THREE.MathUtils.clamp(bailScoopProgress, 0, 1);
+  if (bucketFilled || prog <= 0.01) return null;
+  const anim = 1 - prog;
+  const launch = BUCKET_POUR_START + (BUCKET_POUR_END - BUCKET_POUR_START) * (i / Math.max(1, n));
+  const age = (anim - launch) * BAIL_ACTION_S;
+  if (age < 0) return null;
+  const spread = ((i * 7) % n) / n - 0.5;
+  const vx = 0.25 + spread * 0.5, vy = 1.7 - spread * 0.3, vz = -3.1 - Math.abs(spread) * 0.6;
+  return [
+    0.22 + vx * age,
+    -0.1 + vy * age - 4.9 * age * age,
+    -0.8 + vz * age,
+    0.022 + age * 0.09,
+  ];
+}

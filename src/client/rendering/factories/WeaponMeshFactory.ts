@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import type { WeaponInstance } from '../../../shared/types/index.js';
 import { assets, type AssetName } from '../../assets/AssetLibrary.js';
 import { registerBudgetLight } from '../LightBudget.js';
+import { cloneToolGlb, type ToolGlbName } from './MiscMeshFactory.js';
 
 /**
  * The five weapons that now come out of Blender (WEAPON-01,
@@ -501,8 +502,17 @@ function makePrimitiveWeaponMesh(weaponId: WeaponInstance['weaponId']): THREE.Gr
 
 export type PocketPreviewKind = 'banana' | 'wood' | 'coconut' | 'mango' | 'meat' | 'powder_keg' | 'shovel' | 'chest' | 'bucket' | 'compass' | 'spyglass' | 'lantern' | 'axe';
 
-export function makePocketPreviewMesh(kind: PocketPreviewKind): THREE.Group {
+/** Pocket kinds that come out of build_tools.py (b2.3h), same frame as the primitive. */
+const TOOL_GLB_FOR: Partial<Record<PocketPreviewKind, ToolGlbName>> = { bucket: 'tool_bucket', wood: 'tool_planks' };
+
+export function makePocketPreviewMesh(kind: PocketPreviewKind, lod: 0 | 1 | 2 = 0): THREE.Group {
+  const toolGlb = TOOL_GLB_FOR[kind];
+  if (toolGlb) {
+    const glb = cloneToolGlb(toolGlb, lod);
+    if (glb) return glb;
+  }
   const group = new THREE.Group();
+  if (toolGlb) group.userData.toolGlbPending = toolGlb;
   const yellow = new THREE.MeshStandardMaterial({ color: 0xf0c040, roughness: 0.42 });
   const husk = new THREE.MeshStandardMaterial({ color: 0x4a3320, roughness: 0.88 });
   const woodMat = new THREE.MeshStandardMaterial({ color: 0x7a4e28, roughness: 0.9 });
