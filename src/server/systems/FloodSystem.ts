@@ -3,9 +3,11 @@
 // and read the shared Torricelli law (src/shared/flooding/floodModel.ts) and
 // fill table (src/shared/flooding/hullVolume.ts). PhysicsSystem re-exports
 // every name, so its callers and the suites keep their imports.
-import type { Ship, ShipHole } from '../../shared/types/index.js';
-import { FLOODING, SHIP_STATS, SHIP_UPGRADES } from '../../shared/constants/index.js';
-import { countOpenHoles } from '../../shared/interactions.js';
+import type { Ship, ShipHole, ShipHoleSource } from '../../shared/types/index.js';
+import { FLOODING, SHIP, SHIP_STATS, SHIP_UPGRADES } from '../../shared/constants/index.js';
+import { countOpenHoles, getShipHoleTier } from '../../shared/interactions.js';
+// Circular with PhysicsSystem, read only at call time (never at module eval).
+import { HULL_IMPACT } from './PhysicsSystem.js';
 import { clamp, gerstnerHeight, WAVE_PARAMS } from '../../shared/utils/index.js';
 import { holeIngress, holeInsideHead, holeSizeArea, waterlineHoleIngress } from '../../shared/flooding/floodModel.js';
 
@@ -158,4 +160,115 @@ export function updateShipFlooding(ship: Ship, t: number, dt: number, storm = 0)
   const pump = FLOODING.BAIL_RATE * pumpFactor;
   ship.waterLevel = clamp(water - pump * dt, 0, 1);
   ship.floodingRate = pump > 0 && (ship.waterLevel ?? 0) > 0 ? -pump : 0;
+}
+
+/**
+ * Punch `count` breaches into the planking at an EXACT hull-local point —
+ * the single entry point for every damage source (cannon, ram, rock,
+ * grounding, keg, storm, fire). Extra holes from the same hit are jittered
+ * ±0.35 m along the hull so a broadside reads as a cluster of separate
+ * wounds rather than one stacked disc.
+ *
+ * A hull already carrying MAX_HOLES_PER_SHIP entities does NOT go immune:
+ * the hit RE-OPENS the patched hole nearest the impact (the plank is blown
+ * off), so sustained fire keeps degrading a heavily-repaired hull. Only if
+ * every slot is an open hole does the shot land on an existing wound.
+ *
+ * Re-arms the field-repair cooldown so anchored auto-carpentry can't
+ * instantly undo a fresh hit. Returns the entities that changed, for the
+ * ship_damage wire event that spawns client decals the same frame.
+ */
+export function openShipHoles(
+  ship: Ship,
+  local: { x: number; y: number; z: number },
+  count = 1,
+  source?: ShipHoleSource,
+): ShipHole[] {
+  if (count <= 0) return [];
+  if (!Array.isArray(ship.holes)) ship.holes = [];
+  const stats = SHIP_STATS[ship.type];
+  // Ceiling = the topside limit: a ball that struck the sheer strake leaves
+  // a DRY hole up there (it floods only once she lists) instead of being
+  // dragged down to the wale (ships-17); anything higher is a deck hit and
+  // never reaches this function.
+  const maxY = Math.max(FLOODING.HOLE_BAND_Y.max, stats.height * HULL_IMPACT.TOPSIDE_TOP_F);
+  const opened: ShipHole[] = [];
+  for (let i = 0; i < count; i += 1) {
+    // Deterministic-ish spread: first hole lands exactly on the contact
+    // point, siblings scatter around it along the hull.
+    const spread = i === 0 ? 0 : 0.35;
+    const angle = i * 2.399963; // golden-angle fan — no two siblings overlap
+    // Clamp onto the hull itself: contact points from collision SAMPLES carry
+    // the sample radius and can sit a little proud of the skin, and a breach
+    // outside the planking would flood-test (and render) off the hull.
+    const point = {
+      x: clamp(local.x + Math.cos(angle) * spread, -stats.width * 0.52, stats.width * 0.52),
+      // Siblings scatter DOWNWARD only: torn planking splits toward the sea,
+      // and it keeps a keel scrape a keel scrape instead of walking a
+      // grounding breach up above the waterline.
+      y: clamp(local.y - (i === 0 ? 0 : Math.abs(Math.sin(angle)) * 0.12), -stats.height * 0.35, maxY),
+      z: clamp(local.z + Math.sin(angle) * spread, -stats.length * 0.5, stats.length * 0.5),
+    };
+    opened.push(placeShipHole(ship, point, source));
+  }
+  ship.repairCooldown = Math.max(ship.repairCooldown, SHIP.FIELD_REPAIR_DELAY);
+  ship.autoRepairProgress = 0;
+  return opened;
+}
+
+/** Insert one breach entity, recycling the nearest patched slot when the hull
+ *  is at its wire/shader cap. */
+function placeShipHole(ship: Ship, point: { x: number; y: number; z: number }, source?: ShipHoleSource): ShipHole {
+  if (ship.holes.length < FLOODING.MAX_HOLES_PER_SHIP) {
+    const hole: ShipHole = {
+      id: ship.nextHoleId ?? (ship.nextHoleId = 1),
+      x: point.x,
+      y: point.y,
+      z: point.z,
+      patched: false,
+      tier: getShipHoleTier(point.y, SHIP_STATS[ship.type]),
+      ...(source ? { source } : {}),
+    };
+    ship.nextHoleId = hole.id + 1;
+    ship.holes.push(hole);
+    return hole;
+  }
+  // Saturated hull: blow the plank off the nearest patched breach.
+  let victim: ShipHole | null = null;
+  let bestSq = Infinity;
+  for (const hole of ship.holes) {
+    if (!hole.patched) continue;
+    const d2 = (hole.x - point.x) ** 2 + (hole.y - point.y) ** 2 + (hole.z - point.z) ** 2;
+    if (d2 < bestSq) { bestSq = d2; victim = hole; }
+  }
+  // Every slot already an OPEN hole. A WETTER shot evicts the driest open
+  // breach (highest y, ties by lowest id) and moves it down to the new point
+  // so a waterline hit on a shot-up hull still floods (liveplay-v02); a shot
+  // no lower than the driest lands in an existing wound.
+  if (!victim) {
+    let driest = ship.holes[0];
+    for (const hole of ship.holes) {
+      if (hole.y > driest.y || (hole.y === driest.y && hole.id < driest.id)) driest = hole;
+    }
+    if (point.y < driest.y - HULL_SATURATION.EVICT_MIN_DROP) {
+      victim = driest;
+    } else {
+      let nearest = ship.holes[0];
+      let nearestSq = Infinity;
+      for (const hole of ship.holes) {
+        const d2 = (hole.x - point.x) ** 2 + (hole.y - point.y) ** 2 + (hole.z - point.z) ** 2;
+        if (d2 < nearestSq) { nearestSq = d2; nearest = hole; }
+      }
+      return nearest;
+    }
+  }
+  victim.patched = false;
+  victim.x = point.x;
+  victim.y = point.y;
+  victim.z = point.z;
+  // A recycled slot MOVED: re-stamp its tier or the breach lies about its
+  // height for the rest of the match (the wire byte the client reads).
+  victim.tier = getShipHoleTier(point.y, SHIP_STATS[ship.type]);
+  if (source) victim.source = source;
+  return victim;
 }

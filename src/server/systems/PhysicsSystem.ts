@@ -4,9 +4,9 @@ import { getHullContactChain, getHullWaterlineOutline, getMastHeight, getShipRig
 import { cargoBallastFactor } from '../../shared/cargo.js';
 import { truceSparesContact, truceBlocksBounty } from '../../shared/truce.js';
 import type { GangwayPlan } from '../../shared/interactions.js';
-import { DOCK_DECK_RISE, toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, getShipFloorYAt, getShipHoldHalfWidth, isInsideShipHoldFootprint, countOpenHoles, getShipHoleTier, shipLocalUpY } from '../../shared/interactions.js';
+import { DOCK_DECK_RISE, toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, getShipFloorYAt, getShipHoldHalfWidth, isInsideShipHoldFootprint, countOpenHoles, shipLocalUpY } from '../../shared/interactions.js';
 import { drawnIslandSurfaceY } from '../../shared/terrainGrid.js';
-import { HULL_SATURATION, floodListTargets, updateShipFlooding } from './FloodSystem.js';
+import { floodListTargets, openShipHoles, updateShipFlooding } from './FloodSystem.js';
 import { floodSettle } from '../../shared/flooding/floodModel.js';
 import {
   getBridgeDeckY,
@@ -2407,115 +2407,15 @@ export class PhysicsSystem {
     }
   }
 
-  /**
-   * Punch `count` breaches into the planking at an EXACT hull-local point —
-   * the single entry point for every damage source (cannon, ram, rock,
-   * grounding, keg, storm, fire). Extra holes from the same hit are jittered
-   * ±0.35 m along the hull so a broadside reads as a cluster of separate
-   * wounds rather than one stacked disc.
-   *
-   * A hull already carrying MAX_HOLES_PER_SHIP entities does NOT go immune:
-   * the hit RE-OPENS the patched hole nearest the impact (the plank is blown
-   * off), so sustained fire keeps degrading a heavily-repaired hull. Only if
-   * every slot is an open hole does the shot land on an existing wound.
-   *
-   * Re-arms the field-repair cooldown so anchored auto-carpentry can't
-   * instantly undo a fresh hit. Returns the entities that changed, for the
-   * ship_damage wire event that spawns client decals the same frame.
-   */
+  /** Punch `count` breaches at a hull-local point: the single entry point for
+   *  every damage source. Body lives in FloodSystem (b2.2b). */
   openHoleAt(
     ship: Ship,
     local: { x: number; y: number; z: number },
     count = 1,
     source?: ShipHoleSource,
   ): ShipHole[] {
-    if (count <= 0) return [];
-    if (!Array.isArray(ship.holes)) ship.holes = [];
-    const stats = SHIP_STATS[ship.type];
-    // Ceiling = the topside limit: a ball that struck the sheer strake leaves
-    // a DRY hole up there (it floods only once she lists) instead of being
-    // dragged down to the wale (ships-17); anything higher is a deck hit and
-    // never reaches this function.
-    const maxY = Math.max(FLOODING.HOLE_BAND_Y.max, stats.height * HULL_IMPACT.TOPSIDE_TOP_F);
-    const opened: ShipHole[] = [];
-    for (let i = 0; i < count; i += 1) {
-      // Deterministic-ish spread: first hole lands exactly on the contact
-      // point, siblings scatter around it along the hull.
-      const spread = i === 0 ? 0 : 0.35;
-      const angle = i * 2.399963; // golden-angle fan — no two siblings overlap
-      // Clamp onto the hull itself: contact points from collision SAMPLES carry
-      // the sample radius and can sit a little proud of the skin, and a breach
-      // outside the planking would flood-test (and render) off the hull.
-      const point = {
-        x: clamp(local.x + Math.cos(angle) * spread, -stats.width * 0.52, stats.width * 0.52),
-        // Siblings scatter DOWNWARD only: torn planking splits toward the sea,
-        // and it keeps a keel scrape a keel scrape instead of walking a
-        // grounding breach up above the waterline.
-        y: clamp(local.y - (i === 0 ? 0 : Math.abs(Math.sin(angle)) * 0.12), -stats.height * 0.35, maxY),
-        z: clamp(local.z + Math.sin(angle) * spread, -stats.length * 0.5, stats.length * 0.5),
-      };
-      opened.push(this.placeHole(ship, point, source));
-    }
-    ship.repairCooldown = Math.max(ship.repairCooldown, SHIP.FIELD_REPAIR_DELAY);
-    ship.autoRepairProgress = 0;
-    return opened;
-  }
-
-  /** Insert one breach entity, recycling the nearest patched slot when the hull
-   *  is at its wire/shader cap. */
-  private placeHole(ship: Ship, point: { x: number; y: number; z: number }, source?: ShipHoleSource): ShipHole {
-    if (ship.holes.length < FLOODING.MAX_HOLES_PER_SHIP) {
-      const hole: ShipHole = {
-        id: ship.nextHoleId ?? (ship.nextHoleId = 1),
-        x: point.x,
-        y: point.y,
-        z: point.z,
-        patched: false,
-        tier: getShipHoleTier(point.y, SHIP_STATS[ship.type]),
-        ...(source ? { source } : {}),
-      };
-      ship.nextHoleId = hole.id + 1;
-      ship.holes.push(hole);
-      return hole;
-    }
-    // Saturated hull: blow the plank off the nearest patched breach.
-    let victim: ShipHole | null = null;
-    let bestSq = Infinity;
-    for (const hole of ship.holes) {
-      if (!hole.patched) continue;
-      const d2 = (hole.x - point.x) ** 2 + (hole.y - point.y) ** 2 + (hole.z - point.z) ** 2;
-      if (d2 < bestSq) { bestSq = d2; victim = hole; }
-    }
-    // Every slot already an OPEN hole. A WETTER shot evicts the driest open
-    // breach (highest y, ties by lowest id) and moves it down to the new point
-    // so a waterline hit on a shot-up hull still floods (liveplay-v02); a shot
-    // no lower than the driest lands in an existing wound.
-    if (!victim) {
-      let driest = ship.holes[0];
-      for (const hole of ship.holes) {
-        if (hole.y > driest.y || (hole.y === driest.y && hole.id < driest.id)) driest = hole;
-      }
-      if (point.y < driest.y - HULL_SATURATION.EVICT_MIN_DROP) {
-        victim = driest;
-      } else {
-        let nearest = ship.holes[0];
-        let nearestSq = Infinity;
-        for (const hole of ship.holes) {
-          const d2 = (hole.x - point.x) ** 2 + (hole.y - point.y) ** 2 + (hole.z - point.z) ** 2;
-          if (d2 < nearestSq) { nearestSq = d2; nearest = hole; }
-        }
-        return nearest;
-      }
-    }
-    victim.patched = false;
-    victim.x = point.x;
-    victim.y = point.y;
-    victim.z = point.z;
-    // A recycled slot MOVED: re-stamp its tier or the breach lies about its
-    // height for the rest of the match (the wire byte the client reads).
-    victim.tier = getShipHoleTier(point.y, SHIP_STATS[ship.type]);
-    if (source) victim.source = source;
-    return victim;
+    return openShipHoles(ship, local, count, source);
   }
 
   /**
