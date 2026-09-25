@@ -11,9 +11,11 @@ import type { HullProfile } from '../../../shared/hull.js';
 import { acquireSharedGeometry, makeLoftedSlabGeometry, makeSheerRunGeometry } from './geometry.js';
 
 /** Hold floor top = the plane the server stands crew on (SHIP.HOLD_FLOOR_OFFSET). */
-const HOLD_FLOOR_Y = 0.35;
+export const HOLD_FLOOR_Y = 0.35;
 /** Fore-and-aft half-length of the hold, matching isInsideShipHoldFootprint. */
-const HOLD_HALF_LENGTH_F = 0.34;
+export const HOLD_HALF_LENGTH_F = 0.34;
+/** Thickness of the drawn inner skin (the lining runs outboard of holdHalfWidthAt). */
+export const HOLD_LINING_THICKNESS = 0.14;
 /** How far OUTBOARD of the walk clamp the drawn inner skin sits. The gate wants
  *  3-12 cm: closer and a pirate clips through her own bulkhead, further and the
  *  hold has an invisible wall short of the timber you can see. */
@@ -33,7 +35,7 @@ const HOLD_SKIN_MARGIN = 0.06;
  * the planking arrives first, at the very ends of the taper, where the hull
  * wins and the last few centimetres of footprint are inside timber.
  */
-function holdHalfWidthAt(
+export function holdHalfWidthAt(
   stats: { width: number; length: number },
   profile: HullProfile,
   z: number,
@@ -58,6 +60,15 @@ export function makeShipInterior(
   profile: HullProfile,
   /** Only the lantern silhouettes read it: four radial sides instead of six. */
   quality: 'low' | 'balanced' | 'high' = 'balanced',
+  /**
+   * holes-06: the breach seen from INSIDE. The hull shader cut only the outer
+   * skin; the lining 0.14 m inboard, the sole and the bilge boards covered it,
+   * so from the hold a waterline breach showed no opening at all. ShipRenderer
+   * passes its capsule discard (shell point -> inboard seat, same slots and
+   * radius) and it is applied to exactly those three surfaces. Each gets its
+   * OWN material so the cut never reaches deck timber that shares darkMat.
+   */
+  breachDiscard?: (material: THREE.Material) => void,
 ): THREE.Group {
   const g = new THREE.Group();
   const W = stats.width, L = stats.length, H = stats.height;
@@ -68,6 +79,7 @@ export function makeShipInterior(
   // floor (not a flat dark tarp) when the player peers down through the stairwell.
   const floorMat = new THREE.MeshStandardMaterial({ color: 0x4a2e15, roughness: 0.85 });
   floorMat.name = 'hold-floor';
+  breachDiscard?.(floorMat);
   const floor = new THREE.Mesh(
     makeLoftedSlabGeometry(profile, {
       topY: HOLD_FLOOR_Y, thickness: 0.12, zFrom: -holdZ, zTo: holdZ, samples: 14,
@@ -81,12 +93,13 @@ export function makeShipInterior(
   // Inner walls (port/starboard)
   const wallMat = new THREE.MeshStandardMaterial({ color: 0x3a2010, roughness: 1 });
   wallMat.name = 'hold-inner-wall';
+  breachDiscard?.(wallMat);
   const wallH = H * 0.75;
   for (const side of [-1, 1] as const) {
     const wall = new THREE.Mesh(
       makeSheerRunGeometry(profile, side, {
-        y0: HOLD_FLOOR_Y, y1: HOLD_FLOOR_Y + wallH, thickness: 0.14,
-        zFrom: -holdZ, zTo: holdZ, samples: 12, halfAt: (z) => holdHalf(z) + 0.14,
+        y0: HOLD_FLOOR_Y, y1: HOLD_FLOOR_Y + wallH, thickness: HOLD_LINING_THICKNESS,
+        zFrom: -holdZ, zTo: holdZ, samples: 12, halfAt: (z) => holdHalf(z) + HOLD_LINING_THICKNESS,
       }),
       wallMat,
     );
@@ -120,10 +133,17 @@ export function makeShipInterior(
   }
 
   // Low angled bilge planks close the bottom corners that were visible from the hold.
+  // Their own material (same look as darkMat) so the breach cut stays in the hold.
+  let bilgeMat: THREE.Material = darkMat;
+  if (breachDiscard) {
+    bilgeMat = darkMat.clone();
+    bilgeMat.name = 'hold-bilge-board';
+    breachDiscard(bilgeMat);
+  }
   for (const sx of [-1, 1] as const) {
     const bilge = new THREE.Mesh(
       new THREE.BoxGeometry(0.16, H * 0.34, holdZ * 2 * 0.9),
-      darkMat,
+      bilgeMat,
     );
     bilge.position.set(sx * (holdHalf(0) - 0.24), 0.52, 0);
     bilge.rotation.z = -sx * Math.PI * 0.12;

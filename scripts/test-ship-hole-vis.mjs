@@ -237,6 +237,108 @@ const R = FLOODING.HOLE_VISUAL_RADIUS;
     `${offsetMeshes} armour meshes carry a transform the discard cannot see`);
 }
 
+// ── 5. THE BREACH SEEN FROM INSIDE (holes-06) ───────────────────────────────
+// The hull shader cut the outer skin, but the hold lining 0.14 m inboard and the
+// sole covered it: from the hold a waterline breach showed no opening, no water
+// and no patch. Most holes (HOLE_BAND_Y 0.10..0.45) are BELOW the sole top
+// (HOLD_FLOOR_OFFSET 0.35), so the lining alone is not enough: the sole and the
+// bilge boards carry the same cut. The cut is a CAPSULE from the shell point to
+// an inboard seat (a tube through both skins), graded here from the live
+// uniforms against the real merged lining and sole triangles.
+{
+  const Lh = stats.length;
+  const above = { id: 1, x: 1, y: 0.44, z: 0, patched: false };
+  const below = { id: 2, x: -1, y: 0.14, z: Lh * 0.1, patched: false };
+  const ship = fixtureShip(type, [above, below]);
+  ship.id = 'holevis-inside';
+  sr.update([ship], [], 24, 1 / 60, 0, cam);
+  const mesh = sr.shipMeshes.get(ship.id);
+  const vA = mesh.holeVis.get(1), vB = mesh.holeVis.get(2);
+
+  const mats = new Map();
+  const meshesByMat = new Map();
+  mesh.detailRoot.traverse((o) => {
+    if (!o.isMesh || !o.material?.name) return;
+    mats.set(o.material.name, o.material);
+    if (!meshesByMat.has(o.material.name)) meshesByMat.set(o.material.name, []);
+    meshesByMat.get(o.material.name).push(o);
+  });
+  for (const name of ['hold-inner-wall', 'hold-floor', 'hold-bilge-board']) {
+    const m = mats.get(name);
+    const key = m?.customProgramCacheKey?.() ?? '';
+    let src = '';
+    if (typeof m?.onBeforeCompile === 'function') {
+      const sh = { uniforms: {}, vertexShader: '#include <common>\n#include <begin_vertex>\n', fragmentShader: '#include <common>\n#include <map_fragment>\n' };
+      m.onBeforeCompile(sh, {});
+      src = sh.fragmentShader;
+    }
+    expect(`${name}: the hold ${name === 'hold-floor' ? 'sole' : name === 'hold-bilge-board' ? 'bilge boards' : 'lining'} program carries hull-hole-discard-8 (key '${key}')`,
+      key.includes(`hull-hole-discard-${FLOODING.MAX_HOLES_PER_SHIP}`) && src.includes('discard') && src.includes('uHoleEnds'));
+  }
+
+  const uH = mesh.hullHoleUniform?.value ?? [];
+  const uE = mesh.hullHoleEnds?.value ?? [];
+  const cut = (p) => uH.some((c, i) => {
+    if (!(c.w > 0) || !uE[i]) return false;
+    const ab = new THREE.Vector3(uE[i].x - c.x, uE[i].y - c.y, uE[i].z - c.z);
+    const ap = new THREE.Vector3(p.x - c.x, p.y - c.y, p.z - c.z);
+    const t = Math.max(0, Math.min(1, ap.dot(ab) / Math.max(ab.lengthSq(), 1e-6)));
+    return ap.distanceTo(ab.multiplyScalar(t)) < c.w;
+  });
+  const tri2 = new THREE.Triangle();
+  const q = new THREE.Vector3(), p0 = new THREE.Vector3(), p1 = new THREE.Vector3(), p2 = new THREE.Vector3();
+  function nearestOn(name, target) {
+    let best = Infinity; const out = new THREE.Vector3();
+    for (const o of meshesByMat.get(name) ?? []) {
+      const pos = o.geometry.attributes.position; const idx = o.geometry.index;
+      const n = idx ? idx.count / 3 : pos.count / 3;
+      for (let i = 0; i < n; i++) {
+        tri2.set(p0.fromBufferAttribute(pos, idx ? idx.getX(i * 3) : i * 3), p1.fromBufferAttribute(pos, idx ? idx.getX(i * 3 + 1) : i * 3 + 1), p2.fromBufferAttribute(pos, idx ? idx.getX(i * 3 + 2) : i * 3 + 2));
+        tri2.closestPointToPoint(target, q);
+        const d = q.distanceTo(target);
+        if (d < best) { best = d; out.copy(q); }
+      }
+    }
+    return { d: best, p: out };
+  }
+  expect('above-sole breach: the inboard seat is inboard of the shell by >= 0.1 m',
+    !!vA?.inner && Math.abs(vA.inner.x) < Math.abs(vA.point.x) - 0.1,
+    vA?.inner ? `seat x ${vA.inner.x.toFixed(2)} vs shell x ${vA.point.x.toFixed(2)}` : 'no vis.inner');
+  const liningA = vA?.inner ? nearestOn('hold-inner-wall', vA.inner) : { d: Infinity, p: new THREE.Vector3() };
+  const liningFar = vA?.inner ? nearestOn('hold-inner-wall', vA.inner.clone().add(new THREE.Vector3(0, 0, 1.4))) : liningA;
+  console.log(`  inside: shell (${vA?.point.x.toFixed(2)}, ${vA?.point.y.toFixed(2)}) seat ${vA?.inner ? `(${vA.inner.x.toFixed(2)}, ${vA.inner.y.toFixed(2)})` : '-'}; lining ${liningA.d.toFixed(3)} m from the seat`);
+  expect('above-sole breach: the lining at the seat is cut (tube through both skins)',
+    liningA.d < 0.2 && cut(liningA.p), `nearest lining ${liningA.d.toFixed(3)} m, cut ${cut(liningA.p)}`);
+  expect('control: the lining 1.4 m along the hull is NOT cut', liningFar.d < 0.3 && !cut(liningFar.p));
+  const soleB = vB?.inner ? nearestOn('hold-floor', vB.inner) : { d: Infinity, p: new THREE.Vector3() };
+  expect('below-sole breach: the sole above it is cut open (you see into the bilge)',
+    !!vB?.inner && vB.inner.y > 0.3 && soleB.d < 0.1 && cut(soleB.p),
+    vB?.inner ? `seat y ${vB.inner.y.toFixed(2)}, sole ${soleB.d.toFixed(3)} m, cut ${cut(soleB.p)}` : 'no vis.inner');
+  const named = (root, n) => { let f = null; root?.traverse((o) => { if (!f && o.name === n) f = o; }); return f; };
+  expect('an open breach wears a torn inboard edge ring at its seat',
+    !!vA?.inboard?.visible && !!named(vA.inboard, 'hole-rim-inboard'));
+  const back = named(vA?.group, 'hole-backdrop');
+  const backN = back ? new THREE.Vector3(0, 0, 1).applyQuaternion(back.quaternion) : null;
+  expect('a dark-water/daylight backdrop faces INBOARD behind the opening (culled from outside)',
+    !!back && backN.dot(vA.normal) < -0.9 && back.material.side === THREE.FrontSide);
+  expect('below-sole breach: water wells up through the sole',
+    !!vB?.inboard?.visible && !!named(vB.inboard, 'hole-welling')?.visible);
+  expect('above-sole breach: no welling on the lining', !named(vA?.inboard, 'hole-welling')?.visible);
+
+  above.patched = true;
+  sr.update([ship], [], 24.02, 1 / 60, 0, cam);
+  const inPatch = named(vA?.patch, 'hole-patch-inboard');
+  const planks = named(inPatch, 'hole-patch-inboard-planks');
+  const nails = named(inPatch, 'hole-patch-inboard-nails');
+  const at = inPatch ? inPatch.position : null;
+  expect('a patched hole produces an inboard patch mesh (planks + nail heads)',
+    !!planks && !!nails && (planks.geometry.index?.count ?? 0) / 3 >= 24 && nails.geometry.attributes.position.count > 0);
+  expect('the inboard patch sits on the seat, inboard of the shell',
+    !!at && at.distanceTo(vA.inner) < 0.12 && Math.abs(at.x) < Math.abs(vA.point.x) - 0.1);
+  expect('a patched hole no longer cuts the lining', !cut(liningA.p));
+  expect('the inboard ring goes when the hole is patched', !vA?.inboard?.visible);
+}
+
 console.log(`\n${checks} checks, ${failures} failed`);
 if (checks === 0) { console.error('VACUOUS: nothing graded'); process.exit(1); }
 process.exit(failures > 0 ? 1 : 0);

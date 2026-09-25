@@ -43,7 +43,9 @@ import { buildWakeSurface, writeWakeSurface, setArmsVisible, makeWakeFrame, ARM_
 import { makeLoftedSlabGeometry, makeSheerRunGeometry, sheerHalfWidthAt, makeBillowedSailGeometry, makeHullStrakeGeometry, makeLoftedHullGeometry, makeStairRampGeometry, makeWaterlineFoamGeometry, makeWaterlineFoamTexture, mergeStaticMeshes, NO_MERGE_EXCLUDE } from './ship/geometry.js';
 import { applyFlagWave, FLAG_DROP, FLAG_FLY, flagPhaseFromId, flagTexture, makeBarrel, makeCylinderBetween, makeFigurehead, makeHatchGrating, makeLanternFixture, makeRopeCoil, makeWindowFrame } from './ship/dressing.js';
 import type { FlagUniforms, ShipFlag } from './ship/dressing.js';
-import { makeHoldCargoStacks, makeShipInterior } from './ship/interior.js';
+import {
+  HOLD_FLOOR_Y, HOLD_HALF_LENGTH_F, holdHalfWidthAt, makeHoldCargoStacks, makeShipInterior,
+} from './ship/interior.js';
 import { createHoldWater, disposeHoldWater, updateHoldWater, type HoldWaterHandle } from './ship/holdWater.js';
 // ─────────────────────────────────────────────────────────────────────────────
 // Lofted hull construction
@@ -97,9 +99,18 @@ function applyHullHoleDiscard(
   material: THREE.Material,
   holeUniform: { value: THREE.Vector4[] },
   slots: number,
+  /** holes-06: when given, each slot cuts a CAPSULE from the shell point
+   *  (uHoles.xyz) to an inboard seat (uHoleEnds.xyz) at the same radius, a
+   *  tube through the hull AND the hold lining / sole / bilge boards. A slot
+   *  whose end equals its point degenerates to the shell's own sphere. */
+  ends?: { value: THREE.Vector4[] },
 ): void {
+  const test = ends
+    ? `for (int i = 0; i < ${slots}; i++) { if (uHoles[i].w > 0.0) { vec3 hAB = uHoleEnds[i].xyz - uHoles[i].xyz; float hT = clamp(dot(vHullPos - uHoles[i].xyz, hAB) / max(dot(hAB, hAB), 1e-6), 0.0, 1.0); if (distance(vHullPos, uHoles[i].xyz + hAB * hT) < uHoles[i].w) discard; } }`
+    : `for (int i = 0; i < ${slots}; i++) { if (uHoles[i].w > 0.0 && distance(vHullPos, uHoles[i].xyz) < uHoles[i].w) discard; }`;
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uHoles = holeUniform;
+    if (ends) shader.uniforms.uHoleEnds = ends;
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nvarying vec3 vHullPos;')
       .replace('#include <begin_vertex>', `#include <begin_vertex>
@@ -109,12 +120,13 @@ function applyHullHoleDiscard(
   vHullPos = position;
 #endif`);
     shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', `#include <common>\nvarying vec3 vHullPos;\nuniform vec4 uHoles[${slots}];`)
-      .replace('#include <map_fragment>', `for (int i = 0; i < ${slots}; i++) { if (uHoles[i].w > 0.0 && distance(vHullPos, uHoles[i].xyz) < uHoles[i].w) discard; }\n#include <map_fragment>`);
+      .replace('#include <common>', `#include <common>\nvarying vec3 vHullPos;\nuniform vec4 uHoles[${slots}];${ends ? `\nuniform vec4 uHoleEnds[${slots}];` : ''}`)
+      .replace('#include <map_fragment>', `${test}\n#include <map_fragment>`);
   };
   // A material whose program source changed must be recompiled, and two
   // materials that differ only by this patch must not share a program.
-  material.customProgramCacheKey = () => `hull-hole-discard-${slots}`;
+  const key = `hull-hole-discard-${slots}${ends ? '|capsule' : ''}`;
+  material.customProgramCacheKey = () => key;
   material.needsUpdate = true;
 }
 
@@ -174,7 +186,26 @@ interface HoleVis {
    *  the old spot while the bilge filled from somewhere else (ships-26). */
   src: THREE.Vector3;
   patched: boolean;
+  /** holes-06: hull-local inboard seat of the breach (the lining's inner face
+   *  for a hole above the sole, the sole edge above it for one below), its
+   *  facing (into the hold), and whether the hold is there at all (a hole
+   *  forward or aft of the hold has no lining to cut: inner == point). */
+  inner: THREE.Vector3;
+  innerNormal: THREE.Vector3;
+  hasSeat: boolean;
+  belowSole: boolean;
+  /** Torn inboard ring + welling water, seated at `inner` (child of root). */
+  inboard: THREE.Group;
+  ring: THREE.Group;
+  welling: THREE.Mesh;
+  /** Dark-water / daylight disc just outboard of the opening, facing INTO the
+   *  hull (FrontSide, so it is culled from outside and only the hold sees it). */
+  backdrop: THREE.Mesh;
 }
+
+/** Camera range inside which a breach draws its inboard pieces (ring, welling,
+ *  backdrop): only a pirate aboard or alongside can see into a hold. */
+const BREACH_INBOARD_DIST_SQ = 45 * 45;
 
 interface ShipMeshGroup {
   root: THREE.Group;
@@ -222,6 +253,11 @@ interface ShipMeshGroup {
    *  fragment-discard breaches, one slot per UNPATCHED hole; radius 0 =
    *  inactive. MAX_HOLES_PER_SHIP slots — the server can never exceed it. */
   hullHoleUniform: { value: THREE.Vector4[] };
+  /** Inboard end of each capsule slot (holes-06), read by the hold surfaces. */
+  hullHoleEnds: { value: THREE.Vector4[] };
+  /** Hold lining inner half-width at hull-local z, and the hold's half-length. */
+  holdHalfAt: (z: number) => number;
+  holdHalfLen: number;
   /** Waterline contact collar (wet-edge foam hugging the hull's own waterline). */
   waterlineFoam: THREE.Mesh;
   /** Phase-A planking uniforms: the hull-local wet line, moved every frame. */
@@ -716,6 +752,7 @@ export class ShipRenderer {
     const holeSlots = FLOODING.MAX_HOLES_PER_SHIP;
     const hullHoleUniform = { value: Array.from({ length: holeSlots }, () => new THREE.Vector4(0, 0, 0, 0)) };
     applyHullHoleDiscard(hullMat, hullHoleUniform, holeSlots);
+    const hullHoleEnds = { value: Array.from({ length: holeSlots }, () => new THREE.Vector4(0, 0, 0, 0)) };
     // Chained AFTER the breach discard: applyPlankDetail calls whatever
     // onBeforeCompile it finds and folds the previous program-cache key into
     // its own, so the two patches compose instead of overwriting each other.
@@ -971,7 +1008,7 @@ export class ShipRenderer {
       cz: holeCz,
       halfX: voidHalfX,
       halfZ: voidHalfZ,
-    }, profile, this.quality);
+    }, profile, this.quality, (m) => applyHullHoleDiscard(m, hullHoleUniform, holeSlots, hullHoleEnds));
     group.add(interior);
 
     // ── Hold cargo (the gold race, made physical) ─────────────
@@ -2620,12 +2657,24 @@ export class ShipRenderer {
       holdCargoTiers: holdCargo.tiers,
       wake,
       hullHoleUniform,
+      hullHoleEnds,
+      holdHalfAt: (z: number) => holdHalfWidthAt(stats, profile, z),
+      holdHalfLen: stats.length * HOLD_HALF_LENGTH_F,
       waterlineFoam,
       plankUniforms,
       ownPennant,
     });
 
     return group;
+  }
+
+  /** Probe-only (hold-water-probe breach rows): extra hull-local holes drawn
+   *  on one ship on top of the wire list, so a hold view of an open breach can
+   *  be staged without a live cannon hit. Ids must not collide with real ones
+   *  (use >= 900). Released with null. The server never sees them. */
+  private breachDebug: { shipId: string; holes: ShipHole[] } | null = null;
+  setBreachDebug(shipId: string | null, holes: ShipHole[] = []) {
+    this.breachDebug = shipId ? { shipId, holes } : null;
   }
 
   /** Lazily built, shared across every breach on every hull. */
@@ -2728,6 +2777,31 @@ export class ShipRenderer {
     group.add(marker);
     mesh.root.add(group);
 
+    // holes-06: THE SAME BREACH FROM INSIDE. The hold surfaces carry the
+    // capsule cut (shell point -> inboard seat); here the torn inboard ring,
+    // the water welling up through the sole for a hole below it, and the
+    // backdrop that reads as dark sea or daylight through the opening.
+    const inner = new THREE.Vector3();
+    const innerNormal = new THREE.Vector3();
+    const seat = this.seatBreachInboard(mesh, point, inner, innerNormal);
+    const inboard = new THREE.Group();
+    inboard.name = 'hole-inboard';
+    const ring = new THREE.Group();
+    ring.name = 'hole-rim-inboard';
+    ring.add(new THREE.Mesh(geo.rim, this.holeRimMat));
+    if (geo.shards) ring.add(new THREE.Mesh(geo.shards, this.splinterMat));
+    inboard.add(ring);
+    const welling = new THREE.Mesh(this.getBreachWellingGeo(), this.getBreachWellingMat());
+    welling.name = 'hole-welling';
+    inboard.add(welling);
+    this.seatInboardPieces(inboard, ring, welling, inner, innerNormal, seat.belowSole);
+    inboard.visible = seat.hasSeat;
+    mesh.root.add(inboard);
+    const backdrop = new THREE.Mesh(this.getBreachBackdropGeo(), this.getBreachBackdropMat());
+    backdrop.name = 'hole-backdrop';
+    this.seatBackdrop(backdrop, normal);
+    group.add(backdrop);
+
     // NO DECK-SIDE DECAL. It painted a fake "torn planking" disc on the INBOARD
     // bulwark at y = H + 0.17 whenever hole.y > 0.5H — but PhysicsSystem clamps
     // every hole to 0.6H at most, so that disc always sat about a metre above
@@ -2737,7 +2811,154 @@ export class ShipRenderer {
     return {
       group, decal, marker, gush, patch: null, point, normal,
       src: new THREE.Vector3(hole.x, hole.y, hole.z), patched: false,
+      inner, innerNormal, hasSeat: seat.hasSeat, belowSole: seat.belowSole,
+      inboard, ring, welling, backdrop,
     };
+  }
+
+  /**
+   * Where a breach comes out INSIDE the hold (holes-06). Above the sole the
+   * tube runs straight inboard to the lining's inner face; below it (most of
+   * HOLE_BAND_Y 0.10..0.45 is under the 0.35 m sole) it climbs to the sole
+   * edge above the wound, so from the hold you look down into the bilge and
+   * see the sea coming up. Forward or aft of the hold there is no lining to
+   * cut: the seat collapses onto the shell point (the shell's own sphere).
+   */
+  private seatBreachInboard(
+    mesh: ShipMeshGroup,
+    point: THREE.Vector3,
+    inner: THREE.Vector3,
+    innerNormal: THREE.Vector3,
+  ): { hasSeat: boolean; belowSole: boolean } {
+    const side = point.x < 0 ? -1 : 1;
+    if (Math.abs(point.z) > mesh.holdHalfLen - 0.05) {
+      inner.copy(point);
+      innerNormal.set(-side, 0, 0);
+      return { hasSeat: false, belowSole: false };
+    }
+    const half = mesh.holdHalfAt(point.z);
+    if (point.y >= HOLD_FLOOR_Y + 0.06) {
+      inner.set(side * (half - 0.01), point.y, point.z);
+      innerNormal.set(-side, 0, 0);
+      return { hasSeat: true, belowSole: false };
+    }
+    inner.set(side * Math.max(0.2, half - FLOODING.HOLE_VISUAL_RADIUS * 0.9), HOLD_FLOOR_Y + 0.004, point.z);
+    innerNormal.set(0, 1, 0);
+    return { hasSeat: true, belowSole: true };
+  }
+
+  private seatInboardPieces(
+    inboard: THREE.Group, ring: THREE.Group, welling: THREE.Mesh,
+    inner: THREE.Vector3, innerNormal: THREE.Vector3, belowSole: boolean,
+  ) {
+    inboard.position.copy(inner);
+    const q = this.tempHoleQuat.setFromUnitVectors(HULL_Z_AXIS, innerNormal);
+    ring.quaternion.copy(q);
+    ring.position.copy(innerNormal).multiplyScalar(0.006);
+    welling.quaternion.copy(q);
+    // In the cut, a hand below the sole top: the sea boiling up into the bilge.
+    welling.position.copy(innerNormal).multiplyScalar(-0.05);
+    welling.visible = belowSole;
+  }
+
+  private seatBackdrop(backdrop: THREE.Mesh, normal: THREE.Vector3) {
+    backdrop.position.copy(normal).multiplyScalar(0.05);
+    backdrop.quaternion.setFromUnitVectors(HULL_Z_AXIS, this.tempHoleNormal.copy(normal).negate());
+  }
+
+  private breachWellingGeo: THREE.BufferGeometry | null = null;
+  private breachWellingMat: THREE.ShaderMaterial | null = null;
+  private breachBackdropGeo: THREE.BufferGeometry | null = null;
+  private breachBackdropMat: THREE.ShaderMaterial | null = null;
+  private readonly breachFxUniforms = { uTime: { value: 0 }, uDay: { value: 1 } };
+  private inboardPatchGeo: { planks: THREE.BufferGeometry; nails: THREE.BufferGeometry } | null = null;
+  private nailHeadMat: THREE.MeshStandardMaterial | null = null;
+  private readonly tempHoleNormal = new THREE.Vector3();
+
+  private getBreachWellingGeo() {
+    this.breachWellingGeo ??= new THREE.CircleGeometry(FLOODING.HOLE_VISUAL_RADIUS * 0.96, 20);
+    return this.breachWellingGeo;
+  }
+
+  /** Sea welling up through the cut sole: expanding foam rings over hold-water
+   *  teal, the centre heaving. One shared program, time from the frame. */
+  private getBreachWellingMat() {
+    this.breachWellingMat ??= new THREE.ShaderMaterial({
+      name: 'hole-welling',
+      uniforms: { uTime: this.breachFxUniforms.uTime },
+      vertexShader: `uniform float uTime; varying vec2 vP;
+void main() {
+  vP = position.xy / ${(FLOODING.HOLE_VISUAL_RADIUS * 0.96).toFixed(4)};
+  vec3 p = position;
+  p.z += 0.035 * (1.0 - dot(vP, vP)) * (0.65 + 0.35 * sin(uTime * 5.3));
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+}`,
+      fragmentShader: `uniform float uTime; varying vec2 vP;
+void main() {
+  float r = length(vP);
+  float rings = smoothstep(0.55, 1.0, fract(r * 2.6 - uTime * 0.95)) * (1.0 - r);
+  float boil = smoothstep(0.4, 0.0, r) * (0.3 + 0.2 * sin(uTime * 7.0 + r * 9.0));
+  vec3 col = mix(vec3(0.07, 0.25, 0.26), vec3(0.8, 0.9, 0.92), clamp(rings + boil, 0.0, 1.0));
+  gl_FragColor = vec4(col, 1.0);
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+}`,
+    });
+    return this.breachWellingMat;
+  }
+
+  private getBreachBackdropGeo() {
+    this.breachBackdropGeo ??= new THREE.CircleGeometry(FLOODING.HOLE_VISUAL_RADIUS * 1.04, 20);
+    return this.breachBackdropGeo;
+  }
+
+  /** What the hold sees through a breach: dark green sea below the surface,
+   *  daylight above it (dimmed at night), split at the world waterline so a
+   *  wound that dips under the swell shows the sea climbing across it. */
+  private getBreachBackdropMat() {
+    this.breachBackdropMat ??= new THREE.ShaderMaterial({
+      name: 'hole-backdrop',
+      side: THREE.FrontSide,
+      uniforms: this.breachFxUniforms,
+      vertexShader: `varying float vWorldY; varying vec2 vP;
+void main() {
+  vec4 w = modelMatrix * vec4(position, 1.0);
+  vWorldY = w.y; vP = position.xy;
+  gl_Position = projectionMatrix * viewMatrix * w;
+}`,
+      fragmentShader: `uniform float uTime; uniform float uDay; varying float vWorldY; varying vec2 vP;
+void main() {
+  float air = smoothstep(-0.05, 0.05, vWorldY + 0.03 * sin(uTime * 1.7 + vP.x * 9.0));
+  float caustic = 0.5 + 0.5 * sin(vP.x * 23.0 + uTime * 2.1) * sin(vP.y * 19.0 - uTime * 1.6);
+  vec3 sea = vec3(0.025, 0.1, 0.11) + vec3(0.02, 0.07, 0.07) * caustic * smoothstep(-0.8, 0.0, vWorldY);
+  vec3 sky = vec3(0.74, 0.82, 0.86) * uDay;
+  gl_FragColor = vec4(mix(sea * mix(0.45, 1.0, uDay), sky, air), 1.0);
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+}`,
+    });
+    return this.breachBackdropMat;
+  }
+
+  /** Three short planks laid side by side plus six nail heads: the carpenter's
+   *  side of the repair, mirrored on the lining (or the sole) at the seat. */
+  private getInboardPatchGeo() {
+    if (this.inboardPatchGeo) return this.inboardPatchGeo;
+    const planks: THREE.BufferGeometry[] = [];
+    const nails: THREE.BufferGeometry[] = [];
+    const rows = [-0.18, 0, 0.18];
+    rows.forEach((y, i) => {
+      const len = 0.78 - i * 0.05;
+      const z = 0.018 + (i % 2) * 0.006;
+      planks.push(new THREE.BoxGeometry(len, 0.17, 0.035).translate(((i % 2) - 0.5) * 0.04, y, z));
+      for (const sx of [-1, 1]) {
+        nails.push(new THREE.CylinderGeometry(0.017, 0.019, 0.012, 6)
+          .rotateX(Math.PI / 2)
+          .translate(sx * (len * 0.5 - 0.07), y + (sx > 0 ? 0.02 : -0.02), z + 0.02));
+      }
+    });
+    this.inboardPatchGeo = { planks: mergeGeometries(planks)!, nails: mergeGeometries(nails)! };
+    return this.inboardPatchGeo;
   }
 
   /**
@@ -2766,6 +2987,11 @@ export class ShipRenderer {
     vis.gush.quaternion.copy(quat);
     vis.marker.position.copy(normal).multiplyScalar(0.06);
     vis.marker.quaternion.copy(quat);
+    const seat = this.seatBreachInboard(mesh, point, vis.inner, vis.innerNormal);
+    vis.hasSeat = seat.hasSeat;
+    vis.belowSole = seat.belowSole;
+    this.seatInboardPieces(vis.inboard, vis.ring, vis.welling, vis.inner, vis.innerNormal, seat.belowSole);
+    this.seatBackdrop(vis.backdrop, normal);
     if (vis.patch) {
       // The plank was nailed over the OLD wound. A recycled slot is a fresh
       // hole by definition, so the carpentry goes with it.
@@ -2776,6 +3002,7 @@ export class ShipRenderer {
 
   private disposeHoleVis(mesh: ShipMeshGroup, vis: HoleVis) {
     mesh.root.remove(vis.group);
+    mesh.root.remove(vis.inboard);
     if (vis.patch) mesh.root.remove(vis.patch);
   }
 
@@ -2789,6 +3016,10 @@ export class ShipRenderer {
    *  planked hull from a holed one. Now the repair is legible across a broadside.
    */
   private addPlankPatch(mesh: ShipMeshGroup, vis: HoleVis, seed: number) {
+    // Container at identity: the outboard cross and (holes-06) the inboard
+    // planks the carpenter actually nails on from the hold.
+    const container = new THREE.Group();
+    container.userData.isPlankPatch = true;
     const patch = new THREE.Group();
     this.plankPatchMat ??= new THREE.MeshStandardMaterial({
       map: this.deckTex,
@@ -2811,8 +3042,25 @@ export class ShipRenderer {
     patch.quaternion.setFromUnitVectors(HULL_Z_AXIS, vis.normal);
     patch.position.copy(vis.point).addScaledVector(vis.normal, 0.05);
     patch.userData.isPlankPatch = true;
-    mesh.root.add(patch);
-    vis.patch = patch;
+    container.add(patch);
+    if (vis.hasSeat) {
+      this.nailHeadMat ??= new THREE.MeshStandardMaterial({ color: 0x3b3834, metalness: 0.7, roughness: 0.45 });
+      const geo = this.getInboardPatchGeo();
+      const inboard = new THREE.Group();
+      inboard.name = 'hole-patch-inboard';
+      inboard.userData.isPlankPatch = true;
+      const planks = new THREE.Mesh(geo.planks, this.plankPatchMat);
+      planks.name = 'hole-patch-inboard-planks';
+      const nails = new THREE.Mesh(geo.nails, this.nailHeadMat);
+      nails.name = 'hole-patch-inboard-nails';
+      inboard.add(planks, nails);
+      inboard.position.copy(vis.inner).addScaledVector(vis.innerNormal, 0.004);
+      inboard.quaternion.setFromUnitVectors(HULL_Z_AXIS, vis.innerNormal);
+      inboard.rotateZ(((seed % 3) - 1) * 0.12);
+      container.add(inboard);
+    }
+    mesh.root.add(container);
+    vis.patch = container;
   }
 
   private addSwiftSailTrim(
@@ -3375,13 +3623,17 @@ export class ShipRenderer {
 
       // Shared pulse for every hole halo (one material, breathing in sync).
       this.holeMarkerMat.opacity = 0.28 + 0.24 * (0.5 + 0.5 * Math.sin(t * 3.4));
+      this.breachFxUniforms.uTime.value = t;
+      this.breachFxUniforms.uDay.value = 1 - 0.85 * this.nightFactor;
+      const breachNear = distSq < BREACH_INBOARD_DIST_SQ;
       // Breaches are ENTITIES: diff the wire list against the decals we already
       // built, keyed by ShipHole.id. A new id spawns a decal exactly where the
       // shot landed; a patched flip swaps it for crossed planks at the SAME
       // point; a vanished id disposes. No count heuristics, so a re-punched
       // spot can never end up with a plank floating over an open hole.
       {
-        const holes = ship.holes ?? [];
+        const dbg = this.breachDebug;
+        const holes = dbg && dbg.shipId === ship.id ? [...(ship.holes ?? []), ...dbg.holes] : ship.holes ?? [];
         let holeSlot = 0;
         for (const hole of holes) {
           let vis = mesh.holeVis.get(hole.id);
@@ -3408,7 +3660,10 @@ export class ShipRenderer {
           const open = !vis.patched;
           vis.group.visible = open;
           vis.marker.visible = open && !ship.sinking;
+          vis.inboard.visible = open && vis.hasSeat && breachNear;
+          vis.backdrop.visible = open && breachNear;
           if (open && holeSlot < mesh.hullHoleUniform.value.length) {
+            mesh.hullHoleEnds.value[holeSlot].set(vis.inner.x, vis.inner.y, vis.inner.z, 0);
             // One shader slot per OPEN breach, all at the same radius: damage
             // depth reads as more holes, never as one growing disc.
             mesh.hullHoleUniform.value[holeSlot].set(
@@ -3431,6 +3686,7 @@ export class ShipRenderer {
         }
         for (; holeSlot < mesh.hullHoleUniform.value.length; holeSlot++) {
           mesh.hullHoleUniform.value[holeSlot].set(0, 0, 0, 0);
+          mesh.hullHoleEnds.value[holeSlot].set(0, 0, 0, 0);
         }
       }
 
