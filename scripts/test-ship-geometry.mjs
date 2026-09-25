@@ -286,6 +286,68 @@ for (const type of ['sloop', 'brigantine', 'galleon']) {
     floating.map((c) => `${[...c.names].join('+')} (${c.n} meshes) at x ${c.box.min.x.toFixed(1)}..${c.box.max.x.toFixed(1)} y ${c.box.min.y.toFixed(1)}..${c.box.max.y.toFixed(1)} z ${c.box.min.z.toFixed(1)}..${c.box.max.z.toFixed(1)}`).join('; '));
 }
 
+// 4. ABOVE-LOCKER BREACH SEAT (b2.3e). A topside hole above the stowage
+//    lockers must seat on the inner planking, not on the old lining: the
+//    capsule end sits 0.13 m inboard of the shell (planking 0.12 + 1 cm past
+//    it), the planking (the 'hold-floor' family above the lockers) is cut at
+//    the seat by the same torn-outline test the shader runs, and planking
+//    1.4 m along the hull is not. Galleon, starboard, y 1.6, amidships.
+{
+  const { openFirstDrawBudgetForSettle } = await import('../src/client/rendering/FirstDrawBudget.ts');
+  const breach = await import('../src/client/rendering/ship/breach.ts');
+  const type = 'galleon';
+  const stats = SHIP_STATS[type];
+  const sr4 = new ShipRenderer();
+  sr4.init(new THREE.Scene(), 'high');
+  openFirstDrawBudgetForSettle();
+  const ship = fixtureShip(type);
+  ship.id = 'census-seat';
+  ship.holes = [{ id: 61, x: 1, y: 1.6, z: 0, patched: false }];
+  ship.nextHoleId = 62;
+  const cam4 = new THREE.Vector3(10, 6, 10);
+  for (let i = 0; i < 3; i++) sr4.update([ship], [], 24, 1 / 60, 0, cam4);
+  const mesh = sr4.shipMeshes.get(ship.id);
+  const vis = mesh?.holeVis?.get(61);
+  const lockerTop = typeof interiorMod.holdLockerTopY === 'function' ? interiorMod.holdLockerTopY(stats) : 1.0;
+  const inboard = vis?.point && vis?.inner ? Math.abs(vis.point.x) - Math.abs(vis.inner.x) : NaN;
+  expect(`${type}: topside hole at y 1.6 seats ${Number.isFinite(inboard) ? inboard.toFixed(3) : '-'} m inboard of the shell (0.12-0.14, on the planking; locker top ${lockerTop.toFixed(2)})`,
+    !!vis?.inner && vis.point.y > lockerTop && inboard >= 0.12 && inboard <= 0.14 && Math.sign(vis.inner.x) === Math.sign(vis.point.x));
+  const uH = mesh?.hullHoleUniform?.value ?? [];
+  const uE = mesh?.hullHoleEnds?.value ?? [];
+  const cut = (q) => uH.some((c, i) => {
+    if (!(c.w > 0) || !uE[i]) return false;
+    const ab = new THREE.Vector3(uE[i].x - c.x, uE[i].y - c.y, uE[i].z - c.z);
+    const ap = new THREE.Vector3(q.x - c.x, q.y - c.y, q.z - c.z);
+    const t = Math.max(0, Math.min(1, ap.dot(ab) / Math.max(ab.lengthSq(), 1e-6)));
+    const sh = mesh.hullHoleUniform.shape.value[i];
+    return breach.breachCuts(ap.sub(ab.multiplyScalar(t)), new THREE.Vector3(sh.x, sh.y, sh.z), sh.w, c.w);
+  });
+  const tri = new THREE.Triangle();
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c3 = new THREE.Vector3(), cp = new THREE.Vector3();
+  const nearestPlanking = (target) => {
+    let best = Infinity; const out = new THREE.Vector3();
+    mesh?.detailRoot?.traverse((o) => {
+      if (!o.isMesh || o.isInstancedMesh || o.material?.name !== 'hold-floor') return;
+      const pos = o.geometry.attributes.position; const idx = o.geometry.index;
+      const n = idx ? idx.count / 3 : pos.count / 3;
+      for (let i = 0; i < n; i++) {
+        const i0 = idx ? idx.getX(i * 3) : i * 3, i1 = idx ? idx.getX(i * 3 + 1) : i * 3 + 1, i2 = idx ? idx.getX(i * 3 + 2) : i * 3 + 2;
+        tri.set(a.fromBufferAttribute(pos, i0), b.fromBufferAttribute(pos, i1), c3.fromBufferAttribute(pos, i2));
+        if (Math.min(a.y, b.y, c3.y) < lockerTop) continue;
+        tri.closestPointToPoint(target, cp);
+        const d = cp.distanceTo(target);
+        if (d < best) { best = d; out.copy(cp); }
+      }
+    });
+    return { d: best, p: out };
+  };
+  const at = vis?.inner ? nearestPlanking(vis.inner) : { d: Infinity, p: new THREE.Vector3() };
+  expect(`${type}: the inner planking at the seat is cut by the breach (nearest planking ${Number.isFinite(at.d) ? at.d.toFixed(3) : '-'} m from the seat, cut ${cut(at.p)})`,
+    at.d < 0.05 && cut(at.p));
+  const far = vis?.inner ? nearestPlanking(new THREE.Vector3(vis.inner.x, vis.inner.y, vis.inner.z + 1.4)) : { d: Infinity, p: new THREE.Vector3() };
+  expect(`${type}: control, the planking 1.4 m along is NOT cut (${Number.isFinite(far.d) ? far.d.toFixed(3) : '-'} m)`, far.d < 0.2 && !cut(far.p));
+}
+
 console.log(`\n${checks} checks, ${failures} failed${MUTATE ? ' (mutated run: a failure is the expected outcome)' : ''}`);
 if (checks === 0) { console.error('VACUOUS: nothing graded'); process.exit(1); }
 process.exit(failures > 0 ? 1 : 0);

@@ -1510,7 +1510,11 @@ export class ShipRenderer {
     capstanHub.castShadow = true;
     anchorCapstan.add(capstanHub);
     let capstanGrip: THREE.Mesh | undefined;
-    for (let spoke = 0; spoke < 8; spoke++) {
+    // Four bars, each spanning the full wheel, give the eight spoke ends. Eight
+    // bars at 45 deg steps drew every bar twice (spoke k and k+4 are the same
+    // box turned 180 deg), a coplanar pair that fought on every face and doubled
+    // the knobs; the z-fighting hold-flooded stand saw it through the hatch.
+    for (let spoke = 0; spoke < 4; spoke++) {
       const angle = (spoke / 8) * Math.PI * 2;
       const handle = new THREE.Mesh(new THREE.BoxGeometry(1.42, 0.075, 0.095), darkMat);
       handle.position.y = 0.88;
