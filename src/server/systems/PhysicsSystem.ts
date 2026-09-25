@@ -265,6 +265,34 @@ export type SeaEvent = { shipId: string; kind: 'slam' | 'green_water'; strength:
  *  the split the loft-true chain teleports moored neighbours apart. */
 const SOFT_CONTACT_DEPTH = 0.6;
 
+// ── Rams and rock strikes carry mass (physics-08, b2.1g, PLAN 3.7) ──────────
+/** Restitution of a hull-hull or hull-rock contact. Wood crushes, it does not
+ *  bounce: a galleon ramming a stopped sloop keeps ~74% of her way, the sloop
+ *  ramming the galleon keeps ~6%, two sloops keep 40% each. */
+export const HULL_RESTITUTION = 0.2;
+/** Ram damage per J/kg: each hull takes the contact's dissipated energy
+ *  (1/2 mu v^2 (1 - e^2), mu the reduced mass INCLUDING the r x n lever terms)
+ *  divided by her OWN mass, times her T-bone factor. So the same blow stoves a
+ *  sloop in 3.6x as hard as the galleon that dealt it. 6.25 keeps the old
+ *  two-sloops-meeting-at-8 m/s ram at 96 per hull. */
+export const RAM_DAMAGE_PER_J_PER_KG = 6.25;
+/** Damage bands -> planks stove in: 1 hole from 9.3 (two sloops meeting at
+ *  2.5 m/s, the old threshold), 2 from 60, 3 from 150. */
+export const RAM_HOLE_BANDS: readonly number[] = [9.3, 60, 150];
+export function ramHolesForDamage(damage: number): number {
+  let holes = 0;
+  for (const band of RAM_HOLE_BANDS) if (damage >= band) holes += 1;
+  return holes;
+}
+/** Crew stagger from their OWN hull's delta-v (Match applies it, like the
+ *  anchor bite): a lurch of >= 1.5 m/s staggers the crew, >= 4 m/s knocks
+ *  them down. */
+export const HULL_JOLT_STAGGER_DV = 1.5;
+export const HULL_JOLT_KNOCKDOWN_DV = 4;
+export function hullJoltEffect(deltaV: number): 'none' | 'stagger' | 'knockdown' {
+  return deltaV >= HULL_JOLT_KNOCKDOWN_DV ? 'knockdown' : deltaV >= HULL_JOLT_STAGGER_DV ? 'stagger' : 'none';
+}
+
 /** Canvas set below this is rolled on the yard — the renderer's own furl
  *  threshold (ShipRenderer SAIL_FURL_THRESHOLD). Nothing for a chain to tear. */
 const SAIL_FURLED_BELOW = 0.08;
@@ -748,6 +776,9 @@ export class PhysicsSystem {
   private anchorStates = new Map<string, AnchorState>();
   /** Bites this update (dropping -> biting), for the crew stagger (Match). */
   anchorBites: Array<{ shipId: string; speed: number }> = [];
+  /** Rams and rock strikes this update (b2.1g): each hull's OWN linear
+   *  delta-v, for the crew stagger (hullJoltEffect). Reset each update. */
+  hullJolts: Array<{ shipId: string; deltaV: number; kind: 'ram' | 'rock' }> = [];
   /** Bow slams and green water over the rail this update (b2.1e), for the
    *  spray FX and the storm audio. Reset each update. */
   seaEvents: SeaEvent[] = [];
@@ -952,6 +983,7 @@ export class PhysicsSystem {
   private updateShips(dt: number, t: number, ships: Ship[], players: Player[], islands: Island[], seaRocks: SeaRock[], storm: StormState | null) {
     this.rebuildEnvSafeShips(t, ships, players, islands, storm);
     this.anchorBites.length = 0;
+    this.hullJolts.length = 0;
     this.seaEvents.length = 0;
     const helmedShipIds = new Set<string>();
     const helmsmanByShip = new Map<string, string>();
@@ -1258,20 +1290,8 @@ export class PhysicsSystem {
         : Math.max(0, dyn.agroundFor - dt);
       ship.aground = dyn.agroundFor > 0;
 
-      // Ship-ship collision — oriented capsule-chain hulls, resolved pairwise once.
-      // Each pair once, by ARRAY order. Not by id order: ids are uuids, so which
-      // hull plays `ship` in the pair would differ run to run and a seeded match
-      // could not replay the moment two hulls touched (RNG-01).
-      const shipIdx = ships.indexOf(ship);
-      for (let j = shipIdx + 1; j < ships.length; j++) {
-        const other = ships[j];
-        // A FOUNDER IS NOT A COLLIDER (physics-23). She already `continue`s
-        // before her own pass, so leaving her a valid `other` here made two
-        // hulls alongside the same wreck behave differently purely by array
-        // order: one sailed through her, the other bounced.
-        if (!other.alive || other.sinking) continue;
-        this.resolveShipShipCollision(ship, other, helmsmanByShip, t, humanHelmShipIds);
-      }
+      // Ship-ship collisions are resolved AFTER every hull has moved this tick
+      // (physics-08): see the pass at the end of updateShips.
 
       // Wave attitude — pitch/roll chase the sampled Gerstner slope through a
       // spring-damper so the deck genuinely rides the ocean. Storm winds heel
@@ -1361,6 +1381,23 @@ export class PhysicsSystem {
       // when patched). Runs after bailing (applied earlier in the tick).
       // Storm seas wash over holes calm water would spare.
       updateShipFlooding(ship, t, dt, seaState);
+    }
+
+    // SHIP-SHIP COLLISIONS (physics-08, b2.1g), one pass after every hull has
+    // moved. Resolving inside the per-hull loop meant the first hull in the
+    // array had moved and the second had not, so the same ram came out
+    // differently with the array reversed. Pairs run in a CANONICAL order read
+    // off the hulls' own state (x, then z, then heading; ties keep array
+    // order), not by id: ids are uuids, and a seeded match must replay the
+    // moment two hulls touch (RNG-01). A founder is not a collider (physics-23).
+    const colliders = ships.filter((s) => s.alive && !s.sinking);
+    if (colliders.length > 1) {
+      colliders.sort((a, b) => (a.position.x - b.position.x) || (a.position.z - b.position.z) || (a.rotation - b.rotation));
+      for (let i = 0; i < colliders.length; i++) {
+        for (let j = i + 1; j < colliders.length; j++) {
+          this.resolveShipShipCollision(colliders[i], colliders[j], helmsmanByShip, t, humanHelmShipIds);
+        }
+      }
     }
   }
 
@@ -3461,39 +3498,62 @@ export class PhysicsSystem {
     // hulls rubbing rail to rail genuinely overlap by a few tens of centimetres
     // before they are pressed; snapping them apart on that would fling every
     // moored neighbour. Under SOFT_CONTACT_DEPTH the correction is a spring.
-    const half = deepest.penetration
-      * (deepest.penetration < SOFT_CONTACT_DEPTH ? 0.12 : 0.5);
-    ship.position.x += nx * half;
-    ship.position.z += nz * half;
-    other.position.x -= nx * half;
-    other.position.z -= nz * half;
+    // The overlap is shared by INVERSE MASS: the galleon barely gives, the
+    // sloop is shoved (equal hulls split it as before).
+    const massA = HULL_PARAMS[ship.type].mass;
+    const massB = HULL_PARAMS[other.type].mass;
+    const wA = 1 / massA;
+    const wB = 1 / massB;
+    const push = deepest.penetration * (deepest.penetration < SOFT_CONTACT_DEPTH ? 0.24 : 1);
+    const pushA = push * (wA / (wA + wB));
+    const pushB = push * (wB / (wA + wB));
+    ship.position.x += nx * pushA;
+    ship.position.z += nz * pushA;
+    other.position.x -= nx * pushB;
+    other.position.z -= nz * pushB;
 
     // Approximate contact point on the interface between the two sample circles.
     const frac = deepest.rb / Math.max(0.001, deepest.ra + deepest.rb);
     const cx = deepest.bx + (deepest.ax - deepest.bx) * frac;
     const cz = deepest.bz + (deepest.az - deepest.bz) * frac;
-
-    const rv = (ship.velocity.x - other.velocity.x) * nx + (ship.velocity.z - other.velocity.z) * nz;
-    if (rv >= 0) return; // already separating
-    const relSpd = -rv;
-    const jMag = relSpd * 0.4;
-    ship.velocity.x += nx * jMag;
-    ship.velocity.z += nz * jMag;
-    other.velocity.x -= nx * jMag;
-    other.velocity.z -= nz * jMag;
-
-    // Torque about +Y: τ = rz·Jx − rx·Jz. Off-center rams pivot both hulls.
     const raX = cx - ship.position.x;
     const raZ = cz - ship.position.z;
     const rbX = cx - other.position.x;
     const rbZ = cz - other.position.z;
-    const invInertiaA = 4.2 / (stats.length * stats.length);
-    const invInertiaB = 4.2 / (otherStats.length * otherStats.length);
-    ship.angularVelocity += clamp((raZ * nx - raX * nz) * jMag * invInertiaA, -0.35, 0.35);
-    other.angularVelocity += clamp((rbZ * -nx - rbX * -nz) * jMag * invInertiaB, -0.35, 0.35);
 
-    // Damage on hard collision — T-bone (broadside) victims take heavier damage
-    // than rammers hitting with their bow/stern. Both ships still take some.
+    // Closing speed OF THE CONTACT POINTS: v + omega x r. In this frame a
+    // heading rate w moves a point at (rx, rz) by w (rz, -rx), and a force J
+    // at r makes the yaw moment rz Jx - rx Jz.
+    const vAx = ship.velocity.x + ship.angularVelocity * raZ;
+    const vAz = ship.velocity.z - ship.angularVelocity * raX;
+    const vBx = other.velocity.x + other.angularVelocity * rbZ;
+    const vBz = other.velocity.z - other.angularVelocity * rbX;
+    const rv = (vAx - vBx) * nx + (vAz - vBz) * nz;
+    if (!(rv < 0)) return; // already separating (or not finite)
+    const relSpd = -rv;
+
+    // Mass-weighted impulse (physics-08): j = (1 + e) v_rel / (1/mA + 1/mB +
+    // (rA x n)^2 / IA + (rB x n)^2 / IB), I = m (L^2 + B^2) / 12. No spin clamp:
+    // the inertia sets the spin.
+    const inertiaA = HULL_PARAMS[ship.type].yawInertia;
+    const inertiaB = HULL_PARAMS[other.type].yawInertia;
+    const crossA = raZ * nx - raX * nz;
+    const crossB = rbZ * nx - rbX * nz;
+    const kEff = wA + wB + (crossA * crossA) / inertiaA + (crossB * crossB) / inertiaB;
+    const j = ((1 + HULL_RESTITUTION) * relSpd) / kEff;
+    ship.velocity.x += nx * j * wA;
+    ship.velocity.z += nz * j * wA;
+    other.velocity.x -= nx * j * wB;
+    other.velocity.z -= nz * j * wB;
+    ship.angularVelocity += (crossA * j) / inertiaA;
+    other.angularVelocity -= (crossB * j) / inertiaB;
+    // Each crew is thrown by her OWN hull's lurch.
+    this.hullJolts.push({ shipId: ship.id, deltaV: j * wA, kind: 'ram' });
+    this.hullJolts.push({ shipId: other.id, deltaV: j * wB, kind: 'ram' });
+
+    // Damage from the REDUCED-MASS impact energy the contact dissipated,
+    // taken by each hull per kilogram of her own: the lighter hull is stove in
+    // harder. T-bone (broadside) victims take heavier damage than a stem.
     // THE TRUCE (b1.6e): inside it a contact under TRUCE_CONTACT_SPEED is a
     // bump (the impulse above still parts the hulls), never a breach, and no
     // contact at any speed banks ram credit toward a sink bounty. A contact
@@ -3503,24 +3563,23 @@ export class PhysicsSystem {
     const humanAtEitherHelm = !humanHelmShipIds
       || humanHelmShipIds.has(ship.id) || humanHelmShipIds.has(other.id);
     if (relSpd > 2.5 && !truceSparesContact(t, relSpd, humanAtEitherHelm)) {
-      const baseDmg = relSpd * 12;
+      const energy = 0.5 * (relSpd * relSpd / kEff) * (1 - HULL_RESTITUTION * HULL_RESTITUTION);
       // The face of each ship that touched the other = impact normal in its local frame.
       const shipImpact = this.rotateWorldToShipLocal(-nx, -nz, ship.rotation);
       const otherImpact = this.rotateWorldToShipLocal(nx, nz, other.rotation);
-      const shipFactor = this.tboneDamageFactor(shipImpact);
-      const otherFactor = this.tboneDamageFactor(otherImpact);
+      const shipDamage = RAM_DAMAGE_PER_J_PER_KG * this.tboneDamageFactor(shipImpact) * energy * wA;
+      const otherDamage = RAM_DAMAGE_PER_J_PER_KG * this.tboneDamageFactor(otherImpact) * energy * wB;
       // The REAL contact point, resolved into each hull's own frame — the
       // rammer is stove in at the bow, the victim amidships on the struck beam.
       const shipLocal = this.toShipLocal({ x: cx, y: 0, z: cz }, ship);
       const otherLocal = this.toShipLocal({ x: cx, y: 0, z: cz }, other);
       const bandY = (FLOODING.HOLE_BAND_Y.min + FLOODING.HOLE_BAND_Y.max) * 0.5;
-      // Discrete holes: a bow-on ram stoves in one plank; a broadside T-bone
-      // (high factor) caves in two; a very hard slam adds a third. The T-boned
-      // victim therefore always loses more planks than the rammer.
-      const ramHoles = (factor: number) =>
-        1 + (factor > 1.4 ? 1 : 0) + (baseDmg * factor > 90 ? 1 : 0);
-      this.openHoleAt(ship, { x: shipLocal.x, y: bandY, z: shipLocal.z }, ramHoles(shipFactor), 'ram');
-      this.openHoleAt(other, { x: otherLocal.x, y: bandY, z: otherLocal.z }, ramHoles(otherFactor), 'ram');
+      // Discrete holes from the damage bands (RAM_HOLE_BANDS): a galleon's
+      // stem shrugs off what caves in a sloop's quarter.
+      const shipHoles = ramHolesForDamage(shipDamage);
+      const otherHoles = ramHolesForDamage(otherDamage);
+      if (shipHoles > 0) this.openHoleAt(ship, { x: shipLocal.x, y: bandY, z: shipLocal.z }, shipHoles, 'ram');
+      if (otherHoles > 0) this.openHoleAt(other, { x: otherLocal.x, y: bandY, z: otherLocal.z }, otherHoles, 'ram');
 
       // Ram kill credit: each hull's damage is banked to the OTHER hull's
       // helmsman (or its owner), so ramming a ship to death now credits the
@@ -3530,13 +3589,13 @@ export class PhysicsSystem {
         type: 'ship_ram',
         attackerId: helmsmanByShip?.get(other.id) ?? other.ownerId,
         targetId: ship.id,
-        damage: baseDmg * shipFactor,
+        damage: shipDamage,
       });
       if (!truceBlocksBounty(t)) this.combatEvents.push({
         type: 'ship_ram',
         attackerId: helmsmanByShip?.get(ship.id) ?? ship.ownerId,
         targetId: other.id,
-        damage: baseDmg * otherFactor,
+        damage: otherDamage,
       });
       // One spatial crash FX at the contact point (the two hulls slamming).
       this.combatEvents.push({
@@ -3853,11 +3912,20 @@ export class PhysicsSystem {
     const relVel = ship.velocity.x * deepest.nx + ship.velocity.z * deepest.nz;
     if (relVel < 0) {
       const impactSpeed = -relVel;
-      ship.velocity.x -= relVel * deepest.nx * 1.45;
-      ship.velocity.z -= relVel * deepest.nz * 1.45;
-      // τ about +Y is rz·Fx − rx·Fz — glancing hits pivot the bow away from the rock.
-      ship.angularVelocity += (deepest.sampleZ - ship.position.z) * deepest.nx * 0.012
-        - (deepest.sampleX - ship.position.x) * deepest.nz * 0.012;
+      // A ROCK IS INFINITE MASS (physics-08, b2.1g): the same impulse law as a
+      // ram with 1/m_rock = 0, e = HULL_RESTITUTION, and her yaw inertia
+      // m (L^2 + B^2)/12 in the lever term, so a glancing strike spins her off
+      // the rock instead of bouncing her straight back. (Was a fixed 1.45 v
+      // bounce, e = 0.45, plus a speed-blind 0.012 x lever yaw kick.)
+      const hull = HULL_PARAMS[ship.type];
+      const rX = deepest.contactX - ship.position.x;
+      const rZ = deepest.contactZ - ship.position.z;
+      const cross = rZ * deepest.nx - rX * deepest.nz;
+      const j = ((1 + HULL_RESTITUTION) * impactSpeed) / (1 / hull.mass + (cross * cross) / hull.yawInertia);
+      ship.velocity.x += deepest.nx * j / hull.mass;
+      ship.velocity.z += deepest.nz * j / hull.mass;
+      ship.angularVelocity += (cross * j) / hull.yawInertia;
+      this.hullJolts.push({ shipId: ship.id, deltaV: j / hull.mass, kind: 'rock' });
 
       if (impactSpeed > 2.2) {
         // Striking a sea rock tears the hull open AT THE SAMPLE that struck it —
