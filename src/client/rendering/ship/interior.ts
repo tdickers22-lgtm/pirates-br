@@ -229,11 +229,34 @@ function makeCargoNetGeometry(rx: number, rz: number, h: number): THREE.BufferGe
   return finishGeometry(pos, idx);
 }
 
-function tintGeometry(geo: THREE.BufferGeometry, r: number, gr: number, b: number) {
-  const n = geo.attributes.position.count;
-  const c = new Float32Array(n * 3);
-  for (let i = 0; i < n; i++) { c[i * 3] = r; c[i * 3 + 1] = gr; c[i * 3 + 2] = b; }
-  geo.setAttribute('color', new THREE.BufferAttribute(c, 3));
+/**
+ * The lantern tints live in a 2x1 texel strip, not in vertex colours: a
+ * vertex-coloured basic material linked a program of its own on every hull
+ * (+1 on the phone's 70-program ceiling, b2 gate), while a mapped, untonemapped
+ * basic program already exists in every scene. Texel 0 is the horn glass,
+ * texel 1 the flame card, both the exact linear values the vertex colours
+ * carried (quantised to 8 bits), sampled nearest at the texel centre.
+ */
+const LANTERN_TEXEL = { glass: 0.25, flame: 0.75 } as const;
+let lanternTintTex: THREE.DataTexture | null = null;
+function lanternTintTexture(): THREE.DataTexture {
+  if (lanternTintTex) return lanternTintTex;
+  const px = new Uint8Array([
+    Math.round(0.42 * 255), Math.round(0.24 * 255), Math.round(0.07 * 255), 255,
+    255, Math.round(0.72 * 255), Math.round(0.28 * 255), 255,
+  ]);
+  const tex = new THREE.DataTexture(px, 2, 1, THREE.RGBAFormat);
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestFilter;
+  tex.generateMipmaps = false;
+  tex.needsUpdate = true;
+  lanternTintTex = tex;
+  return tex;
+}
+function tintGeometry(geo: THREE.BufferGeometry, u: number) {
+  const uv = geo.attributes.uv as THREE.BufferAttribute;
+  for (let i = 0; i < uv.count; i++) uv.setXY(i, u, 0.5);
+  uv.needsUpdate = true;
 }
 
 export interface StairwellHole {
@@ -415,9 +438,13 @@ export function makeShipInterior(
 
   // Low angled bilge planks close the bottom corners that were visible from the hold.
   // Their own material (same look as darkMat) so the breach cut stays in the hold.
+  // Untextured, the floor's and inner wall's material family: with the breach
+  // cut all three carry the same capsule discard, so they link ONE program. A
+  // darkMat clone (wood map) linked a second capsule program per match (+1 on
+  // the phone's 70-program ceiling, b2 gate). The tone matches the dark timber.
   let bilgeMat: THREE.Material = darkMat;
   if (breachDiscard) {
-    bilgeMat = darkMat.clone();
+    bilgeMat = new THREE.MeshStandardMaterial({ color: 0x2e1c0e, roughness: 0.95 });
     bilgeMat.name = 'hold-bilge-board';
     breachDiscard(bilgeMat);
   }
@@ -612,7 +639,7 @@ export function makeShipInterior(
   // glass is a dim amber shell you see into, the crossed flame card inside is
   // what burns (b2.3e). One draw for both lanterns, as before.
   const glassMat = new THREE.MeshBasicMaterial({
-    vertexColors: true, transparent: true, depthWrite: false,
+    map: lanternTintTexture(), transparent: true, depthWrite: false,
     blending: THREE.AdditiveBlending, toneMapped: false,
   });
   glassMat.name = 'hold-lantern-glass';
@@ -623,7 +650,7 @@ export function makeShipInterior(
     // Tapered glass: wider at the shoulder than at the foot, the way a horn
     // lantern is, so it catches the light differently top and bottom.
     const glassGeo = new THREE.CylinderGeometry(0.105, 0.078, 0.22, lanternSides);
-    tintGeometry(glassGeo, 0.42, 0.24, 0.07);
+    tintGeometry(glassGeo, LANTERN_TEXEL.glass);
     const glass = new THREE.Mesh(glassGeo, glassMat);
     glass.position.set(0, lanternY, lz);
     g.add(glass);
@@ -631,7 +658,7 @@ export function makeShipInterior(
       const flameGeo = new THREE.PlaneGeometry(0.055, 0.12, 1, 2);
       const fp = flameGeo.attributes.position as THREE.BufferAttribute;
       for (let i = 0; i < fp.count; i++) if (fp.getY(i) > 0.05) fp.setX(i, 0);
-      tintGeometry(flameGeo, 1.0, 0.72, 0.28);
+      tintGeometry(flameGeo, LANTERN_TEXEL.flame);
       const flame = new THREE.Mesh(flameGeo, glassMat);
       flame.position.set(0, lanternY - 0.01, lz);
       flame.rotation.y = ry;
