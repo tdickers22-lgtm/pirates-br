@@ -2,8 +2,8 @@
   "note": "Baseline for scripts/test-ship-geometry-hash.mjs. Rebuild ONLY inside a slice that intends the geometry change, and name the moved families in the commit.",
   "hulls": {
     "sloop": {
-      "digest": "851c10c8",
-      "meshCount": 101,
+      "digest": "3c4ad027",
+      "meshCount": 102,
       "vertTotal": 62302,
       "families": {
         "MeshBasicMaterial": {
@@ -32,6 +32,20 @@
             4.11,
             10.86,
             6.962
+          ]
+        },
+        "hold-bilge-board": {
+          "meshes": 1,
+          "verts": 72,
+          "tris": 24,
+          "hash": "75a6c7a1",
+          "box": [
+            -1.932,
+            0.143,
+            -3.672,
+            1.932,
+            0.897,
+            3.672
           ]
         },
         "hold-crate": {
@@ -148,9 +162,9 @@
         },
         "ship-dark-timber": {
           "meshes": 7,
-          "verts": 10172,
-          "tris": 3444,
-          "hash": "cf1850b5",
+          "verts": 10100,
+          "tris": 3420,
+          "hash": "9e6b69d1",
           "box": [
             -2.884,
             -0.893,
@@ -178,7 +192,7 @@
           "meshes": 1,
           "verts": 2040,
           "tris": 680,
-          "hash": "bc8bbfd9",
+          "hash": "e3f7db39",
           "box": [
             -2.798,
             0.21,
@@ -331,8 +345,8 @@
       }
     },
     "brigantine": {
-      "digest": "242d3af7",
-      "meshCount": 130,
+      "digest": "4f375504",
+      "meshCount": 131,
       "vertTotal": 75742,
       "families": {
         "MeshBasicMaterial": {
@@ -361,6 +375,20 @@
             5.11,
             12.22,
             9.001
+          ]
+        },
+        "hold-bilge-board": {
+          "meshes": 1,
+          "verts": 72,
+          "tris": 24,
+          "hash": "98e6c339",
+          "box": [
+            -2.73,
+            0.048,
+            -4.896,
+            2.73,
+            0.992,
+            4.896
           ]
         },
         "hold-crate": {
@@ -477,9 +505,9 @@
         },
         "ship-dark-timber": {
           "meshes": 8,
-          "verts": 10680,
-          "tris": 3636,
-          "hash": "b3283f50",
+          "verts": 10608,
+          "tris": 3612,
+          "hash": "11a315c4",
           "box": [
             -4.061,
             -1.098,
@@ -507,7 +535,7 @@
           "meshes": 1,
           "verts": 2076,
           "tris": 692,
-          "hash": "371ec651",
+          "hash": "c169e6b9",
           "box": [
             -3.917,
             0.21,
@@ -660,8 +688,8 @@
       }
     },
     "galleon": {
-      "digest": "d6575ad6",
-      "meshCount": 172,
+      "digest": "746803b9",
+      "meshCount": 173,
       "vertTotal": 98065,
       "families": {
         "MeshBasicMaterial": {
@@ -690,6 +718,20 @@
             6.61,
             15.09,
             12.659
+          ]
+        },
+        "hold-bilge-board": {
+          "meshes": 1,
+          "verts": 72,
+          "tris": 24,
+          "hash": "f45da869",
+          "box": [
+            -3.913,
+            -0.063,
+            -6.732,
+            3.913,
+            1.103,
+            6.732
           ]
         },
         "hold-crate": {
@@ -806,9 +848,9 @@
         },
         "ship-dark-timber": {
           "meshes": 9,
-          "verts": 11332,
-          "tris": 3876,
-          "hash": "e4fae1d0",
+          "verts": 11260,
+          "tris": 3852,
+          "hash": "307223fc",
           "box": [
             -5.915,
             -1.315,
@@ -836,7 +878,7 @@
           "meshes": 1,
           "verts": 2112,
           "tris": 704,
-          "hash": "01c255fd",
+          "hash": "d566c66d",
           "box": [
             -5.596,
             0.21,
