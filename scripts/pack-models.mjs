@@ -44,6 +44,17 @@
 //   node scripts/pack-models.mjs --force    repack everything
 //   node scripts/pack-models.mjs --check    exit 1 when a packed file is stale/missing
 //   node scripts/pack-models.mjs barrel palm_a   only these names
+//
+// KTX2 TEXTURES (b3.1c, performance-02): every PNG/JPEG texture inside a
+// packed GLB is re-encoded as KHR_texture_basisu with its full mip chain in
+// the file, by the PINNED npm wasm Basis encoder (ktx2-encoder 0.6.0, exact
+// version in package.json; no toktx/admin install needed): ETC1S (BasisLZ)
+// for baseColor / emissive (sRGB, perceptual) and ORM (linear), UASTC + zstd
+// for normal maps. The client transcodes with three's basis_transcoder
+// (public/basis/, precompressed, fetched with the world set by the one shared
+// KTX2Loader in AssetLibrary). A packed GLB still carrying PNG/JPEG outside
+// TEXTURE_ALLOWLIST is STALE (--check fails it). test-texture-budget grades
+// the result (mips, modes, GPU bytes per tier, ETC1S deltaE vs the source).
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -55,6 +66,9 @@ import { ALL_EXTENSIONS, EXTMeshoptCompression, KHRMeshQuantization } from '@glt
 import { prune, quantize, reorder } from '@gltf-transform/functions';
 import { PropertyType } from '@gltf-transform/core';
 import { MeshoptDecoder, MeshoptEncoder } from 'meshoptimizer';
+import { KHRTextureBasisu } from '@gltf-transform/extensions';
+import { encodeToKTX2 } from 'ktx2-encoder';
+import sharp from 'sharp';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const SRC_DIR = path.join(ROOT, 'public/assets/models');
@@ -122,6 +136,47 @@ function headCommit() {
 }
 
 /** Is the packed file present and packed from exactly these source bytes? */
+/** Packed GLBs allowed to keep a PNG/JPEG texture (name -> reason). Empty:
+ *  no textured GLB is in the boot set, the only stage before the transcoder. */
+export const TEXTURE_ALLOWLIST = new Map([]);
+
+/** Encoder settings per texture slot (b3.1c). ETC1S quality 255 keeps the
+ *  512 atlases under mean deltaE 3 vs the Blender JPEG (test-texture-budget). */
+export const KTX2_OPTIONS = Object.freeze({
+  color: { isUASTC: false, qualityLevel: 255, compressionLevel: 2, isPerceptual: true, isSetKTX2SRGBTransferFunc: true, generateMipmap: true },
+  data: { isUASTC: false, qualityLevel: 255, compressionLevel: 2, isPerceptual: false, isSetKTX2SRGBTransferFunc: false, generateMipmap: true },
+  normal: { isUASTC: true, needSupercompression: true, isNormalMap: true, isPerceptual: false, isSetKTX2SRGBTransferFunc: false, generateMipmap: true },
+});
+
+async function decodeImage(buffer) {
+  const { data, info } = await sharp(buffer).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  return { data: new Uint8Array(data), width: info.width, height: info.height };
+}
+
+/** Re-encode every PNG/JPEG texture of `doc` as KTX2 (slot-aware). */
+export async function encodeTexturesKtx2(doc) {
+  const root = doc.getRoot();
+  let n = 0;
+  for (const tex of root.listTextures()) {
+    const mime = tex.getMimeType();
+    if (mime !== 'image/png' && mime !== 'image/jpeg') continue;
+    const slots = new Set(tex.getGraph().listParentEdges(tex).filter((e) => e.getParent() !== root).map((e) => e.getName()));
+    const mode = slots.has('normalTexture') ? 'normal'
+      : (slots.has('baseColorTexture') || slots.has('emissiveTexture')) ? 'color' : 'data';
+    const ktx = await encodeToKTX2(tex.getImage(), { ...KTX2_OPTIONS[mode], imageDecoder: decodeImage });
+    tex.setImage(ktx).setMimeType('image/ktx2');
+    if (tex.getURI()) tex.setURI(tex.getURI().replace(/\.(png|jpe?g)$/i, '.ktx2'));
+    n += 1;
+  }
+  if (n) doc.createExtension(KHRTextureBasisu).setRequired(true);
+  return n;
+}
+
+/** PNG/JPEG images a packed GLB still ships (JSON only, no decode). */
+export function legacyImageCount(json) {
+  return (json?.images ?? []).filter((im) => im.mimeType === 'image/png' || im.mimeType === 'image/jpeg').length;
+}
+
 export function packedIsFresh(name, manifest = readManifest()) {
   const src = path.join(SRC_DIR, `${name}.glb`);
   const out = packedFile(name, manifest);
@@ -129,6 +184,7 @@ export function packedIsFresh(name, manifest = readManifest()) {
   const bytes = fs.readFileSync(out);
   if (path.basename(out) !== hashedName(name, bytes)) return false; // name no longer matches its bytes
   const json = readGlbJson(bytes);
+  if (legacyImageCount(json) && !TEXTURE_ALLOWLIST.has(name)) return false; // pre-KTX2 pack
   return json?.asset?.extras?.source?.srcSha256 === sha256(fs.readFileSync(src));
 }
 
@@ -215,6 +271,7 @@ export async function packOne(name, { provenance = provenanceScripts(), commit =
   // POSITION accessor), so int8 normals under float positions would ship
   // without the extension that makes them legal. Decide it here instead.
   if (!quantisePosition) for (const acc of floatPositionAccessors(doc)) roundMantissa(acc.getArray(), POSITION_DROP_BITS);
+  if (!TEXTURE_ALLOWLIST.has(name)) await encodeTexturesKtx2(doc);
   if (hasQuantisedAttribute(doc)) doc.createExtension(KHRMeshQuantization).setRequired(true);
   doc.createExtension(EXTMeshoptCompression).setRequired(true)
     .setEncoderOptions({ method: EXTMeshoptCompression.EncoderMethod.FILTER });
