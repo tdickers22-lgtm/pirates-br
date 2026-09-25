@@ -825,8 +825,11 @@ console.log('\n10. A saturated hull is NEVER immune (the old 3-per-section bug)'
   const ship = makeShip('sloop');
   const stats = SHIP_STATS.sloop;
   // Empty a whole broadside into one flank.
+  // Eight aim points 1.0 m apart (b2.2b: a ball within HOLE_ENLARGE_RADIUS of
+  // a wound widens it instead of opening a new entity, so saturation needs
+  // spread fire; the second pass widens the first eight).
   for (let i = 0; i < FLOODING.MAX_HOLES_PER_SHIP + 6; i++) {
-    physics.openHoleAt(ship, { x: stats.width * 0.5, y: 0.2, z: (i % 7) - 3 }, 1, 'cannon');
+    physics.openHoleAt(ship, { x: stats.width * 0.5, y: 0.2, z: (i % 8) - 3.5 }, 1, 'cannon');
   }
   expect('the list never grows past MAX_HOLES_PER_SHIP',
     ship.holes.length === FLOODING.MAX_HOLES_PER_SHIP, `holes=${ship.holes.length}`);
@@ -836,7 +839,9 @@ console.log('\n10. A saturated hull is NEVER immune (the old 3-per-section bug)'
   // Plank her up completely, then keep shooting: the plank comes off.
   for (const h of ship.holes) h.patched = true;
   expect('a fully planked hull leaks nothing', countOpenHoles(ship) === 0);
-  physics.openHoleAt(ship, { x: stats.width * 0.5, y: 0.2, z: 0 }, 1, 'cannon');
+  // The other flank: farther than HOLE_ENLARGE_RADIUS from every plank, so the
+  // cap recycles the nearest patched slot to the new point.
+  physics.openHoleAt(ship, { x: -stats.width * 0.5, y: 0.2, z: 0 }, 1, 'cannon');
   expect('a hit on a saturated, fully-patched hull RE-OPENS a breach',
     countOpenHoles(ship) === 1 && ship.holes.length === FLOODING.MAX_HOLES_PER_SHIP,
     `open=${countOpenHoles(ship)} total=${ship.holes.length}`);
