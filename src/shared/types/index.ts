@@ -47,7 +47,15 @@ export interface ShipHole {
    *  getShipHoleTier, so the client never has to guess which breaches are the
    *  ones that flood a level hull. */
   tier?: ShipHoleTier;
+  /** How wide the breach is torn (b2.2b, holes-04; ONE wire byte, absent = 1):
+   *  a later hit within FLOODING.HOLE_ENLARGE_RADIUS of an open hole widens
+   *  it (cap 3) instead of making a new entity, and a hit there on a patched
+   *  hole knocks the plank off at its old size. Separate from `tier` (height). */
+  size?: ShipHoleSize;
 }
+
+/** Breach size 1..3: ingress area 1 / 1.8 / 2.8, repair 1.6 / 2.4 / 3.2 s. */
+export type ShipHoleSize = 1 | 2 | 3;
 
 /** LOW = at/below the wale (floods on a level hull), MID = floods once she has
  *  settled, HIGH = topside, dry until she lists or the sea gets up. */

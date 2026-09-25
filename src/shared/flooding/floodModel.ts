@@ -10,16 +10,30 @@
 // frozen Gerstner sample cannot see), fading linearly to 0 at the margin, so a
 // breach 0.30 m above calm water on a level hull is DRY and floods only once a
 // list, the settle or a wave puts it under. Depth is capped at MAX_HEAD.
-import type { ShipType } from '../types/index.js';
+import type { ShipHoleSize, ShipType } from '../types/index.js';
 import { FLOODING } from '../constants/index.js';
 import { getHullVolumeTable, fillToLocalY } from './hullVolume.js';
 
 export const GRAVITY = 9.81;
 
-/** Area factor of a hole of size 1..3 (b2.2b adds ShipHole.size; absent = 1). */
+/** A hole's size clamped to 1..HOLE_SIZE_MAX (absent on the wire = 1). */
+export function holeSize(size: number | undefined): ShipHoleSize {
+  return Math.min(FLOODING.HOLE_SIZE_MAX, Math.max(1, Math.round(size ?? 1))) as ShipHoleSize;
+}
+
+/** Area factor of a hole of size 1..3 (ShipHole.size; absent = 1). */
 export function holeSizeArea(size: number | undefined): number {
-  const i = Math.min(3, Math.max(1, Math.round(size ?? 1))) - 1;
-  return FLOODING.HOLE_SIZE_AREA[i];
+  return FLOODING.HOLE_SIZE_AREA[holeSize(size) - 1];
+}
+
+/** Seconds of held input to plank a hole of this size (1.6 / 2.4 / 3.2). */
+export function holeRepairTime(size: number | undefined): number {
+  return FLOODING.HOLE_REPAIR_TIME[holeSize(size) - 1];
+}
+
+/** Rendered breach radius (m) for this size (0.16 / 0.24 / 0.31). */
+export function holeVisualRadius(size: number | undefined): number {
+  return FLOODING.HOLE_SIZE_RADIUS[holeSize(size) - 1];
 }
 
 /** K for a hull class (fill fraction per second per unit area per m/s). */

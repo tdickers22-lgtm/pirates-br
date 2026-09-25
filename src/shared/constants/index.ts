@@ -498,9 +498,20 @@ export const FLOODING = {
   /** Hull-local Y band (metres above the design waterline) synthetic breach
    *  points are placed in — rams, rocks, storm seas and keg blasts land here. */
   HOLE_BAND_Y: { min: 0.10, max: 0.45 },
-  /** Rendered breach radius (metres) — damage depth reads as MORE holes, not
-   *  as one growing disc. */
+  /** Legacy single breach radius (metres). b2.2b: the rendered radius follows
+   *  the hole size (HOLE_SIZE_RADIUS); this stays as the size-2 reference
+   *  until the renderer reads the per-size table. */
   HOLE_VISUAL_RADIUS: 0.26,
+  /** Rendered breach radius per hole size 1 / 2 / 3 (metres, b2.2b). */
+  HOLE_SIZE_RADIUS: [0.16, 0.24, 0.31] as readonly number[],
+  /** Seconds of held repair input to plank a hole of size 1 / 2 / 3 (2 / 3 / 4
+   *  hammer swings). One plank per hole whatever its size. */
+  HOLE_REPAIR_TIME: [1.6, 2.4, 3.2] as readonly number[],
+  /** A hit within this hull-local distance (metres) of an OPEN hole widens it
+   *  (size + 1, cap HOLE_SIZE_MAX); of a PATCHED hole, knocks the plank off at
+   *  its old size. Only farther hits make a new entity. */
+  HOLE_ENLARGE_RADIUS: 0.6,
+  HOLE_SIZE_MAX: 3,
   /** Planar hull-local distance a pirate can reach a hole from to plank it.
    *  Server truth; the client prompt mirrors it exactly. */
   HOLE_REPAIR_REACH: 2.2,

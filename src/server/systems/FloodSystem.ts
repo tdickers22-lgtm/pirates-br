@@ -3,13 +3,13 @@
 // and read the shared Torricelli law (src/shared/flooding/floodModel.ts) and
 // fill table (src/shared/flooding/hullVolume.ts). PhysicsSystem re-exports
 // every name, so its callers and the suites keep their imports.
-import type { Ship, ShipHole, ShipHoleSource } from '../../shared/types/index.js';
+import type { Ship, ShipHole, ShipHoleSize, ShipHoleSource } from '../../shared/types/index.js';
 import { FLOODING, SHIP, SHIP_STATS, SHIP_UPGRADES } from '../../shared/constants/index.js';
 import { countOpenHoles, getShipHoleTier } from '../../shared/interactions.js';
 // Circular with PhysicsSystem, read only at call time (never at module eval).
 import { HULL_IMPACT } from './PhysicsSystem.js';
 import { clamp, gerstnerHeight, WAVE_PARAMS } from '../../shared/utils/index.js';
-import { holeIngress, holeInsideHead, holeSizeArea, waterlineHoleIngress } from '../../shared/flooding/floodModel.js';
+import { holeIngress, holeInsideHead, holeSize, holeSizeArea, waterlineHoleIngress } from '../../shared/flooding/floodModel.js';
 
 /** A hull with every slot an OPEN breach is "shot to pieces" (liveplay-v02):
  *  a wetter shot EVICTS the driest open hole (moves it down to the new point,
@@ -73,8 +73,7 @@ export function evaluateHoleFlood(ship: Ship, t: number, storm = 0): HoleFlood[]
     const surfaceY = gerstnerHeight(worldX, worldZ, t, WAVE_PARAMS, storm);
     const depth = surfaceY - holeY;
     const insideHead = holeInsideHead(ship.type, fill, hole.y);
-    const size = (hole as ShipHole & { size?: number }).size;
-    const ingress = holeIngress(ship.type, holeSizeArea(size), depth, insideHead);
+    const ingress = holeIngress(ship.type, holeSizeArea(hole.size), depth, insideHead);
     out.push({
       hole,
       depth,
@@ -183,8 +182,13 @@ export function openShipHoles(
   local: { x: number; y: number; z: number },
   count = 1,
   source?: ShipHoleSource,
+  size: number = 1,
 ): ShipHole[] {
   if (count <= 0) return [];
+  const tornSize = holeSize(size);
+  // Siblings of ONE event never widen each other (a keg face or a fast
+  // grounding stays a cluster); only a LATER hit enlarges a wound.
+  const touched = new Set<ShipHole>();
   if (!Array.isArray(ship.holes)) ship.holes = [];
   const stats = SHIP_STATS[ship.type];
   // Ceiling = the topside limit: a ball that struck the sheer strake leaves
@@ -209,16 +213,59 @@ export function openShipHoles(
       y: clamp(local.y - (i === 0 ? 0 : Math.abs(Math.sin(angle)) * 0.12), -stats.height * 0.35, maxY),
       z: clamp(local.z + Math.sin(angle) * spread, -stats.length * 0.5, stats.length * 0.5),
     };
-    opened.push(placeShipHole(ship, point, source));
+    const hole = placeShipHole(ship, point, source, tornSize, touched);
+    touched.add(hole);
+    opened.push(hole);
   }
   ship.repairCooldown = Math.max(ship.repairCooldown, SHIP.FIELD_REPAIR_DELAY);
   ship.autoRepairProgress = 0;
   return opened;
 }
 
+/** The hole a hit at `point` lands in (b2.2b, holes-04): the nearest OPEN
+ *  hole within HOLE_ENLARGE_RADIUS, else the nearest PATCHED one there, else
+ *  null (a fresh wound). `skip` = entities this same event already touched. */
+export function holeHitAt(
+  ship: Ship,
+  point: { x: number; y: number; z: number },
+  skip?: ReadonlySet<ShipHole>,
+): ShipHole | null {
+  const r2 = FLOODING.HOLE_ENLARGE_RADIUS * FLOODING.HOLE_ENLARGE_RADIUS;
+  let open: ShipHole | null = null;
+  let openSq = r2;
+  let patched: ShipHole | null = null;
+  let patchedSq = r2;
+  for (const hole of ship.holes ?? []) {
+    if (skip?.has(hole)) continue;
+    const d2 = (hole.x - point.x) ** 2 + (hole.y - point.y) ** 2 + (hole.z - point.z) ** 2;
+    if (hole.patched) {
+      if (d2 <= patchedSq) { patchedSq = d2; patched = hole; }
+    } else if (d2 <= openSq) { openSq = d2; open = hole; }
+  }
+  return open ?? patched;
+}
+
 /** Insert one breach entity, recycling the nearest patched slot when the hull
- *  is at its wire/shader cap. */
-function placeShipHole(ship: Ship, point: { x: number; y: number; z: number }, source?: ShipHoleSource): ShipHole {
+ *  is at its wire/shader cap. A hit within HOLE_ENLARGE_RADIUS of an existing
+ *  hole never makes a new entity: an open hole widens (size + 1, or the torn
+ *  size if bigger, cap HOLE_SIZE_MAX), a patched one loses its plank and
+ *  reopens at its old size (or the torn size if bigger). */
+function placeShipHole(
+  ship: Ship,
+  point: { x: number; y: number; z: number },
+  source: ShipHoleSource | undefined,
+  tornSize: ShipHoleSize,
+  skip: ReadonlySet<ShipHole>,
+): ShipHole {
+  const struck = holeHitAt(ship, point, skip);
+  if (struck) {
+    const old = holeSize(struck.size);
+    const next = struck.patched ? Math.max(old, tornSize) : Math.min(FLOODING.HOLE_SIZE_MAX, Math.max(old + 1, tornSize));
+    setHoleSize(struck, next);
+    struck.patched = false;
+    if (source) struck.source = source;
+    return struck;
+  }
   if (ship.holes.length < FLOODING.MAX_HOLES_PER_SHIP) {
     const hole: ShipHole = {
       id: ship.nextHoleId ?? (ship.nextHoleId = 1),
@@ -227,6 +274,7 @@ function placeShipHole(ship: Ship, point: { x: number; y: number; z: number }, s
       z: point.z,
       patched: false,
       tier: getShipHoleTier(point.y, SHIP_STATS[ship.type]),
+      ...(tornSize > 1 ? { size: tornSize } : {}),
       ...(source ? { source } : {}),
     };
     ship.nextHoleId = hole.id + 1;
@@ -269,6 +317,42 @@ function placeShipHole(ship: Ship, point: { x: number; y: number; z: number }, s
   // A recycled slot MOVED: re-stamp its tier or the breach lies about its
   // height for the rest of the match (the wire byte the client reads).
   victim.tier = getShipHoleTier(point.y, SHIP_STATS[ship.type]);
+  // A recycled slot is a NEW wound at the new point: it takes the torn size.
+  setHoleSize(victim, tornSize);
   if (source) victim.source = source;
   return victim;
+}
+
+/** Write a size, keeping size 1 implicit (absent) so the entity and the wire
+ *  stay as small as before for the common hole. */
+function setHoleSize(hole: ShipHole, size: number): void {
+  const s = holeSize(size);
+  if (s > 1) hole.size = s;
+  else delete hole.size;
+}
+
+/**
+ * The breach a carpenter (bot) should plank first (b2.2b): the one letting in
+ * the most water NOW (Torricelli ingress = area x sqrt(head), so biggest and
+ * deepest first), then the biggest, then the lowest, then the lowest id so a
+ * bot never dithers between equals. Deterministic, no RNG.
+ */
+export function pickRepairTargetHole(ship: Ship, t: number, storm = 0): ShipHole | null {
+  const ingress = new Map<ShipHole, number>();
+  for (const h of evaluateHoleFlood(ship, t, storm)) ingress.set(h.hole, h.ingress);
+  let best: ShipHole | null = null;
+  let bestQ = -1;
+  for (const hole of ship.holes ?? []) {
+    if (hole.patched) continue;
+    const q = ingress.get(hole) ?? 0;
+    if (!best) { best = hole; bestQ = q; continue; }
+    const bs = holeSize(best.size);
+    const hs = holeSize(hole.size);
+    const better = q > bestQ + 1e-9
+      || (Math.abs(q - bestQ) <= 1e-9 && (hs > bs
+        || (hs === bs && (hole.y < best.y - 1e-6
+          || (Math.abs(hole.y - best.y) <= 1e-6 && hole.id < best.id)))));
+    if (better) { best = hole; bestQ = q; }
+  }
+  return best;
 }

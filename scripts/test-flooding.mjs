@@ -30,7 +30,7 @@ import {
   toShipLocalPoint,
 } from '../src/shared/interactions.ts';
 import { angleWrap, sampleWind, gerstnerHeight, WAVE_PARAMS } from '../src/shared/utils/index.ts';
-import { floodSettle, holeIngress, waterlineHoleIngress } from '../src/shared/flooding/floodModel.ts';
+import { floodSettle, holeIngress, holeRepairTime, holeSizeArea, holeVisualRadius, waterlineHoleIngress } from '../src/shared/flooding/floodModel.ts';
 
 // THIS SUITE PINS THE WORLD. Every block below that builds a real `new Match()`
 // (the founder scene, the pump, the sealed hold) inherits `this.rng` from
@@ -1027,6 +1027,95 @@ console.log('\nNobody drowns in a sealed hold: she fills, and the hand below com
   expect('he is clear of her beam, not inside her hull',
     Math.hypot(below.position.x - ship.position.x, below.position.z - ship.position.z) > stats.width * 0.5,
     `dist=${Math.hypot(below.position.x - ship.position.x, below.position.z - ship.position.z).toFixed(2)} beam=${stats.width}`);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+console.log('\nHole sizes 1-3: a hit near a wound widens it, a bigger breach takes longer to plank (b2.2b, holes-04)');
+
+{
+  const physics = new PhysicsSystem();
+  const ship = makeShip('sloop');
+  const x = SHIP_STATS.sloop.width * 0.45;
+  const at = (dz) => ({ x, y: 0.2, z: dz });
+  const [first] = physics.openHoleAt(ship, at(0), 1, 'cannon');
+  physics.openHoleAt(ship, at(0.3), 1, 'cannon');
+  expect('2 balls 0.3 m apart -> ONE hole of size 2', ship.holes.length === 1 && ship.holes[0].size === 2,
+    `holes=${ship.holes.length} sizes=${ship.holes.map((h) => h.size ?? 1).join(',')}`);
+  physics.openHoleAt(ship, at(-0.3), 1, 'cannon');
+  expect('3 balls -> size 3', ship.holes.length === 1 && ship.holes[0].size === 3,
+    `holes=${ship.holes.length} sizes=${ship.holes.map((h) => h.size ?? 1).join(',')}`);
+  const nextIdBefore = ship.nextHoleId;
+  const [fourth] = physics.openHoleAt(ship, at(0.15), 1, 'cannon');
+  expect('a 4th ball -> still size 3 and no new entity',
+    ship.holes.length === 1 && ship.holes[0].size === 3 && fourth.id === first.id && ship.nextHoleId === nextIdBefore,
+    `holes=${ship.holes.length} size=${ship.holes[0].size} id ${first.id}/${fourth.id}`);
+  const q1 = holeIngress('sloop', holeSizeArea(1), 0.3, 0);
+  const q3 = holeIngress('sloop', holeSizeArea(3), 0.3, 0);
+  expect('a size-3 hole takes 2.8x the water of a size-1 at the same head', Math.abs(q3 / q1 - 2.8) < 1e-6,
+    `ratio=${(q3 / q1).toFixed(3)}`);
+  expect('render radius / repair time follow the size (0.16/0.24/0.31 m, 1.6/2.4/3.2 s)',
+    [1, 2, 3].map(holeVisualRadius).join() === '0.16,0.24,0.31' && [1, 2, 3].map(holeRepairTime).join() === '1.6,2.4,3.2');
+
+  const spaced = makeShip('sloop');
+  physics.openHoleAt(spaced, at(0), 1, 'cannon');
+  physics.openHoleAt(spaced, at(1.0), 1, 'cannon');
+  expect('1.0 m apart -> 2 holes of size 1', spaced.holes.length === 2 && spaced.holes.every((h) => (h.size ?? 1) === 1),
+    `holes=${spaced.holes.length}`);
+
+  const cluster = makeShip('sloop');
+  physics.openHoleAt(cluster, at(0), 3, 'keg', 2);
+  expect('siblings of ONE event stay a cluster (keg face: 3 entities, the torn size 2 each)',
+    cluster.holes.length === 3 && cluster.holes.every((h) => h.size === 2),
+    `holes=${cluster.holes.length} sizes=${cluster.holes.map((h) => h.size ?? 1).join(',')}`);
+
+  const planked = makeShip('sloop');
+  const [p2] = physics.openHoleAt(planked, at(0), 1, 'cannon');
+  physics.openHoleAt(planked, at(0.2), 1, 'cannon');
+  physics.patchHole(planked, p2.id);
+  physics.openHoleAt(planked, at(0.25), 1, 'cannon');
+  expect('a hit on a PATCHED hole knocks the plank off at its old size (no new entity)',
+    planked.holes.length === 1 && !planked.holes[0].patched && planked.holes[0].size === 2,
+    `holes=${planked.holes.length} patched=${planked.holes[0].patched} size=${planked.holes[0].size}`);
+}
+
+{
+  // Held input on the REAL Match repair block: a size-3 breach needs >= 3.0 s.
+  const heldToPlank = (size) => {
+    const match = new Match({ matchId: `hole-size-${size}`, botCount: 1 });
+    match.state.phase = 'playing';
+    const ship = match.state.ships[0];
+    const stats = SHIP_STATS[ship.type];
+    ship.holes = [];
+    ship.anchored = false;
+    const [h] = match.physics.openHoleAt(ship, { x: stats.width * 0.45, y: 0.05, z: 0 }, 1, 'cannon', size);
+    const player = match.state.players.find((p) => p.shipId === ship.id) ?? match.state.players[0];
+    player.onShipId = ship.id;
+    player.atCannon = false; player.atHelm = false; player.atCrowNest = false;
+    player.pocketWood = 5;
+    const lx = stats.width * 0.45;
+    const cos = Math.cos(ship.rotation);
+    const sin = Math.sin(ship.rotation);
+    // In the hold beside a LOW breach (the SINK-01 3D reach rule).
+    player.position = {
+      x: ship.position.x + lx * 0.4 * cos,
+      y: ship.position.y + SHIP.HOLD_FLOOR_OFFSET,
+      z: ship.position.z - lx * 0.4 * sin,
+    };
+    const reach = findRepairableHole(player.position, ship)?.id === h.id;
+    const client = { playerId: player.id, appliedInputSeq: 0, consumedSeq: {}, lastOneShotAt: {} };
+    const dt = 1 / 30;
+    let held = 0;
+    for (let seq = 1; seq < 400 && !h.patched; seq += 1) {
+      match.applyInput(client, { seq, yaw: 0, pitch: 0, interactHeld: true, interactIntent: 'repair' }, dt);
+      held += dt;
+    }
+    return { reach, held: h.patched ? held : Infinity };
+  };
+  const s1 = heldToPlank(1);
+  const s3 = heldToPlank(3);
+  expect('repair fixture: the pirate can reach the breach', s1.reach && s3.reach, `reach ${s1.reach}/${s3.reach}`);
+  expect('a size-1 hole planks in ~1.6 s of held input', s1.held > 1.5 && s1.held < 1.8, `held=${s1.held.toFixed(2)} s`);
+  expect('a size-3 repair needs >= 3.0 s of held input', s3.held >= 3.0 && s3.held < 3.5, `held=${s3.held.toFixed(2)} s`);
 }
 
 if (failures > 0) {

@@ -88,7 +88,8 @@ function stripPlayerInternals(player: Player): Player {
  *   · `source` is server flavour (fire chars burn downward) — dropped.
  *   · `patched` only ships when TRUE; absent reads as an open breach.
  *   · coordinates quantize to 2 dp (1 cm) with quantizeDeep, far finer than
- *     the HOLE_VISUAL_RADIUS 0.26 m decal needs.
+ *     the 0.16-0.31 m (HOLE_SIZE_RADIUS) decal needs.
+ *   · `size` ships only when > 1 (absent = 1).
  * That is ~31 B for an open breach against ~70 B for the raw entity.
  */
 function stripShipInternals(ship: Ship): Ship {
@@ -98,9 +99,15 @@ function stripShipInternals(ship: Ship): Ship {
     // `tier` is the ONE added byte per breach (SINK-01): the height class the
     // server stamped at placement, so the client renders/announces LOW/MID/HIGH
     // without re-deriving it from y and the hull class.
-    holes: holes.map((hole) => (hole.patched
-      ? { id: hole.id, x: hole.x, y: hole.y, z: hole.z, tier: hole.tier, patched: true }
-      : { id: hole.id, x: hole.x, y: hole.y, z: hole.z, tier: hole.tier })),
+    // `size` (b2.2b) rides the same way as `patched`: only when it is not the
+    // default 1, so a fleet of plain holes pays nothing and a widened breach
+    // pays one digit.
+    holes: holes.map((hole) => {
+      const wireHole: Record<string, unknown> = { id: hole.id, x: hole.x, y: hole.y, z: hole.z, tier: hole.tier };
+      if ((hole.size ?? 1) > 1) wireHole.size = hole.size;
+      if (hole.patched) wireHole.patched = true;
+      return wireHole;
+    }),
   } as unknown as Ship;
 }
 

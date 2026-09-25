@@ -19,6 +19,8 @@ import {
 import { MapGenerator } from '../world/MapGenerator.js';
 import type { HullImpactKind } from '../systems/PhysicsSystem.js';
 import { PhysicsSystem, applyShipRudderSteering, stormSeaState, FOUNDER_DECK_AWASH_F, FOUNDER_WADE_DEPTH } from '../systems/PhysicsSystem.js';
+import { pickRepairTargetHole } from '../systems/FloodSystem.js';
+import { holeRepairTime } from '../../shared/flooding/floodModel.js';
 import { buildInputAck, buildHotSnapshot, buildWireSnapshot } from './snapshot.js';
 import { WeaponSystem } from '../systems/WeaponSystem.js';
 import type { HitscanTrace } from '../systems/WeaponSystem.js';
@@ -3309,7 +3311,8 @@ export class Match {
         && !player.atCannon && !player.atHelm && !player.atCrowNest;
       const hullRepairTarget = mendingHull ? this.getRepairableHole(player, ship) : null;
       if (hullRepairTarget && getRepairPlankCount(player, ship) > 0) {
-        player.hullRepairProgress = Math.min(1, player.hullRepairProgress + dt / SHIP.HULL_REPAIR_SWING_TIME);
+        // b2.2b: a bigger breach takes longer (1.6 / 2.4 / 3.2 s of held input).
+        player.hullRepairProgress = Math.min(1, player.hullRepairProgress + dt / holeRepairTime(hullRepairTarget.size));
         if (player.hullRepairProgress >= 1) {
           player.hullRepairProgress = 0;
           if (this.consumeRepairPlank(player, ship)) {
@@ -4585,7 +4588,10 @@ export class Match {
         if (this.getRepairableHole(player, ship)?.id === targetHole.id) {
           if (this.consumeRepairPlank(player, ship)) {
             this.physics.patchHole(ship, targetHole.id);
-            this.botRepairCooldownAt.set(player.id, this.t + SHIP.FIELD_REPAIR_INTERVAL);
+            // A bigger breach keeps the bot at it longer (b2.2b): the size-1
+            // repair time is already inside FIELD_REPAIR_INTERVAL.
+            this.botRepairCooldownAt.set(player.id, this.t + SHIP.FIELD_REPAIR_INTERVAL
+              + holeRepairTime(targetHole.size) - FLOODING.HOLE_REPAIR_TIME[0]);
           }
         } else {
           const stand = this.getHoleWorkStandLocal(player, ship, targetHole);
@@ -4690,14 +4696,9 @@ export class Match {
   /** The breach a damage-control bot (or the anchored auto-carpenter) plugs
    *  first: the deepest-sitting open hole, tie-broken by age. */
   private getBotRepairTargetHole(ship: Ship): ShipHole | null {
-    let best: ShipHole | null = null;
-    for (const hole of ship.holes ?? []) {
-      if (hole.patched) continue;
-      if (!best || hole.y < best.y - 1e-6 || (Math.abs(hole.y - best.y) <= 1e-6 && hole.id < best.id)) {
-        best = hole;
-      }
-    }
-    return best;
+    // b2.2b: biggest-deepest first = the breach letting in the most water
+    // under the live sea (size area x sqrt head), ties by size, height, id.
+    return pickRepairTargetHole(ship, this.t, stormSeaState(this.state.storm, ship.position.x, ship.position.z));
   }
 
   /**
@@ -5811,12 +5812,9 @@ export class Match {
         if (!ship || player.onShipId !== ship.id) return this.refuse('not_aboard');
         const repairHole = this.getRepairableHole(player, ship);
         if (!repairHole) return this.refuse('nothing_there');
-        if (!this.consumeRepairPlank(player, ship)) return this.refuse('no_plank');
-        this.physics.patchHole(ship, repairHole.id);
-        if (ship.onFire) {
-          ship.fireTimer = Math.max(0, ship.fireTimer - SHIP.FIRE_REPAIR_DOUSE_TIME);
-          if (ship.fireTimer <= 0) { ship.onFire = false; ship.fireTimer = 0; ship.fireDamageAccum = 0; }
-        }
+        if (getRepairPlankCount(player, ship) <= 0) return this.refuse('no_plank');
+        // b2.2b: the press only starts the job. The plank goes in through the
+        // held hammer block (holeRepairTime by size), never on a tap.
         return true;
       }
       case 'bail': {
