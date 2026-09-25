@@ -90,6 +90,7 @@ import {
 import { stepPirate } from '../../shared/locomotion.js';
 import { hullPointVelocity, hullRatesOf } from '../../shared/ballistics.js';
 import { sanitizePlayerInput } from '../net/validate.js';
+import { TickProfiler, type TickCost } from './TickProfiler.js';
 
 // Weathered banner dyes — team identity without the LED-strip look.
 const TEAM_COLORS = [
@@ -674,6 +675,9 @@ export class Match {
   private readonly lastToolEquip = new Map<string, { tool: EquippableTool; at: number }>();
   /** Ship waterLevel at tick start — floodingRate is published NET of bailing. */
   private waterLevelAtTickStart = new Map<string, number>();
+  /** performance-13: per-phase ms of every playing tick (p50/p99 on /health). */
+  readonly tickProfiler = new TickProfiler();
+  tickCost(): TickCost { return this.tickProfiler.stats(); }
   /** Hands on each ship's capstan last tick (D22: 3.2 s solo, 2.0 s with two). */
   private capstanHands = new Map<string, number>();
   /** Axe-swing accumulation per player — resets when the target prop changes
@@ -2452,6 +2456,8 @@ export class Match {
     }
     if (this.state.phase !== 'playing') return;
     this.state.serverTime = this.t;
+    const prof = this.tickProfiler;
+    prof.begin();
 
     // Pre-tick water levels — floodingRate is published NET of bailing at the
     // end of the tick (bailers seeing a red "rising" arrow while winning was
@@ -2490,6 +2496,7 @@ export class Match {
     // and before physics integrates — a laden hull must sail at laden speed on
     // the very tick her cargo changed.
     this.updateCargoAndBounty();
+    prof.lap('inputs');
 
     // Dev-only bot-peace (solo testing): bots ignore the human + their ship as
     // targets while still fighting each other. Empty sets = normal aggression.
@@ -2518,6 +2525,7 @@ export class Match {
       this.state.seaRocks,
     );
     // Resolve any personal-weapon shots fired by bots this tick.
+    prof.lap('bots');
     for (const shot of this.bots.flushFirearmShots()) {
       const shooter = this.playersById.get(shot.playerId);
       if (!shooter || shooter.state === 'eliminated') continue;
@@ -2543,6 +2551,7 @@ export class Match {
     // Flush new projectiles
     const newProjs = this.weapons.flushProjectiles();
     this.state.projectiles.push(...newProjs);
+    prof.lap('combat');
 
     // Physics — storm state rides along so every wave sample (buoyancy,
     // attitude, flooding waterlines, swimmers, projectiles) sees storm seas.
@@ -2572,10 +2581,12 @@ export class Match {
       ship.floodingRate = Math.abs(net) < 1e-6 ? 0 : net;
     }
 
+    prof.lap('physics');
     this.updateSharks(dt);
     this.updateWildlife(dt);
     // Sunken cargo: claimable by any swimmer, taken by the tide on a timer.
     this.updateSpoils();
+    prof.lap('wildlife');
 
     // Storm — routes through openHole so the tempest punches real holes into
     // the seaward face (holes + flooding), the SoT damage loop.
@@ -2605,6 +2616,7 @@ export class Match {
     // Both witnesses have spoken: ship whatever they banked, so no loss of
     // health is ever silent (see noteEnvironmentalDamage).
     this.flushEnvironmentalDamage();
+    prof.lap('storm');
     // Runs immediately after the storm, because the whole event is keyed to the
     // ring: she rises at the announced next centre and the tempest takes her back.
     this.updateWreckEvent();
@@ -2649,6 +2661,7 @@ export class Match {
 
     // Check win condition
     this.checkWinCondition();
+    prof.lap('rest');
 
     // Send snapshots: quantized full state at ~10.4 Hz, light 'state_hot'
     // transform updates on the snapshot ticks in between (31.25 Hz total).
@@ -2686,6 +2699,7 @@ export class Match {
         this.broadcastInputAcks();
       }
     }
+    prof.end();
   }
 
   /** PRED-01: one ~70 B receipt per client per hot tick, so a client that
