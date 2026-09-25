@@ -57,7 +57,29 @@ def export(arm, meshes, path):
     for m in meshes:
         m.select_set(True)
     bpy.ops.export_scene.gltf(filepath=path, export_format="GLB", use_selection=True, export_image_format="NONE",
-                              export_animations=False, export_skins=True, export_yup=True, export_apply=False)
+                              export_animations=False, export_skins=True, export_yup=True, export_apply=False,
+                              export_extras=True)   # hair pirateDefault, brows castShadow, lid closeDeg, hairTint
+    tint_factors(path)
+
+
+def tint_factors(path):
+    """R1 F3: write each hair material's extras.hairTint as its glTF baseColorFactor (the exporter drops the
+    Mix-node constant when images are not embedded). Rewrites the JSON chunk only; the BIN chunk is untouched."""
+    import struct
+    with open(path, "rb") as f:
+        buf = f.read()
+    jl = struct.unpack_from("<I", buf, 12)[0]
+    gltf = json.loads(buf[20:20 + jl])
+    for m in gltf.get("materials", []):
+        t = (m.get("extras") or {}).get("hairTint")
+        if t:
+            m.setdefault("pbrMetallicRoughness", {})["baseColorFactor"] = [round(x, 4) for x in t] + [1.0]
+    js = json.dumps(gltf, separators=(",", ":")).encode()
+    js += b" " * (-len(js) % 4)
+    rest = buf[20 + jl:]
+    out = struct.pack("<III", 0x46546C67, 2, 12 + 8 + len(js) + len(rest)) + struct.pack("<II", len(js), 0x4E4F534A) + js + rest
+    with open(path, "wb") as f:
+        f.write(out)
 
 
 def setup_render(night):
@@ -132,7 +154,7 @@ def main():
     built = {}
     for body_id in ("male", "female", "stout"):
         rep = {}
-        arm, meshes = imp.build_base(body_id, rep, do_retarget=not RAW)
+        arm, meshes = imp.build_base(body_id, rep, do_retarget=not RAW, out_dir=OUT)
         imp.repoint_images(rep)
         report["bodies"][body_id] = rep[body_id] | {k: v for k, v in rep.items() if k != body_id}
         report["materials"].update(material_slots(meshes))
@@ -169,12 +191,27 @@ def main():
         tgt = (mid.x, mid.y, imp.HEAD_Y)
         camera((tgt[0], tgt[1] - 1.0, tgt[2] + 0.02), tgt, lens=50)
         render(os.path.join(SHEET, f"face-1m-{tag}.png"))
+        # R1 F4: the same shot with both lids closed by their bones (closeDeg about the rig X axis, as b3.2g will)
+        male.rotation_mode = "XYZ"
+        for s in "lr":
+            pb = male.pose.bones[f"lid_upper_{s}"]
+            pb.rotation_mode = "XYZ"
+            pb.rotation_euler = (0, 0, 0)
+            # bone local X is the rig X for a bone pointing -Y with roll 0; sign so the front edge goes DOWN
+            pb.rotation_euler.x = -math.radians(male.data.bones[f"lid_upper_{s}"]["closeDeg"])
+        bpy.context.view_layer.update()
+        render(os.path.join(SHEET, f"face-1m-{tag}-lids-closed.png"))
+        for s in "lr":
+            male.pose.bones[f"lid_upper_{s}"].rotation_euler = (0, 0, 0)
         male.rotation_euler.z = 0
     setup_render(False)
-    for x, b in zip((-0.9, 0.0, 0.9), ("female", "male", "stout")):
+    for x, b in zip((-2.0, 0.0, 2.0), ("female", "male", "stout")):   # R1 obs: >= 2.0 m so T-pose arms never overlap
         built[b][0].location.x = x
-    camera((0, -5.4, 1.1), (0, 0, 0.95), lens=45)
+    camera((0, -8.4, 1.1), (0, 0, 0.95), lens=40)
     render(os.path.join(SHEET, "bodies-lineup-noon.png"))
+    for b, x in (("male", 0.0), ("stout", 2.0)):   # R1 F1/F2: the torsos close up (abs, gut, deltoids, lats)
+        camera((x, -2.2, 1.15), (x, 0, 1.1), lens=50)
+        render(os.path.join(SHEET, f"torso-{b}-front-noon.png"))
     for b in built:   # the same three in profile: the stout's gut and the female's shape read from the side
         built[b][0].rotation_euler.z = math.radians(90)
     render(os.path.join(SHEET, "bodies-lineup-side-noon.png"))

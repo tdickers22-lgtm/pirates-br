@@ -42,6 +42,17 @@ BODIES = {
     "stout": ("Superhero_Male_FullBody.gltf", ["Hair_Buzzed", "Hair_Beard", "Hair_SimpleParted"], True),
 }
 DEFAULT_HAIR = {"male": {"Hair_SimpleParted", "Hair_Beard"}, "female": {"Hair_Buns"}, "stout": {"Hair_Buzzed", "Hair_Beard"}}
+# R1 F3: the kit hair texture is a grey (mean 143) map meant to be tinted. The tint is a material factor on
+# every hair, beard and brows material (glTF baseColorFactor + extras.hairTint, so b3.2c/b3.2e can re-tint
+# variants). Linear RGB, dark defaults.
+HAIR_TINT = {"male": (0.050, 0.032, 0.020), "female": (0.085, 0.046, 0.026), "stout": (0.042, 0.030, 0.022)}
+# R1 F2 ("SoT family, not superhero"): how far each region's kit normal map is flattened toward (0.5, 0.5, 1)
+# (1 - strength): the shredded 8-pack, striated deltoids and pec lines drop to ~0.35 strength; face, hands and
+# feet keep the full map. The stout's belly/chest are flattened fully (R1 F1: no abs printed on a gut).
+NORMAL_FLATTEN = {"pelvis": 0.65, "spine_01": 0.65, "spine_02": 0.65, "spine_03": 0.65, "clavicle_l": 0.65,
+                  "clavicle_r": 0.65, "neck_01": 0.4, "upperarm_l": 0.6, "upperarm_r": 0.6, "lowerarm_l": 0.4,
+                  "lowerarm_r": 0.4, "thigh_l": 0.5, "thigh_r": 0.5, "calf_l": 0.3, "calf_r": 0.3}
+LID_OVERLAP_DEG = 4.0
 
 
 def _import(path):
@@ -213,62 +224,469 @@ def retarget(arm, body, meshes):
     return measure(arm, body)
 
 
-def stoutify(arm, body):
-    """Third body type: a heavy-set sailor on the same skeleton (bone lengths untouched, so every clip and the
-    HEAD_Y retarget still hold). Three vertex-only edits, each weighted by the skin so joints blend:
-      * mass: a normal offset over the trunk and the upper limbs (thicker neck, arms, thighs);
-      * waist: the trunk pushed out sideways around the navel, widest at the belly, fading to the chest and hips;
-      * belly: the front of the trunk pushed forward around the navel (a round gut, not a uniform inflate).
-    b3.2a first shipped a 3.2 cm offset only, which read as the male body at R1 (lineup); these numbers were
-    set against the lineup render so the stout reads at 20 m from the front AND the side."""
-    mass = {"spine_01": 1.0, "spine_02": 1.0, "pelvis": 0.8, "spine_03": 0.6, "neck_01": 0.5, "clavicle_l": 0.4,
-            "clavicle_r": 0.4, "thigh_l": 0.55, "thigh_r": 0.55, "upperarm_l": 0.45, "upperarm_r": 0.45,
-            "calf_l": 0.25, "calf_r": 0.25, "lowerarm_l": 0.3, "lowerarm_r": 0.3}
-    trunk = {"spine_01": 1.0, "spine_02": 1.0, "pelvis": 0.75, "spine_03": 0.5}
+def _positions(body):
+    """Welded positions of the body: {rounded world pos: [normal sum, {group: weight sum}, count, [vertex idx]]}.
+    The kit splits vertices along UV seams and layers the briefs over the skin, so every vertex edit here is
+    made once per POSITION (averaged normal and weights) or the trunk tears open at the seams."""
     gi = {g.index: g.name for g in body.vertex_groups}
-    bones = arm.data.bones
-    mw = arm.matrix_world
-    z_belly = (mw @ bones["spine_01"].head_local).z * 0.35 + (mw @ bones["spine_02"].head_local).z * 0.65
-    span = (mw @ bones["spine_03"].head_local).z - (mw @ bones["pelvis"].head_local).z   # hip -> chest
-    y_spine = (mw @ bones["spine_01"].head_local).y     # the spine runs near the back; the gut is in front of it
     bw = body.matrix_world
-    r, rinv = bw.to_3x3(), bw.inverted().to_3x3()      # edits are made in world space (front = -Y, up = +Z)
-    me = body.data
-    # One offset per POSITION, not per vertex: the kit splits vertices along UV seams and layers the briefs
-    # over the skin, so per-vertex normals tore the trunk open at the seams (seen in the first R1 side view).
-    # Normals and weights are averaged over each welded position; waist and belly are smooth fields of the
-    # position alone, so coincident vertices and the briefs over the skin move together.
+    r = bw.to_3x3()
     acc = {}
-    for v in me.vertices:
+    for v in body.data.vertices:
         p = bw @ v.co
         k = (round(p.x, 4), round(p.y, 4), round(p.z, 4))
-        wm = min(1.0, sum(g.weight * mass.get(gi[g.group], 0) for g in v.groups if g.group in gi))
-        wt = min(1.0, sum(g.weight * trunk.get(gi[g.group], 0) for g in v.groups if g.group in gi))
-        e = acc.setdefault(k, [Vector(), 0.0, 0.0, 0, []])
+        e = acc.setdefault(k, [Vector(), {}, 0, []])
         e[0] += (r @ v.normal).normalized()
-        e[1] += wm
-        e[2] += wt
-        e[3] += 1
-        e[4].append(v.index)
-    for k, (nsum, wm, wt, cnt, idxs) in acc.items():
-        wm, wt = wm / cnt, wt / cnt
-        if wm <= 0 and wt <= 0:
-            continue
-        p = Vector(k)
+        for g in v.groups:
+            if g.group in gi:
+                e[1][gi[g.group]] = e[1].get(gi[g.group], 0.0) + g.weight
+        e[2] += 1
+        e[3].append(v.index)
+    return acc
+
+
+def _move(body, acc, field):
+    """field(p, n, w) -> world offset per welded position (w = averaged group weights)."""
+    rinv = body.matrix_world.inverted().to_3x3()
+    me = body.data
+    for k, (nsum, wsum, cnt, idxs) in acc.items():
+        w = {g: x / cnt for g, x in wsum.items()}
         n = nsum.normalized() if nsum.length > 1e-9 else Vector()
-        off = n * (0.030 * wm)
-        if wt > 0:
-            fall = math.exp(-(((p.z - z_belly) / (0.55 * span)) ** 2))
-            off.x += 0.040 * wt * fall * math.tanh(p.x / 0.06)
-            front = min(1.0, max(0.0, (y_spine - p.y) / 0.16))
-            off.y -= 0.075 * wt * fall * front * front * (3 - 2 * front)
+        off = field(Vector(k), n, w)
+        if off is None or off.length == 0:
+            continue
         d = rinv @ off
         for i in idxs:
             me.vertices[i].co += d
     me.update()
 
 
-def build_base(body_id, report, do_retarget=True):
+def _smooth(e0, e1, x):
+    t = min(1.0, max(0.0, (x - e0) / (e1 - e0)))
+    return t * t * (3 - 2 * t)
+
+
+def _jw(arm, name):
+    return arm.matrix_world @ arm.data.bones[name].head_local
+
+
+def soften_physique(arm, body):
+    """R1 F2: every body keeps the kit's 'Superhero' V-taper. Vertex-only (bone lengths untouched):
+      * deltoid: positions around each shoulder joint pulled toward the arm axis (30% of their radius at the
+        joint, Gaussian 9 cm), so the capped, striated shoulder reads as a working sailor's;
+      * lat flare: trunk positions between spine_02 and the armpit pulled in sideways (20% of their width
+        beyond 9 cm), which flattens the V-taper without touching the waist or the arms."""
+    sh = {s: (_jw(arm, f"upperarm_{s}"), (_jw(arm, f"lowerarm_{s}") - _jw(arm, f"upperarm_{s}")).normalized()) for s in "lr"}
+    z_lo = _jw(arm, "spine_02").z
+    z_hi = sh["l"][0].z - 0.03
+    acc = _positions(body)
+
+    def field(p, n, w):
+        tot = sum(w.values()) or 1.0
+        off = Vector()
+        s = "l" if p.x > 0 else "r"
+        j, ax = sh[s]
+        share = sum(w.get(g, 0) for g in (f"upperarm_{s}", f"clavicle_{s}", "spine_03")) / tot
+        if share > 0:
+            d = p - j
+            along = d.dot(ax)
+            radial = d - ax * along
+            g = math.exp(-((d.length / 0.09) ** 2)) * share
+            off -= radial * (0.30 * g)
+        trunk = sum(w.get(b, 0) for b in ("spine_02", "spine_03", "spine_01")) / tot
+        if trunk > 0 and abs(p.x) > 0.09:
+            band = _smooth(z_lo - 0.04, z_lo + 0.04, p.z) * (1 - _smooth(z_hi - 0.02, z_hi + 0.04, p.z))
+            off.x -= math.copysign(0.20 * (abs(p.x) - 0.09) * band * trunk, p.x)
+        return off
+    _move(body, acc, field)
+
+
+def stoutify(arm, body):
+    """Third body type: a heavy-set sailor on the same skeleton (bone lengths untouched, so every clip and the
+    HEAD_Y retarget still hold). Vertex-only edits, each weighted by the skin so joints blend:
+      * mass: a normal offset over the trunk and the WHOLE limb chain + neck (R1 F1: the b3.2a2 stout kept the
+        male's arms, thighs and neck, so it only read by its waist);
+      * waist: the trunk pushed out sideways around the navel, widest at the belly, fading to the chest and hips;
+      * belly: the front of the trunk pushed forward around the navel (a round gut, not a uniform inflate);
+      * jowls: the lower face and under-chin filled out (fades out above the mouth; eyes, nose, lids untouched);
+      * shoulder slope: the trapezius raised between the neck and the shoulder, so the shoulder line slopes
+        instead of the male's square V."""
+    mass = {"spine_01": 1.0, "spine_02": 1.0, "pelvis": 0.8, "spine_03": 0.8, "neck_01": 0.9, "clavicle_l": 0.7,
+            "clavicle_r": 0.7, "thigh_l": 0.9, "thigh_r": 0.9, "upperarm_l": 0.8, "upperarm_r": 0.8,
+            "calf_l": 0.45, "calf_r": 0.45, "lowerarm_l": 0.5, "lowerarm_r": 0.5}
+    trunk = {"spine_01": 1.0, "spine_02": 1.0, "pelvis": 0.75, "spine_03": 0.5}
+    z_belly = _jw(arm, "spine_01").z * 0.35 + _jw(arm, "spine_02").z * 0.65
+    span = _jw(arm, "spine_03").z - _jw(arm, "pelvis").z      # hip -> chest
+    y_spine = _jw(arm, "spine_01").y     # the spine runs near the back; the gut is in front of it
+    head_j = _jw(arm, "head")
+    z_sh = _jw(arm, "upperarm_l").z
+    x_sh = abs(_jw(arm, "upperarm_l").x)
+    acc = _positions(body)
+    head_pts = [Vector(k) for k, e in acc.items() if e[1].get("head", 0) / max(1e-9, sum(e[1].values())) >= 0.5]
+    chin = min(p.z for p in head_pts)
+
+    def field(p, n, w):
+        tot = sum(w.values()) or 1.0
+        wm = min(1.0, sum(x * mass.get(g, 0) for g, x in w.items()) / tot)
+        wt = min(1.0, sum(x * trunk.get(g, 0) for g, x in w.items()) / tot)
+        wh = w.get("head", 0) / tot
+        off = n * (0.030 * wm)
+        if wt > 0:
+            fall = math.exp(-(((p.z - z_belly) / (0.55 * span)) ** 2))
+            off.x += 0.040 * wt * fall * math.tanh(p.x / 0.06)
+            front = min(1.0, max(0.0, (y_spine - p.y) / 0.16))
+            off.y -= 0.075 * wt * fall * front * front * (3 - 2 * front)
+        if wh > 0:      # jowls: lower face and under-chin, front and sides only (not the skull)
+            low = 1 - _smooth(chin + 0.025, chin + 0.065, p.z)
+            fwd = 1 - _smooth(head_j.y - 0.01, head_j.y + 0.04, p.y)
+            off += n * (0.010 * wh * low * fwd)
+        ws = sum(w.get(g, 0) for g in ("spine_03", "neck_01", "clavicle_l", "clavicle_r")) / tot
+        if ws > 0 and 0.03 < abs(p.x) < x_sh + 0.02 and p.z > z_sh - 0.03:   # trapezius: slope, not a square yoke
+            bump = math.exp(-(((abs(p.x) - 0.5 * x_sh) / (0.35 * x_sh)) ** 2))
+            off.z += 0.022 * ws * bump * _smooth(z_sh - 0.03, z_sh + 0.03, p.z)
+        return off
+    _move(body, acc, field)
+
+
+def smooth_abs(arm, body, amount, iters):
+    """R1 F1/F2: the kit SCULPTS the 8-pack and pec lines into the trunk geometry (the normal map only
+    sharpens them), so flattening the map alone left them readable. Taubin smoothing (lambda/mu, no volume
+    loss) over welded positions, weighted by trunk share x front-of-spine x ``amount``: the stout gets a
+    smooth gut and chest, the male/female a softened abdomen. Silhouette and bone lengths hold."""
+    acc = _positions(body)
+    keys = list(acc)
+    at = {}
+    for k, e in acc.items():
+        for i in e[3]:
+            at[i] = k
+    nb = {k: set() for k in keys}
+    for ed in body.data.edges:
+        a, b = at[ed.vertices[0]], at[ed.vertices[1]]
+        if a != b:
+            nb[a].add(b)
+            nb[b].add(a)
+    y_spine = _jw(arm, "spine_02").y
+    z_lo, z_hi = _jw(arm, "pelvis").z, _jw(arm, "spine_03").z + 0.12
+    trunk = ("pelvis", "spine_01", "spine_02", "spine_03")
+    f = {}
+    for k, e in acc.items():
+        tot = sum(e[1].values()) or 1.0
+        t = sum(e[1].get(g, 0) for g in trunk) / tot
+        front = _smooth(0.0, 0.05, y_spine - k[1])
+        band = _smooth(z_lo - 0.02, z_lo + 0.06, k[2]) * (1 - _smooth(z_hi - 0.04, z_hi, k[2]))
+        f[k] = amount * t * front * band
+    pos = {k: Vector(k) for k in keys}
+    for it in range(iters * 2):
+        lam = 0.5 if it % 2 == 0 else -0.53
+        new = {}
+        for k in keys:
+            if f[k] <= 0 or not nb[k]:
+                continue
+            avg = sum((pos[n] for n in nb[k]), Vector()) / len(nb[k])
+            new[k] = pos[k] + (avg - pos[k]) * (lam * f[k])
+        pos.update(new)
+    rinv = body.matrix_world.inverted().to_3x3()
+    for k in keys:
+        d = pos[k] - Vector(k)
+        if d.length > 0:
+            for i in acc[k][3]:
+                body.data.vertices[i].co += rinv @ d
+    body.data.update()
+
+
+def add_lid_bones(arm, body, eyes, brows, report):
+    """R1 F4: lid_upper_l / lid_upper_r leaf bones under head, head at the eyeball centre, pointing forward.
+    The upper-lid skin of the body (a radial shell over the front-top of each eyeball, fading to the canthi and
+    to the brow) and the upper lash cards of the brows mesh are weighted to them. Rotating a lid bone about the
+    rig's +X axis (glTF +X too) by ``closeDeg`` closes the lid; see close_lids()."""
+    ev = {"l": [], "r": []}
+    for v in eyes.data.vertices:
+        w = eyes.matrix_world @ v.co
+        ev["l" if w.x > 0 else "r"].append(w)
+    bpy.context.view_layer.objects.active = arm
+    bpy.ops.object.mode_set(mode="EDIT")
+    eb = arm.data.edit_bones
+    cen = {}
+    for s in "lr":
+        c = eb[f"eye_{s}"].head.copy()
+        cen[s] = c
+        b = eb.new(f"lid_upper_{s}")
+        b.head = c
+        b.tail = c + Vector((0, -0.025, 0))
+        b.roll = 0
+        b.parent = eb["head"]
+    bpy.ops.object.mode_set(mode="OBJECT")
+    rmax = {s: max((p - cen[s]).length for p in ev[s]) for s in "lr"}
+
+    def lid_w(p, s):
+        c, r = cen[s], rmax[s]
+        d = p - c
+        a = math.degrees(math.atan2(d.z, -d.y))          # 0 = straight ahead, 90 = straight up
+        shell = 1 - _smooth(r + 0.004, r + 0.011, d.length)
+        corner = 1 - _smooth(0.6 * r, 1.05 * r, abs(d.x))
+        up = _smooth(0.0, 4.0, a) * (1 - _smooth(70.0, 110.0, a))
+        return shell * corner * up
+
+    gi = {g.index: g.name for g in body.vertex_groups}
+    groups = {s: body.vertex_groups.new(name=f"lid_upper_{s}") for s in "lr"}
+    bw = body.matrix_world
+    n_lid = {"l": 0, "r": 0}
+    for v in body.data.vertices:
+        tot = sum(g.weight for g in v.groups) or 1.0
+        if sum(g.weight for g in v.groups if gi.get(g.group) == "head") / tot < 0.5:
+            continue
+        p = bw @ v.co
+        s = "l" if p.x > 0 else "r"
+        w = lid_w(p, s)
+        if w <= 0.01:
+            continue
+        for g in list(v.groups):
+            body.vertex_groups[g.group].add([v.index], g.weight * (1 - w), "REPLACE")
+        groups[s].add([v.index], w * tot, "REPLACE")
+        n_lid[s] += 1
+    # upper lash cards: brows-mesh vertices just above the eye (the kit joins brow and lash strips in one
+    # island, so a whole-island rule dragged the brows down with the lid; R1fix render). Weight fades from 1
+    # at the lid margin to 0 below the brow line, lower lashes (under the eye centre) stay on the head.
+    lash = {"l": [], "r": []}
+    bwm = brows.matrix_world
+    for s_ in "lr":
+        brows.vertex_groups.get(f"lid_upper_{s_}") or brows.vertex_groups.new(name=f"lid_upper_{s_}")
+    for v in brows.data.vertices:
+        p = bwm @ v.co
+        s_ = "l" if p.x > 0 else "r"
+        rel = p - cen[s_]
+        if rel.z <= 0 or abs(rel.x) > 1.4 * rmax[s_]:
+            continue
+        w = 1 - _smooth(0.55 * rmax[s_], 0.85 * rmax[s_], rel.z)
+        if w <= 0.01:
+            continue
+        tot = sum(g.weight for g in v.groups) or 1.0
+        for og in list(v.groups):
+            brows.vertex_groups[og.group].add([v.index], og.weight * (1 - w), "REPLACE")
+        brows.vertex_groups[f"lid_upper_{s_}"].add([v.index], w * tot, "REPLACE")
+        lash[s_].append(v.index)
+    report["lids"] = {"bodyVerts": n_lid, "lashVerts": {s: len(lash[s]) for s in "lr"},
+                      "eyeRadius": {s: round(rmax[s], 4) for s in "lr"}}
+    return lash
+
+
+def close_lids(arm, body, eyes, report):
+    """After the retarget: the close angle (upper margin elevation - lower margin elevation + overlap), then a
+    rest-pose sculpt so the closed lid never enters the eyeball: every lid position whose CLOSED radius would
+    fall inside the eye surface in that direction is pushed out radially by the deficit + 0.8 mm (rotation
+    about the eye centre keeps radius, so the fix holds for any angle up to closeDeg)."""
+    gi = {g.index: g.name for g in body.vertex_groups}
+    bw, rinv = body.matrix_world, body.matrix_world.inverted().to_3x3()
+    ew = [eyes.matrix_world @ v.co for v in eyes.data.vertices]
+    out = {}
+    for s in "lr":
+        c = _jw(arm, f"eye_{s}")
+        eye = [p - c for p in ew if (p.x > 0) == (s == "l")]
+        r = max(d.length for d in eye)
+        lid, lower = [], []
+        for v in body.data.vertices:
+            p = bw @ v.co
+            if (p.x > 0) != (s == "l"):
+                continue
+            d = p - c
+            if d.length > r + 0.012:
+                continue
+            tot = sum(g.weight for g in v.groups) or 1.0
+            w = sum(g.weight for g in v.groups if gi.get(g.group) == f"lid_upper_{s}") / tot
+            a = math.degrees(math.atan2(d.z, -d.y))
+            if w > 0.01:
+                lid.append((v, d, w, a))
+            elif a < 0 and d.length < r + 0.004 and abs(d.x) < 0.4 * r and -d.y > 0:
+                lower.append(a)
+        upper = min(a for _, d, w, a in lid if w >= 0.8 and abs(d.x) < 0.4 * r)
+        lo = max(lower) if lower else -25.0
+        close = min(75.0, max(15.0, upper - lo + LID_OVERLAP_DEG))
+
+        def rot(d, deg):
+            t = math.radians(deg)
+            return Vector((d.x, d.y * math.cos(t) - d.z * math.sin(t), d.y * math.sin(t) + d.z * math.cos(t)))
+
+        def surf(u):
+            best = 0.0
+            for e in eye:
+                if e.length > 1e-6 and e.normalized().dot(u) > 0.985:
+                    best = max(best, e.length)
+            return best
+        pushed = 0
+        for v, d, w, a in lid:
+            worst = 0.0
+            for f in (0.25, 0.5, 0.75, 1.0):
+                q = d + (rot(d, close * f) - d) * w
+                need = surf(q.normalized()) + 0.0008 - q.length
+                worst = max(worst, need)
+            if worst > 0:
+                v.co += rinv @ (d.normalized() * worst)
+                pushed += 1
+        # Margin angles are a first guess (one low-poly lower-lid vertex can sit high); the angle is then raised
+        # until rays from the eye centre through >= 98% of the iris hit the posed skin at or beyond the iris,
+        # the same test test-character-asset runs on the exported GLB.
+        from mathutils.bvhtree import BVHTree
+        dv = {v.index: (bw @ v.co) - c for v in body.data.vertices if ((bw @ v.co).x > 0) == (s == "l")}
+        lw = {v.index: w for v, d, w, a in lid}
+        near = {i for i, d in dv.items() if d.length < r + 0.015}
+        polys = [list(p.vertices) for p in body.data.polygons if any(i in near for i in p.vertices) and all(i in dv for i in p.vertices)]
+        used = sorted({i for p in polys for i in p})
+        at = {i: k for k, i in enumerate(used)}
+        iris = [(e.normalized(), e.length) for e in eye if e.length > 1e-6 and e.normalized().dot(Vector((0, -1, 0))) > math.cos(math.radians(25))]
+
+        def coverage(deg):
+            P = [dv[i] + (rot(dv[i], deg) - dv[i]) * lw.get(i, 0.0) for i in used]
+            bvh = BVHTree.FromPolygons(P, [[at[i] for i in p] for p in polys])
+            return sum(1 for u, rr in iris if bvh.ray_cast(u * (rr - 0.0003), u)[0] is not None) / max(1, len(iris))
+        cov = coverage(close)
+        while cov < 0.98 and close < 75.0:
+            close += 1.5
+            cov = coverage(close)
+        arm.data.bones[f"lid_upper_{s}"]["closeDeg"] = round(close, 2)
+        arm.data.bones[f"lid_upper_{s}"]["closeAxis"] = [1.0, 0.0, 0.0]
+        out[s] = {"upperMarginDeg": round(upper, 1), "lowerMarginDeg": round(lo, 1), "closeDeg": round(close, 2),
+                  "pushedOut": pushed, "irisCovered": round(cov, 3), "openCovered": round(coverage(0.0), 3)}
+    body.data.update()
+    report.setdefault("lids", {}).update(out)
+    return out
+
+
+def tint_hair(body_id, meshes):
+    """R1 F3: hair, beard and brows (incl. the lash cards) multiplied by the body's hair tint, as a MATERIAL
+    factor: in Blender the kit Mix node multiplies the texture by a constant tint (its vertex-colour input is
+    unlinked), and build_pirates writes the same tint as the glTF baseColorFactor, which three.js multiplies
+    into the map. (The kit's colour attributes do not survive the Blender 5.1 exporter as COLOR_0, measured.)
+    The brows cast no shadow: the opaque lash cards drew a grey band down each cheek at noon."""
+    tint = HAIR_TINT[body_id]
+    for m in meshes:
+        if not (m.name.startswith("hair_") or m.name == "brows"):
+            continue
+        for mat in m.data.materials:
+            if not mat or not mat.use_nodes:
+                continue
+            nt = mat.node_tree
+            if not any(n.type == "MIX" for n in nt.nodes):     # the Rigged-to-Head hair: image -> Base Color
+                bsdf = next(n for n in nt.nodes if n.type == "BSDF_PRINCIPLED")
+                lk = next((l for l in nt.links if l.to_socket == bsdf.inputs["Base Color"]), None)
+                if lk:
+                    mx = nt.nodes.new("ShaderNodeMix")
+                    mx.data_type = "RGBA"
+                    src = lk.from_socket
+                    nt.links.remove(lk)
+                    nt.links.new(src, mx.inputs[6])
+                    nt.links.new(mx.outputs[2], bsdf.inputs["Base Color"])
+                    mx.inputs[7].default_value = (1, 1, 1, 1)
+            for n in nt.nodes:
+                if n.type != "MIX" or getattr(n, "data_type", "") != "RGBA":
+                    continue
+                n.blend_type = "MULTIPLY"
+                n.inputs[0].default_value = 1.0
+                n.inputs[7].default_value = tuple(tint) + (1.0,)
+                for l in list(nt.links):
+                    if l.to_node == n and l.from_node.type == "VERTEX_COLOR":
+                        sock = l.to_socket
+                        nt.links.remove(l)
+                        sock.default_value = tuple(tint) + (1.0,)
+            mat["hairTint"] = list(tint)
+        if m.name == "brows":
+            m.visible_shadow = False
+            m["castShadow"] = False
+    return tint
+
+
+def soften_normals(arm, body, body_id, out_dir, report):
+    """R1 F1/F2: write a per-body copy of the kit normal map with the torso/limb regions flattened toward
+    (0.5, 0.5, 1) by NORMAL_FLATTEN (and the stout's trunk fully flat), and point the body material at it.
+    The flatten amount is a per-vertex field rasterised into UV space (512 px, dilated into the island
+    padding, upsampled + box-blurred), so the transition follows the skin weights, not a UV rectangle."""
+    import numpy as np
+    mat = body.data.materials[0]
+    mat.name = f"MI_body_{body_id}"
+    nn = next(n for n in mat.node_tree.nodes if n.type == "NORMAL_MAP")
+    tex = nn.inputs["Color"].links[0].from_node
+    src = tex.image
+    W, H = src.size
+    gi = {g.index: g.name for g in body.vertex_groups}
+    stout = BODIES[body_id][2]
+    z_belly = _jw(arm, "spine_01").z * 0.35 + _jw(arm, "spine_02").z * 0.65
+    span = _jw(arm, "spine_03").z - _jw(arm, "pelvis").z
+    trunk_b = {"pelvis", "spine_01", "spine_02", "spine_03"}
+    bw = body.matrix_world
+    fv = np.zeros(len(body.data.vertices), np.float32)
+    for v in body.data.vertices:
+        tot = sum(g.weight for g in v.groups) or 1.0
+        f = sum(g.weight * NORMAL_FLATTEN.get(gi.get(g.group, ""), 0.0) for g in v.groups) / tot
+        if stout:
+            t = sum(g.weight for g in v.groups if gi.get(g.group) in trunk_b) / tot
+            f = max(f, min(1.0, 0.92 * t + 0.08 * t * math.exp(-(((bw @ v.co).z - z_belly) / span) ** 2)))
+        fv[v.index] = f
+    me = body.data
+    me.calc_loop_triangles()
+    uvl = next((l for l in me.uv_layers if l.active_render), me.uv_layers[0])
+    N = 512
+    mask = np.zeros((N, N), np.float32)
+    filled = np.zeros((N, N), bool)
+    for tri in me.loop_triangles:
+        uv = np.array([uvl.data[li].uv[:] for li in tri.loops], np.float64) * N
+        fw = fv[list(tri.vertices)]
+        x0, y0 = np.floor(uv.min(0)).astype(int)
+        x1, y1 = np.ceil(uv.max(0)).astype(int)
+        x0, y0, x1, y1 = max(x0, 0), max(y0, 0), min(x1, N - 1), min(y1, N - 1)
+        if x1 < x0 or y1 < y0:
+            continue
+        xs, ys = np.meshgrid(np.arange(x0, x1 + 1) + 0.5, np.arange(y0, y1 + 1) + 0.5)
+        (ax, ay), (bx, by), (cx, cy) = uv
+        den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+        if abs(den) < 1e-12:
+            continue
+        l0 = ((by - cy) * (xs - cx) + (cx - bx) * (ys - cy)) / den
+        l1 = ((cy - ay) * (xs - cx) + (ax - cx) * (ys - cy)) / den
+        l2 = 1 - l0 - l1
+        ins = (l0 >= -0.02) & (l1 >= -0.02) & (l2 >= -0.02)
+        val = l0 * fw[0] + l1 * fw[1] + l2 * fw[2]
+        sub = mask[y0:y1 + 1, x0:x1 + 1]
+        fsub = filled[y0:y1 + 1, x0:x1 + 1]
+        sub[ins] = np.maximum(np.where(fsub[ins], sub[ins], 0), val[ins])
+        fsub[ins] = True
+    for _ in range(4):     # dilate into the island padding so the bilinear/mip fetch at a seam stays flat
+        pad = np.pad(mask, 1)
+        pf = np.pad(filled, 1)
+        best = np.zeros_like(mask)
+        got = np.zeros_like(filled)
+        for dy in (0, 1, 2):
+            for dx in (0, 1, 2):
+                m2 = pf[dy:dy + N, dx:dx + N]
+                best = np.where(m2 & (~got | (pad[dy:dy + N, dx:dx + N] > best)), pad[dy:dy + N, dx:dx + N], best)
+                got |= m2
+        mask = np.where(filled, mask, best)
+        filled |= got
+    k = W // N
+    big = np.kron(mask, np.ones((k, k), np.float32))
+    cs = np.cumsum(np.cumsum(np.pad(big, ((2, 2), (2, 2)), mode="edge"), 0), 1)
+    cs = np.pad(cs, ((1, 0), (1, 0)))
+    big = (cs[5:, 5:] - cs[:-5, 5:] - cs[5:, :-5] + cs[:-5, :-5]) / 25.0
+    px = np.empty(W * H * 4, np.float32)
+    src.pixels.foreach_get(px)
+    px = px.reshape(H, W, 4)
+    n = px[..., :3] * 2 - 1
+    m3 = big[..., None]
+    n = n * (1 - m3) + np.array([0, 0, 1], np.float32) * m3
+    n /= np.maximum(np.linalg.norm(n, axis=2, keepdims=True), 1e-6)
+    px[..., :3] = n * 0.5 + 0.5
+    px[..., 3] = 1.0
+    img = bpy.data.images.new(f"T_body_{body_id}_Normal", W, H, alpha=False)
+    img.colorspace_settings.name = "Non-Color"
+    img.pixels.foreach_set(px.ravel())
+    path = os.path.join(out_dir, f"T_body_{body_id}_Normal.png")
+    img.filepath_raw = path
+    img.file_format = "PNG"
+    img.save()
+    tex.image = img
+    report["normal"] = {"kit": os.path.relpath(bpy.path.abspath(src.filepath), REPO), "softened": os.path.relpath(path, REPO),
+                        "meanFlatten": round(float(big.mean()), 3)}
+
+
+def build_base(body_id, report, do_retarget=True, out_dir=None):
     """Returns (armature, [meshes]) for one body type, normalised; objects prefixed with the body id."""
     kit, hairs, stout = BODIES[body_id]
     new = _import(os.path.join(UBC_BODY, kit))
@@ -284,13 +702,23 @@ def build_base(body_id, report, do_retarget=True):
         meshes.append(attach_hair(arm, h, rep))
     rep["leafBonesRemoved"] = strip_leaves(arm, meshes)
     add_eye_bones(arm, eyes)
+    lash = add_lid_bones(arm, body, eyes, brows, rep)
+    soften_physique(arm, body)
     if stout:
         stoutify(arm, body)
+    smooth_abs(arm, body, 1.0 if stout else 0.5, 14 if stout else 6)
     rep["before"] = measure(arm, body)
     rep["after"] = retarget(arm, body, meshes) if do_retarget else rep["before"]
+    close_lids(arm, body, eyes, rep)
+    rep["hairTint"] = list(tint_hair(body_id, meshes))
+    if out_dir:
+        soften_normals(arm, body, body_id, out_dir, rep)
     rep["bones"] = sorted(b.name for b in arm.data.bones)
     arm.name = f"{body_id}_rig"
+    defaults = {h.lower() for h in DEFAULT_HAIR[body_id]}
     for m in meshes:
-        if m.name.startswith("hair_") and m.name[5:] not in {h.lower()[5:] for h in DEFAULT_HAIR[body_id]}:
-            m.hide_render = True
+        if m.name.startswith("hair_"):
+            m["pirateDefault"] = m.name in defaults     # glTF node extras: which styles a naive load shows
+            m.hide_render = m.name not in defaults
+    rep["defaultHair"] = sorted(defaults)
     return arm, meshes
