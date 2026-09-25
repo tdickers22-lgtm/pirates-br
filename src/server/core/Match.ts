@@ -4350,7 +4350,8 @@ export class Match {
           ? { x: kegLocal.x, z: kegLocal.z }
           : this.getSectionAimLocal(hit.ship, section);
         const point = this.physics.hullFacePoint(hit.ship, aim, bandY, isPrimary ? 0.8 : 2.2);
-        this.physics.openHoleAt(hit.ship, point, holes, 'keg');
+        // Size by energy (b2.2b): the face the barrel sat on is torn wide.
+        this.physics.openHoleAt(hit.ship, point, holes, 'keg', isPrimary ? (keg.mega ? 3 : 2) : 1);
       }
       hit.ship.onFire = true;
       hit.ship.fireTimer = Math.max(hit.ship.fireTimer, SHIP.FIRE_DURATION);
