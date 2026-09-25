@@ -35,6 +35,7 @@ import { SpoilsRenderer } from '../rendering/SpoilsRenderer.js';
 import { SeaEventRenderer } from '../world/SeaEventRenderer.js';
 import { CombatFx } from '../rendering/CombatFx.js';
 import { FloodFx, type FloodEmitter, type FloodFxShip } from '../rendering/ship/floodFx.js';
+import { FounderFx, type FounderFxShip } from '../rendering/ship/founderFx.js';
 import { applyHoldUnderwater, combineWaterDepth, eyeInsideHold, hatchCausticFlicker, holdEyeDepth, holdUnderwaterPalette, type WaterSource } from '../rendering/waterEnvironment.js';
 import { SoundEngine, type FootstepSurface } from '../audio/SoundEngine.js';
 import { NetworkClient } from '../network/NetworkClient.js';
@@ -591,6 +592,21 @@ export class Game {
     anchors: (id: string) => this.shipRenderer.getHoleAnchors(id),
     holdWater: (id: string) => this.shipRenderer.getHoldWater(id),
     surfaceY: (x: number, z: number) => this.ocean.getSurfaceY(x, z),
+  };
+  /** Founder FX (b2.3g): hatch air-burst, floating wreckage, bubble column, vortex ring. */
+  private founderFx: FounderFx | null = null;
+  private readonly founderFxShips: FounderFxShip[] = [];
+  private readonly founderFxSources = {
+    surfaceY: (x: number, z: number) => this.ocean.getSurfaceY(x, z),
+    shipRoot: (id: string) => this.shipRenderer.getShipGroup(id),
+    groundY: (x: number, z: number) => {
+      let best = -Infinity;
+      for (const island of this.state?.islands ?? []) {
+        if (isPointInsideIslandFootprint(island, x, z, 0)) best = Math.max(best, getIslandSurfaceY(island, x, z));
+      }
+      return best;
+    },
+    wind: () => sampleLocalWind(this.ocean.getTime(), this.renderer.camera.position.x, this.renderer.camera.position.z, this.state?.storm),
   };
   private readonly lastChainshotWhirrAt = new Map<string, number>();
   // Camera feel — additive on top of updateCamera's base FOV/orientation.
@@ -1185,6 +1201,7 @@ export class Game {
 
     this.combatFx.init(this.renderer.scene);
     this.floodFx = new FloodFx(this.renderer.scene, this.combatFx);
+    this.founderFx = new FounderFx(this.renderer.scene, this.combatFx);
     this.envFx.initLanternSystem();
     this.renderer.scene.add(this.environment);
     // Static container: islands, sea rocks, chests and wildlife all live under
@@ -1850,6 +1867,7 @@ export class Game {
     // whole root used to kill every muzzle flash for the rest of the session).
     this.viewmodel.resetForMatch();
     this.spoilsRenderer.reset();
+    this.founderFx?.reset();
     this.seaEvents.reset();
     for (const drop of this.droppedWeapons) {
       this.renderer.scene.remove(drop.mesh);
@@ -7657,6 +7675,17 @@ export class Game {
         list.push(s);
       }
       this.floodFx.update(_dt, t, list, this.floodFxSources);
+    }
+
+    // The founder (b2.3g, holes-09): air bursting up the hatches, the wreck she
+    // sheds floating on the live sea and drifting downwind, the bubble column
+    // and vortex ring where she went down. Runs every frame so wreckage keeps
+    // floating after her hull has left the snapshot.
+    if (this.founderFx) {
+      const sinkers = this.founderFxShips;
+      sinkers.length = 0;
+      for (const s of this.state.ships) if (s.sinking && s.sinkProgress < 1) sinkers.push(s);
+      this.founderFx.update(_dt, t, sinkers, cam, this.founderFxSources);
     }
 
     // Flooding loop — the ship you're on if it's taking water, else the nearest
