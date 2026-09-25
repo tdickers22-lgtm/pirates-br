@@ -126,6 +126,10 @@ const PINNED_BASE = {
   // wheel's axle, pinning an anchor rather than a skirt. Every other cave piece
   // stands on the cave floor and is graded by the normal ground rule.
   stalactite_cluster_a: -1.446, stalactite_cluster_b: -1.411,
+  // Flood-loop tools (b2.3h): HELD, not placed, so like the weapons above the
+  // origin is the hand. Hammer grip at the origin (haft spans y 0), bucket
+  // bottom at y -0.10 in the primitive's frame; test-tool-assets pins both.
+  tool_hammer: -0.165, tool_bucket: -0.100,
 };
 const mutate = process.env.PIRATES_BR_MUTATE_BASE ?? '';
 if (mutate) {
