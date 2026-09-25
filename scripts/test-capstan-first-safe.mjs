@@ -16,8 +16,8 @@
  *
  * The fix is not to take the pre-hoist away (a berth is where a ship sits with
  * her canvas at half) but to make the capstan honest: a HUMAN raising the anchor
- * with nobody at the helm furls her first. And the carpenter announces every
- * plank he spends and stands aside for a crewmate who is right there.
+ * with nobody at the helm furls her first. The auto-carpenter itself is gone
+ * since D15 (b2.2d): a hole only closes with a pirate at it.
  */
 // Join-time coin flips (which free dock a newcomer moors at) are plain
 // Math.random unless the map seed is pinned — so pin it, or this suite grades a
@@ -179,20 +179,21 @@ console.log('\nThe auto-carpenter:');
     ship.holes.some((h) => !h.patched) && ship.inventory[0].qty === 16,
     `patched=${ship.holes.map((h) => h.patched).join(',')} planks=${ship.inventory[0].qty}`);
 
-  // Nobody aboard: the carpenter works, and says so.
+  // Nobody aboard: D15 (b2.2d) removed the anchored auto-carpenter. A hole
+  // only closes with a pirate at it, so the empty deck leaves the leak open,
+  // spends no plank and announces nothing.
   armHole();
   player.onShipId = null;
   player.position = { x: ship.position.x + 400, y: 2, z: ship.position.z + 400 };
   for (let i = 0; i < Math.ceil(60 * (SHIP.FIELD_REPAIR_INTERVAL + 1)); i++) {
     match.updateFieldRepairs(1 / 60);
   }
-  expect('with the deck empty he planks the leak',
-    ship.holes.every((h) => h.patched), `holes=${JSON.stringify(ship.holes)}`);
-  expect('...spending exactly one plank', ship.inventory[0].qty === 15,
+  expect('with the deck empty the leak stays open (no auto-carpenter, D15)',
+    ship.holes.every((h) => !h.patched), `holes=${JSON.stringify(ship.holes)}`);
+  expect('...and not one plank is spent', ship.inventory[0].qty === 16,
     `planks=${ship.inventory[0].qty}`);
-  expect('...and announcing it with the planks he has left',
-    feed.length === 1 && feed[0].shipId === ship.id && feed[0].planksLeft === 15,
-    `feed=${JSON.stringify(feed)}`);
+  expect('...and nothing is announced',
+    feed.length === 0, `feed=${JSON.stringify(feed)}`);
 }
 
 if (failures > 0) {
