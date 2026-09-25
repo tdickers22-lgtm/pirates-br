@@ -5,6 +5,11 @@ import { AudioLifecycle, audioParamStats, finiteDistance, finitePos, safeSet } f
 import { AUDIO_BUSES, buildAudioCore, type AudioBusName, type AudioCoreNodes } from './AudioCore.js';
 import { DECODED_CAP_BYTES, SampleBank, decodeAudioDataCompat } from './SampleBank.js';
 import { VOICE_PRIORITY, VoiceAllocator, type AudioTier } from './VoiceAllocator.js';
+import {
+  airCutoffFor, applyListener, crackMix, delayFor, flybyDopplerCurve, gainFor, isSpatialCategory, listenerRelative,
+  makeWorldPanner, panningModelFor, rearShade, type SpatialCategory,
+} from './Spatial.js';
+import { CANNON_MUZZLE_SPEED } from '../../shared/ballistics.js';
 
 /** A looped, filtered-noise voice with an optional tremolo/gust LFO on its gain. */
 interface LoopVoice {
@@ -364,6 +369,14 @@ export const THUNDER_MAX_DISTANCE_M = 1500;
 /** Seconds between a strike's flash and its thunder: distance over the speed of
  *  sound, clamped to the audible range. 900 m -> 2.62 s. Pure so the storm
  *  suite can grade it with no AudioContext. */
+/** setValueCurveAtTime when the engine has it, else hold `fallback` (never throws). */
+function curveOr(param: AudioParam, curve: Float32Array, at: number, dur: number, fallback: number): void {
+  try {
+    if (typeof param.setValueCurveAtTime === 'function') { param.setValueCurveAtTime(curve, at, dur); return; }
+  } catch { /* overlapping automation: fall through */ }
+  safeSet(param, 'value', fallback);
+}
+
 export function thunderArrivalDelay(distanceM: number): number {
   const d = Number.isFinite(distanceM) ? Math.max(0, Math.min(THUNDER_MAX_DISTANCE_M, distanceM)) : 0;
   return d / 343;
@@ -530,6 +543,8 @@ export class SoundEngine {
   private readonly listenerPos = new THREE.Vector3();
   /** Unit forward in XZ. Panning stays centred until a pose is supplied. */
   private readonly listenerFwd = new THREE.Vector3(0, 0, -1);
+  /** Full 3D look direction for the AudioListener (listenerFwd is the flattened yaw). */
+  private readonly listenerFwd3 = new THREE.Vector3(0, 0, -1);
   private listenerKnown = false;
 
   // ── World state ────────────────────────────────────────────────────
@@ -787,7 +802,7 @@ export class SoundEngine {
    */
   playSample(
     key: string,
-    opts: { volume?: number; pos?: SoundPos | null; bus?: AudioBusName; rate?: number; priority?: number; when?: number } = {},
+    opts: { volume?: number; pos?: SoundPos | null; bus?: AudioBusName; rate?: number; priority?: number; when?: number; category?: SpatialCategory } = {},
   ): boolean {
     const ctx = this.ctx;
     const bank = this.bank;
@@ -798,15 +813,17 @@ export class SoundEngine {
       const bus: AudioBusName = opts?.bus && AUDIO_BUSES.includes(opts.bus) ? opts.bus : 'sfx';
       let dest: AudioNode | null;
       let distanceGain = 1;
+      let travel = 0;
       if (bus === 'ui') dest = this.busUi;
       else if (bus === 'ambience') dest = this.busBed;
       else if (bus === 'music') dest = this.busMusic;
       else if (opts?.pos && finitePos(opts.pos) && this.listenerKnown) {
         const p = opts.pos;
         const d = Math.hypot(p.x - this.listenerPos.x, p.y - this.listenerPos.y, p.z - this.listenerPos.z);
-        const sp = this.makeSpatialDest(d, p);
+        const sp = this.makeSpatialDest(d, p, 0.22, isSpatialCategory(opts.category) ? opts.category : 'default');
         dest = sp.dest;
         distanceGain = sp.gain;
+        travel = sp.delay;
       } else dest = this.busDry;
       if (!dest) return false;
       const level = finiteClamp(opts?.volume ?? 1, 0, 4, 1) * distanceGain;
@@ -818,7 +835,7 @@ export class SoundEngine {
         priority: finiteClamp(opts?.priority ?? (bus === 'ui' ? VOICE_PRIORITY.ui : VOICE_PRIORITY.world), 0, 100, VOICE_PRIORITY.world),
         gain: level,
         now,
-        duration: when - now + pick.buffer.duration / rate + 0.05,
+        duration: when - now + travel + pick.buffer.duration / rate + 0.05,
         stop: () => { try { src.stop(); } catch { /* never started or already ended */ } },
       });
       if (id === null) return true;
@@ -858,21 +875,31 @@ export class SoundEngine {
     this.listenerPos.set(position.x, position.y, position.z);
     if (typeof forward === 'number') {
       this.listenerFwd.set(-Math.sin(forward), 0, -Math.cos(forward));
+      this.listenerFwd3.copy(this.listenerFwd);
     } else {
       this.listenerFwd.set(forward.x, 0, forward.z);
       if (this.listenerFwd.lengthSq() < 1e-6) this.listenerFwd.set(0, 0, -1);
       this.listenerFwd.normalize();
+      this.listenerFwd3.set(forward.x, forward.y, forward.z);
     }
     this.listenerKnown = true;
+    // b2.4c: world PannerNodes hear from here, every frame (Game calls setListenerFromCamera).
+    applyListener(this.ctx?.listener, this.listenerPos, this.listenerFwd3);
+  }
+
+  /** HRTF on high-tier desktop, equalpower elsewhere (tracks setAudioTier). */
+  private panningModel(): PanningModelType {
+    return panningModelFor(this.voices.getTier(), this.device.phone);
   }
 
   /** Convenience wrapper for a THREE camera. */
   setListenerFromCamera(camera: THREE.Camera): void {
     const fwd = camera.getWorldDirection(SoundEngine.tmpFwd);
-    this.setListenerPose(camera.position, fwd);
+    this.setListenerPose(camera.getWorldPosition(SoundEngine.tmpPos), fwd);
   }
 
   private static readonly tmpFwd = new THREE.Vector3();
+  private static readonly tmpPos = new THREE.Vector3();
 
   /**
    * Submerge the whole mix: sweeps the master lowpass down, drops the reverb, and
@@ -1020,7 +1047,7 @@ export class SoundEngine {
     if (!this.ctx || !this.busDry) return;
     if (distance > 110) return;
     const now = this.ctx.currentTime;
-    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.26);
+    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.26, 'impact');
     // Deep soft ground impact.
     this.playTone(now, 72, 42, 0.3, 0.4 * g, 'sine', 0.01, dest);
     this.playNoise(now, 0.24, 200, 0.8, 0.42 * g, 'lowpass', dest);
@@ -1037,7 +1064,7 @@ export class SoundEngine {
     if (!this.ctx || !this.busDry) return;
     if (distance > 90) return;
     const now = this.ctx.currentTime;
-    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.2);
+    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.2, 'creature');
     this.playTone(now, 70, 50, 0.5, 0.34 * g, 'sawtooth', 0.05, dest);
     this.playTone(now + 0.03, 46, 34, 0.46, 0.22 * g, 'triangle', 0.06, dest);
     this.playNoise(now, 0.5, 180, 0.8, 0.24 * g, 'lowpass', dest);
@@ -1048,7 +1075,7 @@ export class SoundEngine {
     if (!this.ctx || !this.busDry) return;
     if (distance > 90) return;
     const now = this.ctx.currentTime;
-    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.2);
+    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.2, 'creature');
     this.playNoise(now, 0.05, 2600, 1.6, 0.3 * g, 'bandpass', dest);
     this.playNoise(now + 0.01, 0.09, 700, 1.0, 0.26 * g, 'lowpass', dest);
     this.playTone(now, 150, 70, 0.12, 0.3 * g, 'triangle', 0.002, dest);
@@ -1060,7 +1087,7 @@ export class SoundEngine {
     if (!this.ctx || !this.busDry) return;
     if (distance > 160) return;
     const now = this.ctx.currentTime;
-    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.24);
+    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.24, 'creature');
     // Thrashing water.
     this.playNoiseCurve(now, 0.42, [[0, 520], [0.42, 260]], 0.55, 0.5 * g, 'lowpass', 0.01, dest);
     this.playNoise(now + 0.02, 0.3, 1900, 0.8, 0.16 * g, 'bandpass', dest);
@@ -1301,7 +1328,7 @@ export class SoundEngine {
     if (!this.throttle('gunshot')) return;
     this.markCombat();
     const now = this.ctx.currentTime;
-    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.2);
+    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.2, 'gun');
     const v = g;
     // Flash in the pan — the flint striking, just before ignition.
     this.playNoise(now, 0.02, 5000, 1.2, 0.07 * v, 'highpass', dest);
@@ -1349,18 +1376,20 @@ export class SoundEngine {
   // ── Cannon (ship broadsides and human cannon launches) ───────────
   /**
    * @param distance metres from the listener. 0 = on top of you (unchanged local feel).
-   *   Beyond 140m this becomes a soft, delayed distant thump instead of a sharp crack.
+   *   The whole voice arrives d/343 late (Spatial delay chain, no cap). The crack layers fade out
+   *   over 120-220 m while the low distant thump fades in (b2.4c, audio-10: no 140 m switch).
    */
   playCannonFire(distance = 0, pos?: SoundPos): void {
     const ctx = this.ctx;
     if (!ctx || !this.busDry) return;
     if (!this.throttle('cannonFire')) return;
     const now = ctx.currentTime;
-    if (distance > 140) {
-      this.distantCannonThump(now, distance, pos);
-      return;
-    }
-    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.3);
+    const d = finiteDistance(distance);
+    const { dest, gain: g0 } = this.makeSpatialDest(d, pos, 0.3, 'cannon');
+    const crack = crackMix(d);
+    if (crack < 1) this.distantCannonThump(now, g0 * (1 - crack), dest);
+    if (crack <= 0) return;
+    const g = g0 * crack;
     // Muzzle crack, low pressure wave, carriage thump, and a rolling smoky tail.
     this.playNoise(now, 0.03, 4200, 0.7, 0.5 * g, 'highpass', dest);
     this.playNoise(now, 0.045, 5200, 0.8, 0.34 * g, 'highpass', dest);
@@ -1374,25 +1403,25 @@ export class SoundEngine {
     this.playNoiseCurve(now + 0.08, 0.7, [[0, 1500], [0.7, 200]], 0.45, 0.26 * g, 'lowpass', 0, dest);
     this.playNoise(now + 0.18, 0.62, 420, 0.42, 0.18 * g, 'lowpass', dest);
     // Ship-shaking sub + bed duck at close range.
-    if (distance < 28) {
-      const shake = 1 - distance / 28;
+    if (d < 28) {
+      const shake = 1 - d / 28;
       this.playTone(now, 44, 26, 0.7, 0.4 * shake, 'sine', 0.01, dest);
       this.duckBeds(0.5, 0.4, 0.4);
     }
   }
 
-  /** Low, delayed rumble for a cannon fired far away — no sharp transient reaches you. */
-  private distantCannonThump(now: number, distance: number, pos?: SoundPos): void {
+  /** Low rumble for a far cannon (no sharp transient reaches you). `g` already carries the
+   *  cannon distance law and the 120-220 m crossfade; `dest` is the delay + panner chain. */
+  private distantCannonThump(now: number, g: number, dest: AudioNode): void {
     const ctx = this.ctx;
-    if (!ctx || !this.busDry) return;
-    const delay = THREE.MathUtils.clamp(distance / 343, 0.2, 1.2); // ~sound-travel time
-    const at = now + delay;
-    const g = 1 / (1 + distance / 60); // gentler rolloff for the low thump
+    if (!ctx || !this.busDry || !(g > 0)) return;
+    const at = now;
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
     safeSet(filter.frequency, 'value', 320);
     safeSet(filter.Q, 'value', 0.6);
-    this.connectGroup(filter, pos, 0.24);
+    filter.connect(dest);
+    this.ownSendNodes.add(filter); // dest already taps the reverb send
     this.playTone(at, 70, 40, 0.6, 0.5 * g, 'sine', 0.02, filter);
     this.playTone(at + 0.02, 48, 30, 0.85, 0.4 * g, 'sine', 0.03, filter);
     this.playNoise(at, 0.5, 200, 0.5, 0.3 * g, 'lowpass', filter);
@@ -1404,7 +1433,7 @@ export class SoundEngine {
     if (!this.ctx || !this.busDry) return;
     if (!this.throttle('launch')) return;
     const now = this.ctx.currentTime;
-    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.26);
+    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.26, 'gun');
     if (kind === 'firebomb') {
       // Pitch-soaked rag catching, then the lob.
       this.playNoise(now, 0.03, 3400, 0.8, 0.4 * g, 'highpass', dest);
@@ -1430,7 +1459,7 @@ export class SoundEngine {
     if (!this.ctx || !this.busDry) return;
     if (!this.throttle('impact')) return;
     const now = this.ctx.currentTime;
-    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.24);
+    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.24, 'impact');
     if (kind === 'cannonball') {
       // Iron burying itself in earth/timber: crack, thud, and debris rain.
       this.playNoise(now, 0.02, 3600, 1.0, 0.3 * g, 'highpass', dest);
@@ -1499,7 +1528,7 @@ export class SoundEngine {
     if (!this.throttle('splash')) return;
     const now = this.ctx.currentTime;
     const volume = THREE.MathUtils.clamp(intensity, 0.1, 1.5);
-    const { dest, gain } = this.makeSpatialDest(distance, pos, 0.22);
+    const { dest, gain } = this.makeSpatialDest(distance, pos, 0.22, 'splash');
     const v = volume * gain;
     this.playNoise(now, 0.26, 4600, 0.45, 0.36 * v, 'highpass', dest);
     this.playNoise(now + 0.025, 0.42, 980, 0.75, 0.38 * v, 'bandpass', dest);
@@ -1616,7 +1645,7 @@ export class SoundEngine {
     if (distance > 30) return;
     if (!this.throttle('footstep')) return;
     const now = this.ctx.currentTime;
-    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.14);
+    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.14, 'footstep');
     const v = (running ? 1 : 0.72) * g;
     const j = (): number => 0.88 + Math.random() * 0.24; // ±12% per step
     switch (surface) {
@@ -1981,9 +2010,9 @@ export class SoundEngine {
 
   // ── Spatial one-shot dispatcher ──────────────────────────────────
   /**
-   * Fire a positioned one-shot with distance-based gain rolloff (~1/(1+d/24)), a
-   * distance lowpass, and stereo pan when the listener pose is known.
-   * Cannon/keg beyond 140m degrade into a soft, delayed distant thump.
+   * Fire a positioned one-shot through the Spatial chain: per-category distance gain, air
+   * absorption lowpass, d/343 travel delay, and a world PannerNode heard from the camera
+   * listener (b2.4c). The cannon crack fades into the distant thump over 120-220 m.
    */
   playAt(kind: SpatialKind, worldDistance: number, opts: SpatialOpts = {}): void {
     const d = finiteDistance(worldDistance);
@@ -2024,14 +2053,23 @@ export class SoundEngine {
    * here — after the distance lowpass — so a far, dulled sound also sends a
    * dull signal to the reverb instead of contradicting its own distance cue.
    */
-  private connectGroup(node: AudioNode, pos: SoundPos | null | undefined, send: number): void {
+  private connectGroup(node: AudioNode, pos: SoundPos | null | undefined, send: number, delaySeconds = 0): void {
     const ctx = this.ctx as AudioContext;
-    const pan = this.panFor(pos);
     let tail: AudioNode = node;
-    if (pan !== 0) {
-      const panner = ctx.createStereoPanner();
-      safeSet(panner.pan, 'value', pan);
-      node.connect(panner);
+    // Speed of sound (b2.4c, audio-10): the whole group, reverb send included, arrives d/343 late.
+    if (delaySeconds > 0.001) {
+      const delay = ctx.createDelay(Math.max(1, delaySeconds + 0.5));
+      safeSet(delay.delayTime, 'value', delaySeconds);
+      tail.connect(delay);
+      tail = delay;
+    }
+    // Direction (b2.4c, audio-04): a world-positioned PannerNode heard from the AudioListener, so
+    // front/back and elevation exist (HRTF on high desktop) and the image stays put when you turn.
+    const p = finitePos(pos);
+    if (p && this.listenerKnown
+      && Math.hypot(p.x - this.listenerPos.x, p.y - this.listenerPos.y, p.z - this.listenerPos.z) >= 0.5) {
+      const panner = makeWorldPanner(ctx, p, this.panningModel());
+      tail.connect(panner);
       tail = panner;
     }
     tail.connect(this.busDry as GainNode);
@@ -2054,17 +2092,27 @@ export class SoundEngine {
     distance: number,
     pos?: SoundPos | null,
     send = 0.22,
-  ): { dest: BiquadFilterNode; gain: number } {
+    category: SpatialCategory = 'default',
+  ): { dest: BiquadFilterNode; gain: number; delay: number } {
     const ctx = this.ctx as AudioContext;
     const d = finiteDistance(distance);
-    const gain = 1 / (1 + d / 24);
-    const cutoff = THREE.MathUtils.clamp(19000 / (1 + d / 45), 380, 19000);
+    // Per-category distance law + continuous air absorption (Spatial.ts). On equalpower a source
+    // behind is shaded darker (equalpower folds back onto front); HRTF encodes it itself.
+    let gain = gainFor(isSpatialCategory(category) ? category : 'default', d);
+    let cutoff = airCutoffFor(d);
+    const p = finitePos(pos);
+    if (p && this.listenerKnown && this.panningModel() !== 'HRTF') {
+      const shade = rearShade(listenerRelative(this.listenerPos, this.listenerFwd, p).cosFront);
+      gain *= shade.gainMul;
+      cutoff *= shade.cutoffMul;
+    }
+    const delay = delayFor(d);
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
     safeSet(filter.frequency, 'value', cutoff);
     safeSet(filter.Q, 'value', 0.5);
-    this.connectGroup(filter, pos, send);
-    return { dest: filter, gain };
+    this.connectGroup(filter, pos, send, delay);
+    return { dest: filter, gain, delay };
   }
 
   /** A bare panned group (no distance filter) — for beds/ambience one-shots. */
@@ -2111,17 +2159,72 @@ export class SoundEngine {
 
   // ── Naval combat one-shots ───────────────────────────────────────
   /**
-   * Airy whistle that rises then falls to fake a cannonball passing by (no true doppler).
-   * @param delaySeconds schedule the pass ahead of time (time-of-flight to closest approach).
+   * Cannonball fly-by whistle with real Doppler (b2.4c, audio-15): an air-rush noise voice whose
+   * playbackRate, and a tonal voice whose frequency, follow c/(c - v_radial) along a straight pass
+   * at `speed` with closest approach `miss` metres away, 0.35 s into the 0.7 s window; loudness
+   * follows miss / range along the path. CombatFx schedules it so closest approach lands on time.
+   * @param distance miss distance (m) at closest approach.
+   * @param pos the closest-approach point.
+   * @param delaySeconds start of the window (CombatFx passes time-to-closest-approach - 0.35).
+   * @param speed ball speed (m/s), muzzle speed by default.
    */
-  playCannonballWhistle(distance = 0, pos?: SoundPos, delaySeconds = 0): void {
-    if (!this.ctx || !this.busDry) return;
+  playCannonballWhistle(distance = 0, pos?: SoundPos, delaySeconds = 0, speed = CANNON_MUZZLE_SPEED): void {
+    const ctx = this.ctx;
+    const noise = this.noise;
+    if (!ctx || !this.busDry) return;
     if (!this.throttle('whistle')) return;
-    const now = this.ctx.currentTime + Math.max(0, delaySeconds);
-    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.2);
-    this.playTone(now, 900, 1700, 0.16, 0.12 * g, 'sine', 0.02, dest);
-    this.playTone(now + 0.16, 1700, 620, 0.26, 0.12 * g, 'sine', 0, dest);
-    this.playNoise(now, 0.4, 2400, 3.2, 0.06 * g, 'bandpass', dest);
+    if (!this.voiceBudgetOk()) return;
+    const start = ctx.currentTime + (Number.isFinite(delaySeconds) ? Math.max(0, delaySeconds) : 0);
+    const miss = Math.max(0.5, finiteDistance(distance));
+    const v = Number.isFinite(speed) && speed > 1 ? Math.min(speed, 250) : CANNON_MUZZLE_SPEED;
+    const dur = 0.7;
+    const closest = 0.35;
+    const { dest, gain: g } = this.makeSpatialDest(miss, pos, 0.2);
+    const steps = 48;
+    const ratio = flybyDopplerCurve(miss, v, dur, closest, steps);
+    const env = new Float32Array(steps);
+    for (let i = 0; i < steps; i++) {
+      const t = (i / (steps - 1)) * dur - closest;
+      const edge = Math.min(1, i / 4, (steps - 1 - i) / 4);
+      env[i] = edge * Math.max(1, miss) / Math.max(1, Math.hypot(miss, v * t));
+    }
+    const out = ctx.createGain();
+    safeSet(out.gain, 'value', 0);
+    curveOr(out.gain, env, start, dur, 0.5);
+    out.connect(dest);
+    // Tonal whistle: 1.15 kHz carrier bent by the Doppler ratio.
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    const tone = new Float32Array(steps);
+    for (let i = 0; i < steps; i++) tone[i] = 1150 * ratio[i];
+    safeSet(osc.frequency, 'value', tone[0]);
+    curveOr(osc.frequency, tone, start, dur, 1150);
+    const toneGain = ctx.createGain();
+    safeSet(toneGain.gain, 'value', 0.12 * g);
+    osc.connect(toneGain);
+    toneGain.connect(out);
+    osc.start(start);
+    osc.stop(start + dur + 0.02);
+    // Air rush: band-passed noise, Doppler as playbackRate.
+    if (noise) {
+      const src = ctx.createBufferSource();
+      src.buffer = noise;
+      src.loop = true;
+      safeSet(src.playbackRate, 'value', ratio[0]);
+      curveOr(src.playbackRate, ratio, start, dur, 1);
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      safeSet(bp.frequency, 'value', 2400);
+      safeSet(bp.Q, 'value', 3.2);
+      const nGain = ctx.createGain();
+      safeSet(nGain.gain, 'value', 0.07 * g);
+      src.connect(bp);
+      bp.connect(nGain);
+      nGain.connect(out);
+      src.start(start, Math.random() * Math.max(0, noise.duration - dur - 0.1));
+      src.stop(start + dur + 0.02);
+      src.onended = () => { try { out.disconnect(); } catch { /* gone */ } };
+    }
   }
 
   /** Cannonball smashing a hull — deep thud under a burst of wood splinters. */
@@ -2129,7 +2232,7 @@ export class SoundEngine {
     if (!this.ctx || !this.busDry) return;
     if (!this.throttle('hullImpact')) return;
     const now = this.ctx.currentTime;
-    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.26);
+    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.26, 'impact');
     this.playTone(now, 120, 46, 0.22, 0.42 * g, 'triangle', 0.004, dest);
     this.playTone(now + 0.006, 76, 40, 0.3, 0.3 * g, 'sine', 0.008, dest);
     this.playNoise(now, 0.16, 300, 0.8, 0.4 * g, 'lowpass', dest);
@@ -2155,7 +2258,7 @@ export class SoundEngine {
   playShipImpact(kind: 'ram' | 'ground' | 'rock', speed: number, distance = 0, pos?: SoundPos): void {
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
-    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.28);
+    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.28, 'impact');
     // 2..9 m/s maps to a 0.45..1.15 weight so a light nudge is a bump and a
     // full-speed slam is a house-shaking crash.
     const w = THREE.MathUtils.clamp(0.45 + (speed - 2) / 10, 0.45, 1.15);
@@ -2200,7 +2303,7 @@ export class SoundEngine {
     if (!this.ctx || !this.busDry) return;
     if (distance > 60) return;
     const now = this.ctx.currentTime;
-    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.22);
+    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.22, 'foley');
     const v = THREE.MathUtils.clamp(intensity, 0.3, 1);
     this.playTone(now, 78, 40, 0.18, 0.34 * v * g, 'sine', 0.006, dest);
     this.playNoise(now, 0.13, 240, 0.8, 0.3 * v * g, 'lowpass', dest);
@@ -2247,7 +2350,7 @@ export class SoundEngine {
     if (!this.ctx || !this.busDry) return;
     if (distance > 40) return;
     const now = this.ctx.currentTime;
-    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.18);
+    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.18, 'foley');
     const dur = THREE.MathUtils.clamp(duration, 0.3, 4);
     this.playNoise(now, dur, 5200, 1.1, 0.09 * g, 'highpass', dest);
     this.playNoise(now, dur, 1800, 0.8, 0.05 * g, 'bandpass', dest);
@@ -2262,9 +2365,8 @@ export class SoundEngine {
   playKegExplosion(distance = 0, pos?: SoundPos): void {
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
-    const delay = distance > 140 ? THREE.MathUtils.clamp(distance / 343, 0.2, 1.2) : 0;
-    const at = now + delay;
-    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.32);
+    const at = now; // travel time lives in the spatial chain (d/343, no cap)
+    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.32, 'explosion');
     this.playNoise(at, 0.06, 6000, 0.7, 0.4 * g, 'highpass', dest);
     this.playTone(at, 120, 30, 0.9, 0.7 * g, 'sine', 0.005, dest);
     this.playTone(at + 0.02, 70, 24, 1.2, 0.55 * g, 'sine', 0.01, dest);

@@ -17,6 +17,14 @@
 //                   shipped manifest fits the caps (no real file is refused, boot+match decoded
 //                   PCM fits the phone cap so a match never thrashes).
 //
+//   Spatial (b2.4c; audio-04, audio-10, audio-15)
+//                   per-category distance gain is monotonic non-increasing; a source behind the
+//                   listener differs from one ahead (azimuth, panner position, equalpower rear
+//                   shade); delay d/343 beyond 30 m with no cap and no 140 m step (139 vs 141 m
+//                   < 10 ms, 600 m = 1.749 s) on EVERY positioned one-shot incl. samples; the
+//                   cannon crack crossfades over 120-220 m; Doppler ratio within 1% and applied
+//                   to the whistle's playbackRate; the AudioListener follows the pose.
+//
 //   node --import tsx scripts/test-audio-models.mjs
 import { readFileSync } from 'node:fs';
 
@@ -103,7 +111,8 @@ for (const tier of ['high', 'balanced', 'low']) {
 const created = [];
 function fakeParam(v = 0) {
   return { value: v, setValueAtTime() {}, linearRampToValueAtTime() {}, exponentialRampToValueAtTime() {},
-    setTargetAtTime() {}, cancelScheduledValues() {}, cancelAndHoldAtTime() {} };
+    setTargetAtTime() {}, cancelScheduledValues() {}, cancelAndHoldAtTime() {},
+    setValueCurveAtTime(curve, at, dur) { this.curve = Array.from(curve); this.curveAt = at; this.curveDur = dur; } };
 }
 function fakeNode(kind) {
   const outs = [];
@@ -350,6 +359,115 @@ async function drain(bank) { for (let i = 0; i < 2000 && (bank.decodesInFlight >
   check('bank: every shipped file fits its kind duration cap; boot+match decoded PCM fits the phone cap',
     refused.length === 0 && bootMatch <= DECODED_CAP_BYTES.phone && Object.keys(man.keys).length > 0,
     `refused ${refused.join(',') || 'none'}; decoded boot ${mb(tierBytes.boot)} + match ${mb(tierBytes.match)} + zones ${mb(tierBytes.zones)} MB`);
+}
+
+// ── 5. Spatial (b2.4c) ──────────────────────────────────────────────────────
+{
+  const S = await import('../src/client/audio/Spatial.ts');
+  // gain laws
+  const bad = [];
+  for (const [cat, c] of Object.entries(S.SPATIAL_CATEGORIES)) {
+    let prev = Infinity;
+    for (let d = 0; d <= 2000; d += 0.5) {
+      const g = S.gainFor(cat, d);
+      if (!(g <= prev + 1e-12) || !(g > 0) || !(g <= 1)) { bad.push(`${cat}@${d}`); break; }
+      prev = g;
+    }
+    if (!(S.gainFor(cat, 0) === 1 && S.gainFor(cat, c.max) < 0.5)) bad.push(`${cat}:range`);
+  }
+  const oldDb = Math.max(...[0, 1, 5, 24, 100, 300].map((d) => Math.abs(20 * Math.log10(S.gainFor('default', d) * (1 + d / 24)))));
+  check('spatial: gain monotonic non-increasing in distance for every category, 1 at 0 m, < -6 dB at max; default within 1 dB of the old 1/(1+d/24)',
+    bad.length === 0 && Object.keys(S.SPATIAL_CATEGORIES).length >= 8 && oldDb < 1 && S.gainFor('footstep', 30) < S.gainFor('cannon', 30),
+    `bad ${bad.join(',') || 'none'}; default vs old max ${oldDb.toFixed(2)} dB; footstep@30 ${S.gainFor('footstep', 30).toFixed(3)} cannon@30 ${S.gainFor('cannon', 30).toFixed(3)}`);
+  let airOk = true;
+  for (let d = 0; d < 2000; d += 1) if (!(S.airCutoffFor(d + 1) <= S.airCutoffFor(d)) || S.airCutoffFor(d + 1) / S.airCutoffFor(d) < 0.9) airOk = false;
+  check('spatial: air absorption cutoff is continuous and monotonic (no steps)', airOk && S.airCutoffFor(30) > 7000 && S.airCutoffFor(600) < 2500,
+    `30 m ${S.airCutoffFor(30).toFixed(0)} Hz, 120 m ${S.airCutoffFor(120).toFixed(0)}, 600 m ${S.airCutoffFor(600).toFixed(0)}`);
+  // speed of sound
+  const d139 = S.delayFor(139), d141 = S.delayFor(141), d600 = S.delayFor(600);
+  let delayCont = true;
+  for (let d = 0; d < 1000; d += 0.25) if (Math.abs(S.delayFor(d + 0.25) - S.delayFor(d)) > 0.002 || S.delayFor(d + 0.25) < S.delayFor(d)) delayCont = false;
+  check('spatial: delayFor(139) vs delayFor(141) < 10 ms; delayFor(600) = 1.749 +- 0.005 s; no cap (2000 m = 5.83 s); continuous, 0 at 0 m, < 10 ms inside 10 m',
+    Math.abs(d141 - d139) < 0.010 && Math.abs(d600 - 1.749) <= 0.005 && Math.abs(S.delayFor(2000) - 2000 / 343) < 1e-9 && delayCont && S.delayFor(0) === 0 && S.delayFor(10) < 0.010 && S.delayFor(NaN) === 0,
+    `139 ${d139.toFixed(4)} 141 ${d141.toFixed(4)} 600 ${d600.toFixed(4)} s`);
+  let crackCont = true;
+  for (let d = 0; d < 400; d += 1) if (Math.abs(S.crackMix(d + 1) - S.crackMix(d)) > 0.02 || S.crackMix(d + 1) > S.crackMix(d)) crackCont = false;
+  check('spatial: cannon crack crossfades out over 120-220 m (1 inside, 0 beyond, no step)',
+    crackCont && S.crackMix(120) === 1 && S.crackMix(220) === 0 && S.crackMix(170) > 0.4 && S.crackMix(170) < 0.6, `170 m ${S.crackMix(170).toFixed(3)}`);
+  // direction
+  const L = { x: 0, y: 0, z: 0 }, F = { x: 0, y: 0, z: -1 };
+  const ahead = S.listenerRelative(L, F, { x: 0, y: 0, z: -50 });
+  const behind = S.listenerRelative(L, F, { x: 0, y: 0, z: 50 });
+  const right = S.listenerRelative(L, F, { x: 50, y: 0, z: 0 });
+  check('spatial: a source behind differs from one ahead (azimuth 0 vs 180, rear shade darker), right is +90',
+    Math.abs(ahead.azimuthDeg) < 1e-6 && Math.abs(Math.abs(behind.azimuthDeg) - 180) < 1e-6 && Math.abs(right.azimuthDeg - 90) < 1e-6
+      && S.rearShade(behind.cosFront).cutoffMul < S.rearShade(ahead.cosFront).cutoffMul && S.rearShade(ahead.cosFront).gainMul === 1,
+    `ahead ${ahead.azimuthDeg.toFixed(1)} behind ${behind.azimuthDeg.toFixed(1)} right ${right.azimuthDeg.toFixed(1)}`);
+  // Doppler
+  const exact = (v) => 343 / (343 - v);
+  const rDop = [5, 56, -56, 120].map((v) => Math.abs(S.dopplerRatio(v) / exact(v) - 1));
+  const curve = S.flybyDopplerCurve(2, 56, 0.7, 0.35, 65);
+  const vr0 = (56 * 56 * 0.35) / Math.hypot(2, 56 * 0.35);
+  check('spatial: Doppler ratio within 1% (c/(c-v), 1+v/343 at walking speed); fly-by curve starts high, 1 at closest approach, ends low',
+    Math.max(...rDop) < 0.01 && Math.abs(S.dopplerRatio(5) / (1 + 5 / 343) - 1) < 0.01 && Math.abs(curve[0] / exact(vr0) - 1) < 0.01
+      && Math.abs(curve[32] - 1) < 1e-6 && curve[64] < 0.9 && Number.isFinite(S.dopplerRatio(1e9)),
+    `56 m/s ${S.dopplerRatio(56).toFixed(4)} (exact ${exact(56).toFixed(4)}); curve ${curve[0].toFixed(3)} -> ${curve[32].toFixed(3)} -> ${curve[64].toFixed(3)}`);
+  check('spatial: HRTF on high desktop only', S.panningModelFor('high', false) === 'HRTF' && S.panningModelFor('high', true) === 'equalpower' && S.panningModelFor('balanced', false) === 'equalpower');
+
+  // engine wiring
+  const engine = new SoundEngine();
+  engine.unlock();
+  const ctx = engine.ctx;
+  engine.setListenerPose({ x: 1, y: 2, z: 3 }, { x: 0, y: 0, z: -1 });
+  const lis = ctx.listener;
+  check('engine: setListenerPose drives the AudioListener (position, forward, up)',
+    lis.positionX.value === 1 && lis.positionY.value === 2 && lis.positionZ.value === 3 && lis.forwardZ.value === -1 && lis.upY.value === 1);
+  engine.setListenerPose({ x: 0, y: 0, z: 0 }, 0);
+  const fire = (fn) => { const b = created.length; fn(); return created.slice(b); };
+  const delayOf = (nodes) => nodes.filter((n) => n.kind === 'Delay').map((n) => n.delayTime.value);
+  const near139 = fire(() => engine.playAt('cannonFire', 139, { pos: { x: 0, y: 0, z: -139 } }));
+  const far141 = fire(() => engine.playKegExplosion(141, { x: 0, y: 0, z: -141 }));
+  engine.lastPlayed?.clear?.();
+  const far600 = fire(() => engine.playKegExplosion(600, { x: 0, y: 0, z: -600 }));
+  const [e139] = delayOf(near139), [e141] = delayOf(far141), [e600] = delayOf(far600);
+  check('engine: positioned one-shots are delayed d/343 in the graph (cannon 139 m vs keg 141 m < 10 ms apart; keg 600 m = 1.749 s, not the old 1.2 s cap)',
+    Math.abs(e141 - e139) < 0.010 && Math.abs(e600 - 1.749) <= 0.005, `139 ${e139} 141 ${e141} 600 ${e600}`);
+  const srcs139 = near139.filter((n) => n.kind === 'Oscillator' || n.kind === 'BufferSource');
+  const panners = near139.filter((n) => n.kind === 'Panner');
+  check('engine: a positioned one-shot runs through ONE world PannerNode at the source (HRTF on high desktop) and every voice passes it',
+    panners.length === 1 && panners[0].positionZ.value === -139 && panners[0].panningModel === 'HRTF' && panners[0].rolloffFactor === 0
+      && srcs139.length > 0 && srcs139.every((s) => downstream(s).has(panners[0])), `${panners.length} panners, ${srcs139.length} sources`);
+  engine.setAudioTier('balanced');
+  const lp = (nodes) => nodes.filter((n) => n.kind === 'BiquadFilter' && n.type === 'lowpass')[0]?.frequency.value;
+  const fAhead = fire(() => engine.playSplash(1, 20, { x: 0, y: 0, z: -20 }));
+  const fBehind = fire(() => engine.playSplash(1, 20, { x: 0, y: 0, z: 20 }));
+  const pA = fAhead.find((n) => n.kind === 'Panner'), pB = fBehind.find((n) => n.kind === 'Panner');
+  check('engine: equalpower off the high tier; a splash behind is placed behind and darker than the same splash ahead',
+    pA?.panningModel === 'equalpower' && pA.positionZ.value === -20 && pB?.positionZ.value === 20 && lp(fBehind) < lp(fAhead),
+    `ahead lp ${lp(fAhead)} behind lp ${lp(fBehind)}`);
+  engine.setAudioTier('high');
+  // samples pick up the same chain
+  const sbuf = { duration: 0.5, length: 24000, numberOfChannels: 1 };
+  const sbank = new SampleBank({ fetchBytes: async () => new ArrayBuffer(8), decode: async () => sbuf }, { capBytes: DECODED_CAP_BYTES.desktop });
+  sbank.setManifest({ keys: { 'wood.crack': { tier: 'match', kind: 'oneshot', files: [{ file: 'match/wood.crack.1.mp3', bytes: 1, duration: 0.5, channels: 1 }] } } });
+  sbank.preloadTier?.('match');
+  engine.bank = sbank;
+  engine.playSample('wood.crack', { pos: { x: 0, y: 0, z: -600 } });
+  await new Promise((r) => setTimeout(r, 5));
+  const sNodes = fire(() => engine.playSample('wood.crack', { pos: { x: 0, y: 0, z: 600 } }));
+  const sSrc = sNodes.find((n) => n.kind === 'BufferSource');
+  const sDelay = sNodes.find((n) => n.kind === 'Delay');
+  const sPan = sNodes.find((n) => n.kind === 'Panner');
+  check('engine: a positioned SAMPLE gets the same delay + panner chain (600 m behind -> 1.749 s, panner at +600)',
+    !!sSrc && !!sDelay && !!sPan && Math.abs(sDelay.delayTime.value - 1.749) <= 0.005 && sPan.positionZ.value === 600 && downstream(sSrc).has(sDelay) && downstream(sSrc).has(sPan),
+    `delay ${sDelay?.delayTime.value}`);
+  // Doppler on the whistle
+  engine.bank = null;
+  const wNodes = fire(() => engine.playCannonballWhistle(3, { x: 3, y: 0, z: 0 }, 0));
+  const wSrc = wNodes.find((n) => n.kind === 'BufferSource' && n.playbackRate.curve);
+  const wc = wSrc?.playbackRate.curve ?? [];
+  check('engine: the cannonball whistle rides a Doppler playbackRate curve (approach > 1.1, recede < 0.9)',
+    wc.length > 8 && wc[0] > 1.1 && wc[wc.length - 1] < 0.9, `rate ${wc[0]?.toFixed(3)} -> ${wc[wc.length - 1]?.toFixed(3)}`);
 }
 
 let failed = 0;

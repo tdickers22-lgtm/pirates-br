@@ -552,7 +552,8 @@ export const LOGIC = [
   //                                 orphans, every file re-measured +-1 LU; one writer per bed; creak 0 ashore.
   //                                 Not quick: ffmpeg re-measures ~80 files (~10 s). Needs ffmpeg on PATH.
   tsx('test-audio-manifest.mjs'),
-  //   test-audio-models           — b2.4b audio core on a fake Web Audio graph (audio-01/09/11, vm:performance:1):
+  //   test-audio-models           — b2.4b audio core on a fake Web Audio graph (audio-01/09/11, vm:performance:1)
+  //                                 + b2.4c Spatial laws and chain (audio-04/10/15):
   //                                 voice caps 64/40/24 hold under a 200-event burst, lowest priority x gain is
   //                                 stolen; the ui bus skips the world filter (engine UI click, sample and
   //                                 procedural); SampleBank: missing/404/late sample falls back without throwing,
