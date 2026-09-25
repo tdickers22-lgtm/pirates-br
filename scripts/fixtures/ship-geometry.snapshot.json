@@ -2,9 +2,9 @@
   "note": "Baseline for scripts/test-ship-geometry-hash.mjs. Rebuild ONLY inside a slice that intends the geometry change, and name the moved families in the commit.",
   "hulls": {
     "sloop": {
-      "digest": "3c4ad027",
+      "digest": "8d350c53",
       "meshCount": 102,
-      "vertTotal": 62302,
+      "vertTotal": 68214,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 2,
@@ -36,15 +36,15 @@
         },
         "hold-bilge-board": {
           "meshes": 1,
-          "verts": 72,
-          "tris": 24,
-          "hash": "75a6c7a1",
+          "verts": 2412,
+          "tris": 804,
+          "hash": "e72c3611",
           "box": [
-            -1.932,
+            -2.775,
             0.143,
             -3.672,
-            1.932,
-            0.897,
+            2.775,
+            2.04,
             3.672
           ]
         },
@@ -64,51 +64,51 @@
         },
         "hold-floor": {
           "meshes": 1,
-          "verts": 232,
-          "tris": 116,
-          "hash": "f41aac35",
+          "verts": 1368,
+          "tris": 456,
+          "hash": "ac7265d3",
           "box": [
-            -1.96,
+            -2.776,
             0.23,
             -4.08,
-            1.96,
-            0.35,
+            2.776,
+            2.04,
             4.08
           ]
         },
         "hold-hammock": {
           "meshes": 1,
-          "verts": 12,
-          "tris": 4,
-          "hash": "6b315109",
+          "verts": 1308,
+          "tris": 436,
+          "hash": "d82bc05e",
           "box": [
-            -1.884,
-            0.682,
-            -3.662,
-            1.82,
-            1.166,
-            3.662
+            -2.426,
+            1.007,
+            -4.034,
+            2.448,
+            1.892,
+            -1.838
           ]
         },
         "hold-inner-wall": {
           "meshes": 1,
-          "verts": 648,
-          "tris": 216,
-          "hash": "9d39d2ed",
+          "verts": 1488,
+          "tris": 496,
+          "hash": "52fb5ab9",
           "box": [
-            -2.1,
-            0.35,
+            -2.669,
+            0.23,
             -4.22,
-            2.1,
-            2,
+            2.669,
+            2.04,
             4.22
           ]
         },
         "hold-lantern-glass": {
           "meshes": 1,
-          "verts": 144,
-          "tris": 48,
-          "hash": "b4fcfa15",
+          "verts": 192,
+          "tris": 64,
+          "hash": "d74bf115",
           "box": [
             -0.091,
             1.1,
@@ -162,9 +162,9 @@
         },
         "ship-dark-timber": {
           "meshes": 7,
-          "verts": 10100,
-          "tris": 3420,
-          "hash": "9e6b69d1",
+          "verts": 10352,
+          "tris": 3504,
+          "hash": "557f043f",
           "box": [
             -2.884,
             -0.893,
@@ -345,9 +345,9 @@
       }
     },
     "brigantine": {
-      "digest": "4f375504",
+      "digest": "0041ca05",
       "meshCount": 131,
-      "vertTotal": 75742,
+      "vertTotal": 85458,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 4,
@@ -379,15 +379,15 @@
         },
         "hold-bilge-board": {
           "meshes": 1,
-          "verts": 72,
-          "tris": 24,
-          "hash": "98e6c339",
+          "verts": 3132,
+          "tris": 1044,
+          "hash": "577707a3",
           "box": [
-            -2.73,
+            -4.06,
             0.048,
             -4.896,
-            2.73,
-            0.992,
+            4.06,
+            2.64,
             4.896
           ]
         },
@@ -407,51 +407,51 @@
         },
         "hold-floor": {
           "meshes": 1,
-          "verts": 232,
-          "tris": 116,
-          "hash": "1c269ce5",
+          "verts": 2196,
+          "tris": 732,
+          "hash": "b2c5d5e5",
           "box": [
-            -2.72,
+            -4.043,
             0.23,
             -5.44,
-            2.72,
-            0.35,
+            4.043,
+            2.64,
             5.44
           ]
         },
         "hold-hammock": {
           "meshes": 1,
-          "verts": 12,
-          "tris": 4,
-          "hash": "27b0ed7d",
+          "verts": 2616,
+          "tris": 872,
+          "hash": "622a7a1f",
           "box": [
-            -2.486,
-            0.934,
-            -4.862,
-            2.389,
-            1.418,
-            4.862
+            -3.308,
+            1.102,
+            -5.013,
+            3.424,
+            2.266,
+            5.016
           ]
         },
         "hold-inner-wall": {
           "meshes": 1,
-          "verts": 648,
-          "tris": 216,
-          "hash": "8eab6eed",
+          "verts": 1644,
+          "tris": 548,
+          "hash": "1a50bd4f",
           "box": [
-            -2.86,
-            0.35,
+            -3.797,
+            0.23,
             -5.58,
-            2.86,
-            2.45,
+            3.797,
+            2.64,
             5.58
           ]
         },
         "hold-lantern-glass": {
           "meshes": 1,
-          "verts": 144,
-          "tris": 48,
-          "hash": "6f80e235",
+          "verts": 192,
+          "tris": 64,
+          "hash": "deee2635",
           "box": [
             -0.091,
             1.43,
@@ -463,15 +463,15 @@
         },
         "hold-lantern-iron": {
           "meshes": 1,
-          "verts": 108,
-          "tris": 36,
-          "hash": "8a3e0715",
+          "verts": 372,
+          "tris": 124,
+          "hash": "2bb7ba45",
           "box": [
             -0.1,
-            1.648,
-            -2.675,
-            0.1,
-            1.83,
+            0.625,
+            -5.383,
+            1.189,
+            1.925,
             2.675
           ]
         },
@@ -505,9 +505,9 @@
         },
         "ship-dark-timber": {
           "meshes": 8,
-          "verts": 10608,
-          "tris": 3612,
-          "hash": "11a315c4",
+          "verts": 11388,
+          "tris": 3872,
+          "hash": "54833800",
           "box": [
             -4.061,
             -1.098,
@@ -688,9 +688,9 @@
       }
     },
     "galleon": {
-      "digest": "746803b9",
+      "digest": "14e4049f",
       "meshCount": 173,
-      "vertTotal": 98065,
+      "vertTotal": 112971,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 8,
@@ -722,16 +722,16 @@
         },
         "hold-bilge-board": {
           "meshes": 1,
-          "verts": 72,
-          "tris": 24,
-          "hash": "f45da869",
+          "verts": 4392,
+          "tris": 1464,
+          "hash": "3aa9b54b",
           "box": [
-            -3.913,
+            -5.985,
             -0.063,
-            -6.732,
-            3.913,
-            1.103,
-            6.732
+            -6.95,
+            5.985,
+            3.34,
+            6.95
           ]
         },
         "hold-crate": {
@@ -750,51 +750,51 @@
         },
         "hold-floor": {
           "meshes": 1,
-          "verts": 232,
-          "tris": 116,
-          "hash": "ca7664dd",
+          "verts": 3948,
+          "tris": 1316,
+          "hash": "4f5d90ae",
           "box": [
-            -3.86,
+            -5.996,
             0.23,
             -7.48,
-            3.86,
-            0.35,
+            5.996,
+            3.34,
             7.48
           ]
         },
         "hold-hammock": {
           "meshes": 1,
-          "verts": 18,
-          "tris": 6,
-          "hash": "b31aa643",
+          "verts": 3924,
+          "tris": 1308,
+          "hash": "e2485327",
           "box": [
-            -4.18,
-            1.228,
-            -6.662,
-            3.388,
-            1.712,
-            6.662
+            -4.893,
+            1.213,
+            -6.482,
+            4.836,
+            2.376,
+            6.485
           ]
         },
         "hold-inner-wall": {
           "meshes": 1,
-          "verts": 648,
-          "tris": 216,
-          "hash": "1fe86f91",
+          "verts": 1836,
+          "tris": 612,
+          "hash": "ecdd8667",
           "box": [
-            -4,
-            0.35,
+            -5.51,
+            0.23,
             -7.62,
-            4,
-            2.975,
+            5.51,
+            3.34,
             7.62
           ]
         },
         "hold-lantern-glass": {
           "meshes": 1,
-          "verts": 144,
-          "tris": 48,
-          "hash": "a5343f79",
+          "verts": 192,
+          "tris": 64,
+          "hash": "002aae53",
           "box": [
             -0.091,
             1.815,
@@ -806,14 +806,14 @@
         },
         "hold-lantern-iron": {
           "meshes": 1,
-          "verts": 108,
-          "tris": 36,
-          "hash": "f120a941",
+          "verts": 372,
+          "tris": 124,
+          "hash": "7126dd49",
           "box": [
             -0.1,
-            2.033,
-            -3.635,
-            0.1,
+            0.625,
+            -7.423,
+            1.553,
             2.215,
             3.635
           ]
@@ -848,9 +848,9 @@
         },
         "ship-dark-timber": {
           "meshes": 9,
-          "verts": 11260,
-          "tris": 3852,
-          "hash": "307223fc",
+          "verts": 12724,
+          "tris": 4340,
+          "hash": "a14546ef",
           "box": [
             -5.915,
             -1.315,

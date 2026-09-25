@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { registerBudgetLight } from '../LightBudget.js';
 import { getShipHoldHalfWidth } from '../../../shared/interactions.js';
-import { hullSurfacePointAt } from '../../../shared/hull.js';
+import { hullSurfacePointAt, stationSurfaceAt } from '../../../shared/hull.js';
 import type { HullProfile } from '../../../shared/hull.js';
 import { acquireSharedGeometry, makeLoftedSlabGeometry, makeSheerRunGeometry } from './geometry.js';
 
@@ -76,6 +76,166 @@ export function bilgeBoardInboardFaceAt(
   return { x: side * (cx - half * c + v * s), nx: -side * c, ny: s };
 }
 
+/**
+ * THE INNER PLANKING (ships-10, b2.3e). The hold used to be a box: flat walls
+ * 0.4-2.5 m inboard of the hull, so from inside it read as a lit tunnel, not a
+ * ship. Above the stowage lockers the visible skin is now the ceiling planking,
+ * HOLD_CEILING_OFFSET inboard of the SHARED hull sampler (hullSurfacePointAt),
+ * so whatever reshapes the loft (the b4 spline) carries the hold with it.
+ * Horizontal offset: on these flared topsides |nx| >= 0.9, so the normal
+ * distance stays inside 0.08-0.15 m (test-ship-geometry 2c).
+ */
+export const HOLD_CEILING_OFFSET = 0.12;
+/** Frame (rib) spacing along the hold, metres. */
+export const HOLD_FRAME_SPACING = 0.6;
+
+/** Hull-local half-width of the ceiling planking's inboard face at (z, y). */
+export function holdCeilingHalfAt(profile: HullProfile, z: number, y: number): number {
+  return drawnShellHalfAt(profile, z, y) - HOLD_CEILING_OFFSET;
+}
+
+/** The DRAWN shell's half-width at (z, y): each station's surface point at y
+ *  (shared stationSurfaceAt) carries its own RAKED z, and x is interpolated
+ *  over those. hullSurfacePointAt interpolates over the base z instead, which
+ *  near the sheer at the hold ends reads up to 5 cm narrower than the planking
+ *  the renderer lofts (measured 0.172 m vs 0.12 on the galleon). */
+function drawnShellHalfAt(profile: HullProfile, z: number, y: number): number {
+  const sts = profile.stations;
+  let prev = stationSurfaceAt(sts[0], y);
+  if (z <= prev.z) return prev.x;
+  for (let i = 1; i < sts.length; i++) {
+    const cur = stationSurfaceAt(sts[i], y);
+    if (z <= cur.z) {
+      const t = (z - prev.z) / Math.max(1e-4, cur.z - prev.z);
+      return prev.x + (cur.x - prev.x) * t;
+    }
+    prev = cur;
+  }
+  return prev.x;
+}
+
+/**
+ * Top of the stowage lockers along both sides of the hold. The lining (the
+ * walk wall 3-12 cm outboard of the server clamp) stops here and a lid runs
+ * out to the ceiling planking, so the pirate is stopped by a locker front she
+ * can see instead of by a wall 1-2 m short of the hull. Just above the angled
+ * bilge board's top edge.
+ */
+export function holdLockerTopY(stats: { height: number }): number {
+  const c = Math.cos(BILGE_BOARD_TILT), s = Math.sin(BILGE_BOARD_TILT);
+  return BILGE_BOARD_Y + stats.height * BILGE_BOARD_H_F * 0.5 * c + BILGE_BOARD_THICK * 0.5 * s + 0.06;
+}
+
+/** Deck underside (bottom of the ceiling slabs) = top of the inner planking. */
+function deckUndersideY(H: number): number { return H - 0.16; }
+
+function addQuad(pos: number[], idx: number[], a: number[], b: number[], c: number[], d: number[], flip: boolean) {
+  const base = pos.length / 3;
+  pos.push(...a, ...b, ...c, ...d);
+  if (flip) idx.push(base, base + 2, base + 1, base, base + 3, base + 2);
+  else idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+}
+
+function finishGeometry(pos: number[], idx: number[]): THREE.BufferGeometry {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  const uv = new Float32Array((pos.length / 3) * 2);
+  for (let i = 0; i < pos.length / 3; i++) { uv[i * 2] = pos[i * 3 + 2] * 0.5; uv[i * 2 + 1] = pos[i * 3 + 1] * 0.5; }
+  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  const ng = geo.toNonIndexed();
+  ng.computeVertexNormals();
+  geo.dispose();
+  return ng;
+}
+
+/** Inner planking: strakes ~0.2 m tall with 12 mm seams (the seam shows the
+ *  dark void behind), single-sided, facing inboard. */
+function makeCeilingPlankingGeometry(profile: HullProfile, holdZ: number, y0: number, y1: number): THREE.BufferGeometry {
+  const pos: number[] = [], idx: number[] = [];
+  const strakes = Math.max(3, Math.round((y1 - y0) / 0.21));
+  const sh = (y1 - y0) / strakes;
+  const nz = Math.max(8, Math.ceil((holdZ * 2) / 0.5));
+  for (const side of [-1, 1] as const) {
+    for (let k = 0; k < strakes; k++) {
+      const yb = y0 + k * sh + (k === 0 ? 0 : 0.006);
+      const yt = y0 + (k + 1) * sh - (k === strakes - 1 ? 0 : 0.006);
+      for (let i = 0; i < nz; i++) {
+        const z0 = -holdZ + (i / nz) * holdZ * 2, z1 = -holdZ + ((i + 1) / nz) * holdZ * 2;
+        const p = (z: number, y: number) => [side * holdCeilingHalfAt(profile, z, y), y, z];
+        addQuad(pos, idx, p(z0, yb), p(z1, yb), p(z1, yt), p(z0, yt), side < 0);
+      }
+    }
+  }
+  return finishGeometry(pos, idx);
+}
+
+/** Frames every HOLD_FRAME_SPACING: 0.10 m sided, 0.09 m moulded, standing
+ *  proud of the ceiling from the locker lid to the deck. One merged draw. */
+function makeFrameGeometry(profile: HullProfile, holdZ: number, y0: number, y1: number): THREE.BufferGeometry {
+  const pos: number[] = [], idx: number[] = [];
+  const n = Math.floor((holdZ * 2 - 0.3) / HOLD_FRAME_SPACING);
+  const z0 = -((n - 1) * HOLD_FRAME_SPACING) / 2;
+  const rows = 5, sided = 0.05, moulded = 0.09;
+  for (let f = 0; f < n; f++) {
+    const fz = z0 + f * HOLD_FRAME_SPACING;
+    for (const side of [-1, 1] as const) {
+      for (let r = 0; r < rows; r++) {
+        const ya = y0 + (r / rows) * (y1 - y0), yb = y0 + ((r + 1) / rows) * (y1 - y0);
+        const xa = holdCeilingHalfAt(profile, fz, ya), xb = holdCeilingHalfAt(profile, fz, yb);
+        const P = (x: number, y: number, z: number) => [side * x, y, z];
+        // inboard face
+        addQuad(pos, idx, P(xa - moulded, ya, fz - sided), P(xa - moulded, ya, fz + sided), P(xb - moulded, yb, fz + sided), P(xb - moulded, yb, fz - sided), side < 0);
+        // fore and aft cheeks
+        addQuad(pos, idx, P(xa, ya, fz + sided), P(xb, yb, fz + sided), P(xb - moulded, yb, fz + sided), P(xa - moulded, ya, fz + sided), side < 0);
+        addQuad(pos, idx, P(xa, ya, fz - sided), P(xa - moulded, ya, fz - sided), P(xb - moulded, yb, fz - sided), P(xb, yb, fz - sided), side < 0);
+      }
+    }
+  }
+  return finishGeometry(pos, idx);
+}
+
+/** A hammock slung fore-and-aft: sagging cloth, curled edges. */
+function makeHammockGeometry(len: number, width: number, sag: number): THREE.BufferGeometry {
+  const geo = new THREE.PlaneGeometry(width, len, 4, 10);
+  const pa = geo.attributes.position as THREE.BufferAttribute;
+  for (let i = 0; i < pa.count; i++) {
+    const x = pa.getX(i), zl = pa.getY(i);
+    const t = zl / (len * 0.5), u = x / (width * 0.5);
+    const y = -sag * (1 - t * t) + 0.06 * u * u * (1 - t * t);
+    pa.setXYZ(i, x * (0.35 + 0.65 * (1 - t * t)), y, zl);
+  }
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/** A cargo net draped over a lump of stores: rope ribbons on a dome. */
+function makeCargoNetGeometry(rx: number, rz: number, h: number): THREE.BufferGeometry {
+  const pos: number[] = [], idx: number[] = [];
+  const top = (x: number, z: number) => h * Math.max(0, 1 - (x / rx) ** 2 - (z / rz) ** 2) ** 0.5 + 0.01;
+  const w = 0.014, lines = 6, seg = 10;
+  for (let l = 0; l <= lines; l++) {
+    const f = -1 + (2 * l) / lines;
+    for (let k = 0; k < seg; k++) {
+      const a = -1 + (2 * k) / seg, b = -1 + (2 * (k + 1)) / seg;
+      // along z at x = f rx
+      const xa = f * rx * 0.98, za = a * rz * Math.sqrt(Math.max(0, 1 - f * f)), zb = b * rz * Math.sqrt(Math.max(0, 1 - f * f));
+      addQuad(pos, idx, [xa - w, top(xa, za), za], [xa + w, top(xa, za), za], [xa + w, top(xa, zb), zb], [xa - w, top(xa, zb), zb], true);
+      // along x at z = f rz
+      const zc = f * rz * 0.98, xa2 = a * rx * Math.sqrt(Math.max(0, 1 - f * f)), xb2 = b * rx * Math.sqrt(Math.max(0, 1 - f * f));
+      addQuad(pos, idx, [xa2, top(xa2, zc), zc - w], [xb2, top(xb2, zc), zc - w], [xb2, top(xb2, zc), zc + w], [xa2, top(xa2, zc), zc + w], false);
+    }
+  }
+  return finishGeometry(pos, idx);
+}
+
+function tintGeometry(geo: THREE.BufferGeometry, r: number, gr: number, b: number) {
+  const n = geo.attributes.position.count;
+  const c = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) { c[i * 3] = r; c[i * 3 + 1] = gr; c[i * 3 + 2] = b; }
+  geo.setAttribute('color', new THREE.BufferAttribute(c, 3));
+}
+
 export interface StairwellHole {
   cx: number;
   cz: number;
@@ -105,6 +265,8 @@ export function makeShipInterior(
   const W = stats.width, L = stats.length, H = stats.height;
   const holdZ = L * HOLD_HALF_LENGTH_F;
   const holdHalf = (z: number) => holdHalfWidthAt(stats, profile, z);
+  const ironMatShared = new THREE.MeshStandardMaterial({ color: 0x140f08, roughness: 0.75 });
+  ironMatShared.name = 'hold-lantern-iron';
 
   // Hold floor — warmer brown with a touch of wood grain so it reads as an actual
   // floor (not a flat dark tarp) when the player peers down through the stairwell.
@@ -125,7 +287,12 @@ export function makeShipInterior(
   const wallMat = new THREE.MeshStandardMaterial({ color: 0x3a2010, roughness: 1 });
   wallMat.name = 'hold-inner-wall';
   breachDiscard?.(wallMat);
-  const wallH = H * 0.75;
+  const lockerTop = holdLockerTopY(stats);
+  const deckUnder = deckUndersideY(H);
+  const ceilAt = (z: number, y: number) => holdCeilingHalfAt(profile, z, y);
+  // The lining is now the stowage-locker FRONT: it stops at the locker top and
+  // a lid runs out to the inner planking (below).
+  const wallH = lockerTop - 0.01 - HOLD_FLOOR_Y;
   for (const side of [-1, 1] as const) {
     const wall = new THREE.Mesh(
       makeSheerRunGeometry(profile, side, {
@@ -137,18 +304,100 @@ export function makeShipInterior(
     g.add(wall);
   }
 
-  // Bow/stern bulkheads so the hold reads as an enclosed room instead of an open box.
-  // Both bulkheads stand ON the footprint's own end (0.34 L), not 0.39 L: the
-  // clamp used to stop a pirate 1.1 m short of the timber she could see.
+  // Locker lids: from the lining's top out to the inner planking, one lofted
+  // strip per side (top + inboard edge). Stores, nets, stanchions and the
+  // hammocks' lower reach live out here, outboard of the walk clamp.
+  {
+    const pos: number[] = [], idx: number[] = [];
+    const nz = Math.max(8, Math.ceil((holdZ * 2) / 0.5));
+    const yT = lockerTop + 0.05;
+    for (const side of [-1, 1] as const) {
+      for (let i = 0; i < nz; i++) {
+        const z0 = -holdZ + (i / nz) * holdZ * 2, z1 = -holdZ + ((i + 1) / nz) * holdZ * 2;
+        // Front edge on the lining face, never inside the walk clamp's 3 cm
+        // (where the planking wins at the taper ends the lining sits closer).
+        const lidEdge = (z: number) => Math.max(holdHalf(z), getShipHoldHalfWidth(stats, z) + 0.04);
+        const xi0 = lidEdge(z0), xi1 = lidEdge(z1);
+        const xo0 = Math.max(xi0, ceilAt(z0, yT)), xo1 = Math.max(xi1, ceilAt(z1, yT));
+        addQuad(pos, idx, [side * xi0, yT, z0], [side * xo0, yT, z0], [side * xo1, yT, z1], [side * xi1, yT, z1], side > 0);
+        addQuad(pos, idx, [side * xi0, yT - 0.06, z0], [side * xi0, yT, z0], [side * xi1, yT, z1], [side * xi1, yT - 0.06, z1], side > 0);
+      }
+    }
+    const lids = new THREE.Mesh(finishGeometry(pos, idx), wallMat);
+    lids.name = 'hold-locker-lids';
+    lids.receiveShadow = true;
+    g.add(lids);
+  }
+
+  // Inner planking (ceiling) from the lids to the deck, on the hull sampler.
+  // Same material as the sole (one draw, same breach cut).
+  const ceiling = new THREE.Mesh(makeCeilingPlankingGeometry(profile, holdZ, lockerTop + 0.05, deckUnder), floorMat);
+  ceiling.name = 'hold-ceiling-planking';
+  ceiling.receiveShadow = true;
+  g.add(ceiling);
+
+  // Bow/stern bulkheads: the full section at the hold ends, sole to deck,
+  // out to the inner planking. On a brig or galleon the AFT one is the
+  // stern-cabin bulkhead: planked face, door with frame and iron strap hinges.
   const bulkheadD = 0.14;
   for (const sz of [-1, 1] as const) {
-    const bz = sz * (holdZ + bulkheadD * 0.5);
-    const bulkhead = new THREE.Mesh(
-      new THREE.BoxGeometry(holdHalf(sz * holdZ) * 2, wallH, bulkheadD),
-      wallMat,
-    );
-    bulkhead.position.set(0, wallH * 0.5 + HOLD_FLOOR_Y, bz);
+    const bzFace = sz * holdZ;
+    const shape = new THREE.Shape();
+    const steps = 8;
+    const floorHalf = holdHalf(bzFace);
+    shape.moveTo(-floorHalf, HOLD_FLOOR_Y - 0.12);
+    shape.lineTo(floorHalf, HOLD_FLOOR_Y - 0.12);
+    shape.lineTo(floorHalf, lockerTop + 0.05);
+    for (let k = 0; k <= steps; k++) {
+      const y = lockerTop + 0.05 + (k / steps) * (deckUnder - lockerTop - 0.05);
+      shape.lineTo(Math.max(floorHalf, ceilAt(bzFace, y)), y);
+    }
+    for (let k = steps; k >= 0; k--) {
+      const y = lockerTop + 0.05 + (k / steps) * (deckUnder - lockerTop - 0.05);
+      shape.lineTo(-Math.max(floorHalf, ceilAt(bzFace, y)), y);
+    }
+    shape.lineTo(-floorHalf, lockerTop + 0.05);
+    shape.closePath();
+    const bgeo = new THREE.ExtrudeGeometry(shape, { depth: bulkheadD, bevelEnabled: false, curveSegments: 1 });
+    const bulkhead = new THREE.Mesh(bgeo, wallMat);
+    bulkhead.position.z = sz < 0 ? bzFace - bulkheadD : bzFace;
+    bulkhead.name = sz < 0 ? 'hold-bulkhead-aft' : 'hold-bulkhead-fwd';
     g.add(bulkhead);
+    if (sz < 0 && L >= 15) {
+      // Stern-cabin bulkhead dressing on the hold face (z = -holdZ, facing +z).
+      const doorW = 0.78, doorH = Math.min(1.85, deckUnder - HOLD_FLOOR_Y - 0.25);
+      const doorX = Math.min(floorHalf * 0.45, floorHalf - doorW);
+      const fz = bzFace;
+      const battens = Math.floor((floorHalf * 2) / 0.32);
+      for (let b = 0; b <= battens; b++) {
+        const bx = -floorHalf + b * ((floorHalf * 2) / battens);
+        if (Math.abs(bx - doorX) < doorW * 0.5 + 0.1) continue;
+        const batten = new THREE.Mesh(new THREE.BoxGeometry(0.035, deckUnder - HOLD_FLOOR_Y, 0.02), darkMat);
+        batten.position.set(bx, (deckUnder + HOLD_FLOOR_Y) * 0.5, fz + 0.01);
+        g.add(batten);
+      }
+      for (const [w, h, x, y] of [
+        [0.1, doorH + 0.1, doorX - doorW * 0.5 - 0.05, HOLD_FLOOR_Y + (doorH + 0.1) * 0.5],
+        [0.1, doorH + 0.1, doorX + doorW * 0.5 + 0.05, HOLD_FLOOR_Y + (doorH + 0.1) * 0.5],
+        [doorW + 0.2, 0.1, doorX, HOLD_FLOOR_Y + doorH + 0.05],
+      ] as const) {
+        const jamb = new THREE.Mesh(new THREE.BoxGeometry(w, h, 0.06), darkMat);
+        jamb.position.set(x, y, fz + 0.03);
+        g.add(jamb);
+      }
+      const door = new THREE.Mesh(new THREE.BoxGeometry(doorW, doorH, 0.045), wallMat);
+      door.position.set(doorX, HOLD_FLOOR_Y + doorH * 0.5, fz + 0.035);
+      door.name = 'hold-stern-cabin-door';
+      g.add(door);
+      for (const hy of [0.3, doorH - 0.3]) {
+        const strap = new THREE.Mesh(new THREE.BoxGeometry(doorW * 0.62, 0.05, 0.012), ironMatShared);
+        strap.position.set(doorX - doorW * 0.19, HOLD_FLOOR_Y + hy, fz + 0.063);
+        g.add(strap);
+      }
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.045, 0.009, 4, 8), ironMatShared);
+      ring.position.set(doorX + doorW * 0.33, HOLD_FLOOR_Y + doorH * 0.52, fz + 0.07);
+      g.add(ring);
+    }
   }
 
   for (const sx of [-1, 1] as const) {
@@ -157,6 +406,7 @@ export function makeShipInterior(
         new THREE.BoxGeometry(0.16, wallH, 0.16),
         darkMat,
       );
+      cornerPost.name = 'hold-locker-post';
       cornerPost.position.set(sx * (holdHalf(sz * holdZ) - 0.09), wallH * 0.5 + HOLD_FLOOR_Y, sz * holdZ);
       cornerPost.castShadow = true;
       g.add(cornerPost);
@@ -215,49 +465,97 @@ export function makeShipInterior(
   const cStarWidth = Math.max(0, cw - cHoleXMax);
   if (cStarWidth > 0 && cMidDepth > 0) addCeilingSlab(cHoleXMax + cStarWidth * 0.5, hole.cz, cStarWidth, cMidDepth);
 
-  // Ribs break up the box silhouette and make the hull interior feel more ship-shaped.
-  const ribCount = Math.max(4, Math.round(L / 5));
-  for (let r = 0; r < ribCount; r++) {
-    const rz = -L * 0.26 + r * (L * 0.52 / Math.max(ribCount - 1, 1));
-    for (const sx of [-1, 1]) {
-      const rib = new THREE.Mesh(
-        new THREE.BoxGeometry(0.1, wallH * 0.92, 0.12),
-        darkMat,
-      );
-      rib.position.set(sx * (holdHalf(rz) - 0.16), wallH * 0.5 + 0.38, rz);
-      rib.rotation.z = sx * Math.PI * 0.1;
-      g.add(rib);
+  // Deck-underside margin: the ceiling slabs stop at 0.44 W, the inner
+  // planking reaches the hull; this down-facing strip closes the gap.
+  {
+    const pos: number[] = [], idx: number[] = [];
+    const nz = Math.max(8, Math.ceil((holdZ * 2) / 0.5));
+    for (const side of [-1, 1] as const) {
+      for (let i = 0; i < nz; i++) {
+        const z0 = -holdZ + (i / nz) * holdZ * 2, z1 = -holdZ + ((i + 1) / nz) * holdZ * 2;
+        const o0 = ceilAt(z0, deckUnder), o1 = ceilAt(z1, deckUnder);
+        const i0 = Math.min(cw - 0.05, o0), i1 = Math.min(cw - 0.05, o1);
+        addQuad(pos, idx, [side * i0, deckUnder, z0], [side * o0, deckUnder, z0], [side * o1, deckUnder, z1], [side * i1, deckUnder, z1], side < 0);
+      }
     }
+    g.add(new THREE.Mesh(finishGeometry(pos, idx), darkMat));
   }
 
-  // Deck beams (visible from below) — skip the stairwell band so the companionway stays open above.
-  const beamMat = darkMat;
-  const beamCount = Math.max(2, Math.round(L * 0.1));
-  for (let b = 0; b < beamCount; b++) {
-    const bz = -L * 0.38 + b * (L * 0.76 / Math.max(beamCount - 1, 1));
+  // FRAMES every 0.6 m on the inner planking, one merged draw that shares the
+  // bilge boards' material (and so the breach cut).
+  g.add(new THREE.Mesh(makeFrameGeometry(profile, holdZ, lockerTop + 0.05, deckUnder), bilgeMat));
+
+  // DECK BEAMS on every third frame, ceiling to ceiling, each end on a
+  // HANGING KNEE against the planking; STANCHIONS on the locker lids under
+  // alternate beams (outboard of the walk clamp, so nobody walks through one).
+  const beamY = deckUnder - 0.07;
+  const nFrames = Math.floor((holdZ * 2 - 0.3) / HOLD_FRAME_SPACING);
+  const frame0 = -((nFrames - 1) * HOLD_FRAME_SPACING) / 2;
+  const kneeShape = new THREE.Shape();
+  kneeShape.moveTo(0, 0); kneeShape.lineTo(-0.46, 0); kneeShape.lineTo(-0.1, -0.1); kneeShape.lineTo(0, -0.46); kneeShape.closePath();
+  const kneeGeo = new THREE.ExtrudeGeometry(kneeShape, { depth: 0.09, bevelEnabled: false, curveSegments: 1 });
+  let beamIdx = 0;
+  for (let f = 1; f < nFrames - 1; f += 3) {
+    const bz = frame0 + f * HOLD_FRAME_SPACING;
     if (bz > hole.cz - hole.halfZ - 0.18 && bz < hole.cz + hole.halfZ + 0.18) continue;
-    const beam = new THREE.Mesh(
-      new THREE.BoxGeometry(Math.min(W * 0.86, holdHalf(bz) * 2 + 0.2), 0.12, 0.18),
-      beamMat,
-    );
-    beam.position.set(0, H - 0.25, bz);
+    const bw = ceilAt(bz, beamY);
+    const beam = new THREE.Mesh(new THREE.BoxGeometry(bw * 2, 0.14, 0.18), darkMat);
+    beam.position.set(0, beamY, bz);
     g.add(beam);
+    for (const side of [-1, 1] as const) {
+      const knee = new THREE.Mesh(kneeGeo, darkMat);
+      knee.position.set(side * ceilAt(bz, beamY - 0.2), beamY - 0.07, bz - 0.045);
+      knee.scale.x = side;
+      g.add(knee);
+      if (beamIdx % 2 === 0) {
+        const sx = holdHalf(bz) + 0.32;
+        const reach = ceilAt(bz, lockerTop + 0.05);
+        if (sx < reach - 0.1) {
+          const stH = beamY - 0.07 - (lockerTop + 0.05);
+          const post = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.085, stH, quality === 'low' ? 6 : 8), darkMat);
+          post.position.set(side * sx, lockerTop + 0.05 + stH * 0.5, bz);
+          g.add(post);
+        }
+      }
+    }
+    beamIdx++;
   }
 
-  // Hammocks
+  // HAMMOCKS slung fore-and-aft between frames over the lockers, and CARGO
+  // NETS over stores on the lids opposite them.
   const hammockMat = new THREE.MeshStandardMaterial({ color: 0x8a7a55, roughness: 0.9, side: THREE.DoubleSide });
   hammockMat.name = 'hold-hammock';
   const hammockCount = Math.max(2, Math.round(L / 8));
+  const sackMat = hammockMat; // canvas sacks, same cloth: no extra draw
   for (let h = 0; h < hammockCount; h++) {
-    const hz = L * 0.3 - h * (L * 0.6 / Math.max(hammockCount - 1, 1));
+    const hz = holdZ * 0.72 - h * ((holdZ * 1.44) / Math.max(hammockCount - 1, 1));
     const sx = h % 2 === 0 ? 1 : -1;
-    const hammock = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.5, 1.4),
-      hammockMat,
-    );
-    hammock.position.set(sx * (holdHalf(hz) - 0.38), H * 0.42, hz);
-    hammock.rotation.set(Math.PI * 0.08, 0, Math.PI * 0.5);
+    const inner = holdHalf(hz), outer = ceilAt(hz, lockerTop + 0.05);
+    const shelf = outer - inner;
+    if (shelf < 0.45) continue;
+    const hy = lockerTop + 0.05 + Math.min(0.95, (deckUnder - lockerTop) * 0.62);
+    const hx = inner + shelf * 0.5;
+    const hammock = new THREE.Mesh(makeHammockGeometry(1.7, Math.min(0.62, shelf * 0.8), 0.28), hammockMat);
+    hammock.position.set(sx * Math.min(hx, ceilAt(hz, hy) - 0.36), hy, hz);
     g.add(hammock);
+    for (const e of [-1, 1]) {
+      const lanyard = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.01, 0.34, 3, 1, true), hammockMat);
+      lanyard.position.set(hammock.position.x, hy + 0.1, hz + e * 0.96);
+      lanyard.rotation.x = e * 0.9;
+      g.add(lanyard);
+    }
+    // Stores + net on the opposite lid.
+    const nx = -sx * (inner + Math.min(shelf * 0.5, 0.55));
+    const ny = lockerTop + 0.05;
+    const rx = Math.min(0.42, shelf * 0.42), rz = 0.55;
+    for (const [dx, dz, r, hh] of [[0, -0.22, 0.2, 0.42], [0.04, 0.2, 0.22, 0.36]] as const) {
+      const sack = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.8, r, hh, quality === 'low' ? 6 : 8), sackMat);
+      sack.position.set(nx + dx * -sx, ny + hh * 0.5, hz + dz);
+      g.add(sack);
+    }
+    const net = new THREE.Mesh(makeCargoNetGeometry(rx, rz, 0.48), hammockMat);
+    net.position.set(nx, ny, hz);
+    g.add(net);
   }
 
   // Crates along port/starboard bilge — keep the stairwell / centerline clear so nothing blocks the view down.
@@ -310,22 +608,35 @@ export function makeShipInterior(
   // bake and add no draw call at all. The hold is interior geometry behind the
   // detail root, so a distant hull never builds or draws them.
   const lanternSides = quality === 'low' ? 4 : 6;
-  const glassMat = new THREE.MeshStandardMaterial({
-    color: 0xFFD66A, emissive: 0xFF8800, emissiveIntensity: 2.0,
+  // Horn glass + flame card in ONE additive vertex-coloured material: the
+  // glass is a dim amber shell you see into, the crossed flame card inside is
+  // what burns (b2.3e). One draw for both lanterns, as before.
+  const glassMat = new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, depthWrite: false,
+    blending: THREE.AdditiveBlending, toneMapped: false,
   });
   glassMat.name = 'hold-lantern-glass';
-  const ironMat = new THREE.MeshStandardMaterial({ color: 0x140f08, roughness: 0.75 });
-  ironMat.name = 'hold-lantern-iron';
+  const ironMat = ironMatShared;
   const lanternY = H * 0.55;
   const lanternZ = Math.min(L * 0.16, holdZ * 0.62);
   for (const lz of [-lanternZ, lanternZ]) {
     // Tapered glass: wider at the shoulder than at the foot, the way a horn
     // lantern is, so it catches the light differently top and bottom.
-    const glass = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.105, 0.078, 0.22, lanternSides), glassMat,
-    );
+    const glassGeo = new THREE.CylinderGeometry(0.105, 0.078, 0.22, lanternSides);
+    tintGeometry(glassGeo, 0.42, 0.24, 0.07);
+    const glass = new THREE.Mesh(glassGeo, glassMat);
     glass.position.set(0, lanternY, lz);
     g.add(glass);
+    for (const ry of [0, Math.PI * 0.5]) {
+      const flameGeo = new THREE.PlaneGeometry(0.055, 0.12, 1, 2);
+      const fp = flameGeo.attributes.position as THREE.BufferAttribute;
+      for (let i = 0; i < fp.count; i++) if (fp.getY(i) > 0.05) fp.setX(i, 0);
+      tintGeometry(flameGeo, 1.0, 0.72, 0.28);
+      const flame = new THREE.Mesh(flameGeo, glassMat);
+      flame.position.set(0, lanternY - 0.01, lz);
+      flame.rotation.y = ry;
+      g.add(flame);
+    }
     // Open-ended: the cap's top is against the beam and its underside is
     // against the glass, so both discs are geometry nobody can ever see. Same
     // for the hook, which is buried at both ends. That is 36 triangles a pair

@@ -34,6 +34,7 @@ const THREE = await import('three');
 const { ShipRenderer } = await import('../src/client/rendering/ShipRenderer.ts');
 const { SHIP_STATS } = await import('../src/shared/constants/index.ts');
 const { getShipHoldHalfWidth } = await import('../src/shared/interactions.ts');
+const interiorMod = await import('../src/client/rendering/ship/interior.ts');
 
 const MUTATE = process.argv.includes('--mutate');
 let failures = 0, checks = 0;
@@ -229,6 +230,45 @@ for (const type of ['sloop', 'brigantine', 'galleon']) {
       isFinite(minGap) && minGap >= 0.03 && minGap <= 0.12);
   }
 
+  // 2c. THE CEILING PLANKING follows the HULL, not the walk clamp (ships-10,
+  //     b2.3e). Above the stowage lockers the hold's visible skin is the inner
+  //     planking, 0.08-0.15 m inboard of the lofted shell at EVERY vertex
+  //     (horizontal, graded against this file's own copy of the loft). It
+  //     shares the sole's material (one draw), so it is found as the
+  //     'hold-floor' family above the locker top. The walkable floor itself is
+  //     pinned too: its top stays at 0.35 m and still covers the walk clamp.
+  {
+    const lockerTop = typeof interiorMod.holdLockerTopY === 'function' ? interiorMod.holdLockerTopY(stats) : 1.0;
+    const holdZ = stats.length * 0.34;
+    let n = 0, minGap = Infinity, maxGap = -Infinity, atMin = null, atMax = null, yTop = -Infinity, zLo = Infinity, zHi = -Infinity;
+    let floorTopMax = 0, floorTopN = 0, floorOver = 0;
+    detail.traverse((o) => {
+      if (!o.isMesh || o.isInstancedMesh || o.material?.name !== 'hold-floor') return;
+      const pos = o.geometry.attributes.position; if (!pos) return;
+      for (let i = 0; i < pos.count; i++) {
+        v.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld);
+        if (Math.abs(v.y - 0.35) < 0.005) {
+          floorTopN++;
+          if (Math.abs(v.z) < 0.5) floorTopMax = Math.max(floorTopMax, Math.abs(v.x));
+          if (Math.abs(v.x) > getShipHoldHalfWidth(stats, v.z) + 0.12) floorOver++;
+          continue;
+        }
+        if (v.y < lockerTop + 0.005) continue;
+        n++;
+        const gap = hullHalf(p, v.z, Math.min(v.y, sheerYAt(p, v.z))) - Math.abs(v.x);
+        if (gap < minGap) { minGap = gap; atMin = [+v.x.toFixed(2), +v.y.toFixed(2), +v.z.toFixed(2)]; }
+        if (gap > maxGap) { maxGap = gap; atMax = [+v.x.toFixed(2), +v.y.toFixed(2), +v.z.toFixed(2)]; }
+        yTop = Math.max(yTop, v.y); zLo = Math.min(zLo, v.z); zHi = Math.max(zHi, v.z);
+      }
+    });
+    expect(`${type}: inner planking present above the lockers (${n} verts, y to ${isFinite(yTop) ? yTop.toFixed(2) : '-'}, z ${isFinite(zLo) ? zLo.toFixed(2) : '-'}..${isFinite(zHi) ? zHi.toFixed(2) : '-'})`,
+      n >= 200 && yTop >= stats.height - 0.35 && zLo <= -holdZ * 0.9 && zHi >= holdZ * 0.9);
+    expect(`${type}: inner planking 0.08-0.15 m inboard of the hull at every vertex (min ${isFinite(minGap) ? minGap.toFixed(3) : '-'} at ${JSON.stringify(atMin)}, max ${isFinite(maxGap) ? maxGap.toFixed(3) : '-'} at ${JSON.stringify(atMax)})`,
+      n > 0 && minGap >= 0.08 && maxGap <= 0.15);
+    const clamp0 = getShipHoldHalfWidth(stats, 0);
+    expect(`${type}: walkable floor unchanged (top at 0.35 m, ${floorTopN} verts, reaches ${floorTopMax.toFixed(2)} >= clamp ${clamp0.toFixed(2)} amidships, ${floorOver} verts past clamp+0.12)`,
+      floorTopN > 0 && floorTopMax >= clamp0 && floorOver === 0);
+  }
   // 3. floating clusters: union-find over expanded AABBs
   const parent = meshes.map((_, i) => i);
   const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));

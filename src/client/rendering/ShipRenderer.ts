@@ -44,7 +44,7 @@ import { makeLoftedSlabGeometry, makeSheerRunGeometry, sheerHalfWidthAt, makeBil
 import { applyFlagWave, FLAG_DROP, FLAG_FLY, flagPhaseFromId, flagTexture, makeBarrel, makeCylinderBetween, makeFigurehead, makeHatchGrating, makeLanternFixture, makeRopeCoil, makeWindowFrame } from './ship/dressing.js';
 import type { FlagUniforms, ShipFlag } from './ship/dressing.js';
 import {
-  BILGE_BOARD_LEN_F, bilgeBoardInboardFaceAt, HOLD_FLOOR_Y, HOLD_HALF_LENGTH_F, holdHalfWidthAt, makeHoldCargoStacks, makeShipInterior,
+  BILGE_BOARD_LEN_F, bilgeBoardInboardFaceAt, holdCeilingHalfAt, holdLockerTopY, HOLD_FLOOR_Y, HOLD_HALF_LENGTH_F, holdHalfWidthAt, makeHoldCargoStacks, makeShipInterior,
 } from './ship/interior.js';
 import { BREACH_GLSL, breachBasis, breachDiscardGlsl, breachExtent, breachSeed, buildBreachEdgeGeometry, buildBreachPatchGeometry, strakeTangentAt } from './ship/breach.js';
 import { holeVisualRadius } from '../../shared/flooding/floodModel.js';
@@ -282,6 +282,9 @@ interface ShipMeshGroup {
   holdHalfLen: number;
   /** holes-06: the bilge board's inboard face at height y (null above/below it). */
   bilgeFaceAt: (side: -1 | 1, y: number) => { x: number; nx: number; ny: number } | null;
+  /** b2.3e: inner planking half-width at (z, y); above lockerTop it is the hold's skin. */
+  ceilingAt: (z: number, y: number) => number;
+  lockerTop: number;
   /** Waterline contact collar (wet-edge foam hugging the hull's own waterline). */
   waterlineFoam: THREE.Mesh;
   /** Phase-A planking uniforms: the hull-local wet line, moved every frame. */
@@ -2684,6 +2687,8 @@ export class ShipRenderer {
       hullHoleEnds,
       holdHalfAt: (z: number) => holdHalfWidthAt(stats, profile, z),
       bilgeFaceAt: (side: -1 | 1, y: number) => bilgeBoardInboardFaceAt(stats, profile, side, y),
+      ceilingAt: (z: number, y: number) => holdCeilingHalfAt(profile, z, y),
+      lockerTop: holdLockerTopY(stats),
       holdHalfLen: stats.length * HOLD_HALF_LENGTH_F,
       waterlineFoam,
       plankUniforms,
@@ -2855,6 +2860,13 @@ export class ShipRenderer {
       return { hasSeat: false, belowSole: false, onBoard: false };
     }
     const half = mesh.holdHalfAt(point.z);
+    if (point.y > mesh.lockerTop + 0.05) {
+      // b2.3e: above the stowage lockers the hold's skin is the inner
+      // planking 0.12 m inboard of the shell, so the tube ends 1 cm past it.
+      inner.set(side * (Math.max(half, mesh.ceilingAt(point.z, point.y)) - 0.01), point.y, point.z);
+      innerNormal.set(-side, 0, 0);
+      return { hasSeat: true, belowSole: false, onBoard: false };
+    }
     if (point.y >= HOLD_FLOOR_Y + 0.06) {
       // The angled bilge board stands 0.24 m inboard of the lining over the
       // whole above-sole band, so the tube ends 1 cm past ITS inboard face:
