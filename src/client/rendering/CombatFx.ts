@@ -1611,22 +1611,43 @@ export class CombatFx {
     );
   }
 
-  /**
-   * Water streaming out of a holed hull section below the waterline. Deliberately
-   * light (a few droplets + none of the heavy pools) — call it throttled per hole.
-   */
-  emitHullLeak(position: Vec3, outX: number, outZ: number) {
+  // ── Flood FX particle sink (b2.3b, ship/floodFx.ts drives these) ─────────
+  // emitHullLeak (3 droplets per hole every 0.4 s, holes-08) is retired: the
+  // jet itself is floodFx's instanced ribbon; these are only its particles.
+
+  /** One droplet of a breach jet's stream, launched on the jet's own velocity
+   *  so it rides the Torricelli arc (true gravity) and breaks off the ribbon. */
+  emitFloodSpray(x: number, y: number, z: number, vx: number, vy: number, vz: number, size: number) {
     if (!this.droplets) return;
-    const len = Math.hypot(outX, outZ) || 1;
-    const nx = outX / len;
-    const nz = outZ / len;
-    for (let index = 0; index < 3; index++) {
+    this.droplets.emit(
+      x, y, z, vx, vy, vz,
+      rand(0.35, 0.6), Math.max(0.04, size) * rand(0.8, 1.2), 0.02, 0.8, 0, pick(0xcfe6ee, 0xb7d9e6), -9.81, 0.15, 0,
+    );
+  }
+
+  /** Where a jet lands (sole or hold water): a short crown of droplets. */
+  emitFloodSplash(x: number, y: number, z: number, strength: number) {
+    if (!this.droplets) return;
+    const s = Math.min(1, Math.max(0, strength));
+    const n = 2 + Math.round(s * 3);
+    for (let index = 0; index < n; index++) {
+      const theta = Math.random() * Math.PI * 2;
+      const out = rand(0.4, 1.3) * (0.5 + s);
       this.droplets.emit(
-        position.x, position.y, position.z,
-        nx * rand(1.1, 2.6) + rand(-0.4, 0.4), rand(-0.6, 0.2), nz * rand(1.1, 2.6) + rand(-0.4, 0.4),
-        rand(0.4, 0.75), rand(0.05, 0.09), 0.03, 0.85, 0, pick(0xbfe0ee, 0xa9d2e6), -12, 0.55, 0,
+        x, y, z, Math.cos(theta) * out, rand(0.8, 2.0) * (0.5 + s), Math.sin(theta) * out,
+        rand(0.25, 0.45), rand(0.05, 0.1) * (0.7 + s), 0.03, 0.75, 0, pick(0xe4f2f7, 0xc6e2ec), -9.81, 0.3, 0,
       );
     }
+  }
+
+  /** A breach under the hold water: bubbles breaking the surface over it. */
+  emitFloodBubbles(x: number, y: number, z: number, strength: number) {
+    if (!this.droplets) return;
+    const s = Math.min(1, Math.max(0, strength));
+    this.droplets.emit(
+      x, y, z, rand(-0.25, 0.25), rand(0.3, 0.9) * (0.5 + s), rand(-0.25, 0.25),
+      rand(0.2, 0.4), rand(0.04, 0.09) * (0.6 + s), 0.12, 0.7, 0, 0xf1f8fa, -4, 0.6, 0,
+    );
   }
 
   emitShipHitConfirm(position: Vec3, cameraPos: THREE.Vector3) {

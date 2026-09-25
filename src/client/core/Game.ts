@@ -34,6 +34,7 @@ import { ShipRenderer } from '../rendering/ShipRenderer.js';
 import { SpoilsRenderer } from '../rendering/SpoilsRenderer.js';
 import { SeaEventRenderer } from '../world/SeaEventRenderer.js';
 import { CombatFx } from '../rendering/CombatFx.js';
+import { FloodFx, type FloodEmitter, type FloodFxShip } from '../rendering/ship/floodFx.js';
 import { SoundEngine, type FootstepSurface } from '../audio/SoundEngine.js';
 import { NetworkClient } from '../network/NetworkClient.js';
 import { connectCopy, waitForRetry, type ConnectPhase } from '../network/connectPolicy.js';
@@ -582,7 +583,14 @@ export class Game {
   private prevStormShrinking = false;
   // Bilge flooding audio loop + FX throttles (naval damage loop).
   private floodingLoopActive = false;
-  private lastHullLeakAt = 0;
+  /** Breach jets, boil and foam (b2.3b): one instanced ribbon draw for every jet. */
+  private floodFx: FloodFx | null = null;
+  private readonly floodFxShips: FloodFxShip[] = [];
+  private readonly floodFxSources = {
+    anchors: (id: string) => this.shipRenderer.getHoleAnchors(id),
+    holdWater: (id: string) => this.shipRenderer.getHoldWater(id),
+    surfaceY: (x: number, z: number) => this.ocean.getSurfaceY(x, z),
+  };
   private readonly lastChainshotWhirrAt = new Map<string, number>();
   // Camera feel — additive on top of updateCamera's base FOV/orientation.
   private cameraFovKick = 0;      // eased FOV bump in degrees
@@ -1175,6 +1183,7 @@ export class Game {
     await this.yieldForLoadingPaint();
 
     this.combatFx.init(this.renderer.scene);
+    this.floodFx = new FloodFx(this.renderer.scene, this.combatFx);
     this.envFx.initLanternSystem();
     this.renderer.scene.add(this.environment);
     // Static container: islands, sea rocks, chests and wildlife all live under
@@ -1809,7 +1818,6 @@ export class Game {
     this.cutlassSwingKind.clear();
     this.prevCutlassSwingProgress = 0;
     this.cutlassDashKick = 0;
-    this.lastHullLeakAt = 0;
     this.lastChainshotWhirrAt.clear();
     this.cameraFovKick = 0;
     this.cameraShake = 0;
@@ -7570,6 +7578,21 @@ export class Game {
       this.audio.setSailingState({ speed01: 0, roughness01: 0, heel01: 0, luffing: false });
     }
 
+    // Breach jets and boil (b2.3b, holes-08): every hull within 70 m with an
+    // open hole, judged by the SHARED flood predicate (ship/floodFx.ts), so a
+    // breach jets exactly when the server floods through it, at sqrt(2 g h).
+    // Replaces the 3-droplets-every-0.4 s emitHullLeak drizzle.
+    if (this.floodFx) {
+      const list = this.floodFxShips;
+      list.length = 0;
+      for (const s of this.state.ships) {
+        if (!s.holes?.some((h) => !h.patched) && !this.floodFx.tracking(s.id)) continue;
+        if (dist2D(cam.x, cam.z, s.position.x, s.position.z) > 70) continue;
+        list.push(s);
+      }
+      this.floodFx.update(_dt, t, list, this.floodFxSources);
+    }
+
     // Flooding loop — the ship you're on if it's taking water, else the nearest
     // flooding hull within earshot.
     const floodShip = aboardShip && (aboardShip.waterLevel ?? 0) > 0.02
@@ -7582,42 +7605,6 @@ export class Game {
         this.floodingLoopActive = true;
       } else {
         this.audio.updateFlooding(level);
-      }
-      if (t - this.lastHullLeakAt > 0.4) {
-        // Pressure jets, one per OPEN breach: the anchors ride the lofted hull
-        // (heave/pitch/roll/list) at the exact point the shot landed, +Z =
-        // outward normal. This is the only hull-leak FX path — the old fixed
-        // per-section spray points are gone with the section model.
-        if (!floodShip.sinking) {
-          for (const hole of this.shipRenderer.getHoleAnchors(floodShip.id)) {
-            if (!hole.active) continue;
-            hole.anchor.getWorldPosition(this.tempRenderPos);
-            // Submerged = the breach sits at/below the LIVE wave surface — computed
-            // per-hole (not a hardcoded per-section flag) so a holed, submerged bow
-            // or stern jets water just like the port/starboard breaches do.
-            // The SEA-STATE, not the weather number (storm-15): storminess is
-            // the overcast ramp (0.34-0.52 at the wall, 1 only deep outside)
-            // and feeding it to the Gerstner field asked whether the breach was
-            // under a swell nobody is drawing. getSurfaceY is the height of the
-            // water actually on screen, at this hole, this frame.
-            const waveY = this.ocean.getSurfaceY(this.tempRenderPos.x, this.tempRenderPos.z);
-            if (this.tempRenderPos.y > waveY + 0.2) continue;
-            hole.anchor.getWorldDirection(this.tempHudVector);
-            // INBOARD (HULLGEO-01, ships-19). A breach below the waterline is
-            // the sea being forced INTO the hull; jetting along +normal drew
-            // every leak spraying out of the ship like a fountain, which is the
-            // one thing the pressure cannot do. Anchors still sit on the outer
-            // skin until lane 4.2 lands its gush-anchor slice (0.12 m inboard
-            // along -normal); the sign is right either way.
-            const gush = -(0.7 + (floodShip.waterLevel ?? 0) * 0.9);
-            this.combatFx.emitHullLeak(
-              { x: this.tempRenderPos.x, y: this.tempRenderPos.y, z: this.tempRenderPos.z },
-              this.tempHudVector.x * gush,
-              this.tempHudVector.z * gush,
-            );
-          }
-        }
-        this.lastHullLeakAt = t;
       }
     } else if (this.floodingLoopActive) {
       this.audio.stopFlooding();
@@ -7662,6 +7649,12 @@ export class Game {
     this.prevStormShrinking = shrinkingNow;
 
     void localShip;
+  }
+
+  /** Live per-breach flood state (world pos, normal, q, v, boil) for the flood
+   *  audio (audio-02, b2.4d). Empty when the hull is dry or out of FX range. */
+  getFloodEmitters(shipId: string): FloodEmitter[] {
+    return this.floodFx?.getFloodEmitters(shipId) ?? [];
   }
 
   private findNearestFloodingShip(pos: THREE.Vector3, maxDist: number): Ship | null {
