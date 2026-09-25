@@ -142,6 +142,48 @@ try {
   expect('a STALE validator gets the bytes, not a 304',
     wrongEtag.status === 200 && wrongEtag.body.length === modelBytes.length, `status ${wrongEtag.status}`);
 
+  // ── 5b. CONTENT-HASHED MODELS (b3.1b, performance-14) ─────────────────────
+  // What the client actually fetches is modelUrl(key) = packed/<key>.<hash8>.glb
+  // out of src/client/assets/model-manifest.json. Every one of those must be
+  // `immutable` (0 revalidations on a repeat visit), must exist in the build,
+  // and must name its own bytes (else `immutable` pins a stale model forever).
+  {
+    const { ASSET_NAMES, FAR_ASSET_NAMES, LAZY_ASSET_NAMES } = await import('../src/client/assets/AssetLibrary.ts');
+    const { modelUrl } = await import('../src/client/assets/modelManifest.ts');
+    const { createHash } = await import('node:crypto');
+    const keys = [...new Set([...ASSET_NAMES, ...FAR_ASSET_NAMES.map((n) => `${n}_far`), ...LAZY_ASSET_NAMES.map((n) => `${n}_far`)])];
+    const HASHED = /^\/assets\/models\/packed\/([A-Za-z0-9_]+)\.([0-9a-f]{8})\.glb$/;
+    const unresolved = keys.filter((k) => !HASHED.test(modelUrl(k)) || HASHED.exec(modelUrl(k))[1] !== k);
+    expect(`the manifest resolves every client model key to a hashed name (${keys.length} keys)`,
+      keys.length > 100 && unresolved.length === 0, `unresolved: ${unresolved.slice(0, 6).join(', ')}`);
+    const notImmutable = []; const missing = []; const misnamed = []; let revalidations = 0;
+    for (const k of keys) {
+      const url = modelUrl(k);
+      const m = HASHED.exec(url);
+      const res = await get(url, { 'accept-encoding': 'gzip, deflate, br' });
+      if (res.status !== 200) { missing.push(`${k} ${res.status}`); continue; }
+      const cc = String(res.headers['cache-control'] ?? '');
+      // A repeat visit revalidates exactly the responses that are not fresh-for-a-year + immutable.
+      if (!/immutable/.test(cc) || !/max-age=31536000/.test(cc)) { notImmutable.push(`${k}: ${cc}`); revalidations += 1; }
+      const disk = readFileSync(path.join(DIST, url.slice(1)));
+      if (m && createHash('sha256').update(disk).digest('hex').slice(0, 8) !== m[2]) misnamed.push(k);
+    }
+    expect('every hashed model URL is in the build (200)', missing.length === 0, missing.slice(0, 6).join(', '));
+    expect(`every served packed .glb is immutable for a year: ${revalidations} revalidations on a repeat visit`,
+      notImmutable.length === 0, notImmutable.slice(0, 4).join('\n     '));
+    expect('every hashed name is the sha256 of its bytes (immutable can never pin a stale model)',
+      misnamed.length === 0, misnamed.slice(0, 6).join(', '));
+    // The converse still holds inside packed/: a name that is not <key>.<hash8>.glb is not immutable.
+    const legacyish = path.join(DIST, 'assets/models/packed/zz_unhashed_probe.glb');
+    const { writeFileSync, unlinkSync } = await import('node:fs');
+    writeFileSync(legacyish, modelBytes);
+    try {
+      const u = await get('/assets/models/packed/zz_unhashed_probe.glb');
+      expect('an unhashed name under packed/ is NOT immutable',
+        u.status === 200 && !/immutable/.test(String(u.headers['cache-control'] ?? '')), `status ${u.status}, cache-control ${u.headers['cache-control']}`);
+    } finally { unlinkSync(legacyish); }
+  }
+
   // ── 6. the document itself must never be cached ────────────────────────────
   const doc = await get('/');
   expect('index.html stays no-cache',

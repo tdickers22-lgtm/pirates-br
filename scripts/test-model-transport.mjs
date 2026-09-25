@@ -24,7 +24,7 @@ import zlib from 'node:zlib';
 import process from 'node:process';
 import { spawnSync } from 'node:child_process';
 import { getBounds } from '@gltf-transform/core';
-import { packIO, SRC_DIR, PACKED_DIR, listSources, readGlbJson, sha256, QUANTISED_POSITION_FAMILIES } from './pack-models.mjs';
+import { packIO, SRC_DIR, listSources, readGlbJson, sha256, QUANTISED_POSITION_FAMILIES, packedFile, readManifest, hashedName } from './pack-models.mjs';
 import { BOOT_ASSET_NAMES, LAZY_ASSET_NAMES, STORY_PROXY_NAMES } from '../src/client/assets/AssetLibrary.ts';
 
 const ROOT = path.resolve(SRC_DIR, '../../..');
@@ -41,14 +41,17 @@ const proxy = new Set(STORY_PROXY_NAMES.map((n) => `${n}_far`));
 const setOf = (n) => proxy.has(n) ? 'world' : n.endsWith('_far') ? 'far' : boot.has(n) ? 'boot' : lazy.has(n) ? 'lazy' : 'world';
 
 const names = listSources();
+const MANIFEST = readManifest();
 if (names.length < 100) fail(`only ${names.length} source GLBs found (vacuous)`);
 const setBytes = { boot: 0, world: 0, lazy: 0, far: 0 };
 let meshoptFiles = 0; let tris = 0;
 for (const [i, name] of names.entries()) {
   const srcBytes = fs.readFileSync(path.join(SRC_DIR, `${name}.glb`));
-  const packedPath = path.join(PACKED_DIR, `${name}.glb`);
-  if (!fs.existsSync(packedPath)) { fail(`${name}: no packed/${name}.glb (run node scripts/pack-models.mjs)`); continue; }
+  const packedPath = packedFile(name, MANIFEST);
+  if (!packedPath || !fs.existsSync(packedPath)) { fail(`${name}: no packed file in model-manifest.json (run node scripts/pack-models.mjs)`); continue; }
   const bytes = MUTATE && i === 0 ? srcBytes : fs.readFileSync(packedPath);
+  // b3.1b: the name IS the content (served immutable), so it must match the bytes.
+  if (path.basename(packedPath) !== hashedName(name, bytes)) fail(`${name}: ${path.basename(packedPath)} does not name its bytes (${hashedName(name, bytes)})`);
   const json = readGlbJson(bytes);
   const used = json.extensionsUsed ?? []; const req = json.extensionsRequired ?? [];
   if (!used.includes('EXT_meshopt_compression') || !req.includes('EXT_meshopt_compression')) { fail(`${name}: not EXT_meshopt_compression (raw GLB shipped)`); continue; }

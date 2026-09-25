@@ -25,6 +25,14 @@
 //     source came from (D37: the PROVENANCE.json row) and which bytes were
 //     packed, so test-model-transport can fail a stale packed file.
 //
+// CONTENT-HASHED NAMES (b3.1b, performance-14): the shipped file is
+// packed/<name>.<hash8>.glb (hash8 = the first 8 hex of sha256 over the packed
+// bytes) and src/client/assets/model-manifest.json maps every name to it. The
+// manifest is imported by the client bundle (so it rides inside a Vite-hashed
+// chunk) and LobbyServer serves a hashed packed name `immutable` for a year: a
+// repeat visit revalidates 0 models, and a re-export changes the name, so a
+// returning player can never hold a stale model.
+//
 // Client: src/client/assets/modelManifest.ts resolves a key to its packed URL
 // and wires the MeshoptDecoder into every GLTFLoader that loads one.
 // Node consumers of the source files (glb-census, test-asset-*, build_far_lods)
@@ -51,6 +59,25 @@ import { MeshoptDecoder, MeshoptEncoder } from 'meshoptimizer';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const SRC_DIR = path.join(ROOT, 'public/assets/models');
 export const PACKED_DIR = path.join(SRC_DIR, 'packed');
+/** name -> '<name>.<hash8>.glb' (the client imports this file). */
+export const MANIFEST_PATH = path.join(ROOT, 'src/client/assets/model-manifest.json');
+/** A packed file name: <name>.<8 lowercase hex>.glb. */
+export const HASHED_NAME = /^(.+)\.([0-9a-f]{8})\.glb$/;
+
+/** The manifest on disk ({} when missing). */
+export function readManifest() {
+  try { return JSON.parse(fs.readFileSync(MANIFEST_PATH, 'utf8')); } catch { return {}; }
+}
+function writeManifest(m) {
+  const sorted = Object.fromEntries(Object.keys(m).sort().map((k) => [k, m[k]]));
+  fs.writeFileSync(MANIFEST_PATH, `${JSON.stringify(sorted, null, 1)}\n`);
+}
+/** The packed file name for these packed bytes. */
+export function hashedName(name, bytes) { return `${name}.${sha256(bytes).slice(0, 8)}.glb`; }
+/** Absolute path of the shipped file for a source name (null when the manifest has none). */
+export function packedFile(name, manifest = readManifest()) {
+  return manifest[name] ? path.join(PACKED_DIR, manifest[name]) : null;
+}
 
 /** Families whose POSITION may be quantised (nothing reads their arrays). */
 export const QUANTISED_POSITION_FAMILIES = new Set([]);
@@ -95,11 +122,13 @@ function headCommit() {
 }
 
 /** Is the packed file present and packed from exactly these source bytes? */
-export function packedIsFresh(name) {
+export function packedIsFresh(name, manifest = readManifest()) {
   const src = path.join(SRC_DIR, `${name}.glb`);
-  const out = path.join(PACKED_DIR, `${name}.glb`);
-  if (!fs.existsSync(out)) return false;
-  const json = readGlbJson(fs.readFileSync(out));
+  const out = packedFile(name, manifest);
+  if (!out || !fs.existsSync(out)) return false;
+  const bytes = fs.readFileSync(out);
+  if (path.basename(out) !== hashedName(name, bytes)) return false; // name no longer matches its bytes
+  const json = readGlbJson(bytes);
   return json?.asset?.extras?.source?.srcSha256 === sha256(fs.readFileSync(src));
 }
 
@@ -201,8 +230,9 @@ async function main() {
   const only = args.filter((a) => !a.startsWith('--'));
   const names = only.length ? only : listSources();
   fs.mkdirSync(PACKED_DIR, { recursive: true });
+  const manifest = readManifest();
   if (check) {
-    const stale = names.filter((n) => !packedIsFresh(n));
+    const stale = names.filter((n) => !packedIsFresh(n, manifest));
     for (const n of stale) console.log(`STALE ${n}.glb (run node scripts/pack-models.mjs)`);
     console.log(stale.length ? `pack-models --check: ${stale.length} stale/missing` : `pack-models --check: ${names.length} fresh`);
     process.exit(stale.length ? 1 : 0);
@@ -210,17 +240,33 @@ async function main() {
   const provenance = provenanceScripts();
   const commit = headCommit();
   let raw = 0; let packed = 0; let n = 0;
+  let adopted = 0;
   for (const name of names) {
-    if (!force && packedIsFresh(name)) continue;
+    // Adopt a fresh pre-hash packed/<name>.glb (b3.1a layout) under its hashed name.
+    const legacy = path.join(PACKED_DIR, `${name}.glb`);
+    if (!force && !packedIsFresh(name, manifest) && fs.existsSync(legacy)) {
+      const bytes = fs.readFileSync(legacy);
+      if (readGlbJson(bytes)?.asset?.extras?.source?.srcSha256 === sha256(fs.readFileSync(path.join(SRC_DIR, `${name}.glb`)))) {
+        manifest[name] = hashedName(name, bytes);
+        fs.renameSync(legacy, path.join(PACKED_DIR, manifest[name]));
+        adopted += 1;
+      }
+    }
+    if (!force && packedIsFresh(name, manifest)) continue;
     const bytes = await packOne(name, { provenance, commit });
-    fs.writeFileSync(path.join(PACKED_DIR, `${name}.glb`), bytes);
+    manifest[name] = hashedName(name, bytes);
+    fs.writeFileSync(path.join(PACKED_DIR, manifest[name]), bytes);
     raw += fs.statSync(path.join(SRC_DIR, `${name}.glb`)).size; packed += bytes.length; n += 1;
   }
-  // A packed file whose source is gone is dead weight.
+  // A manifest row whose source is gone, and a packed file no row names, are dead weight.
   const live = new Set(listSources());
+  for (const k of Object.keys(manifest)) if (!live.has(k)) delete manifest[k];
+  writeManifest(manifest);
+  const named = new Set(Object.values(manifest));
   for (const f of fs.readdirSync(PACKED_DIR)) {
-    if (f.endsWith('.glb') && !live.has(f.slice(0, -4))) { fs.unlinkSync(path.join(PACKED_DIR, f)); console.log(`removed orphan packed/${f}`); }
+    if (f.endsWith('.glb') && !named.has(f)) { fs.unlinkSync(path.join(PACKED_DIR, f)); console.log(`removed orphan packed/${f}`); }
   }
+  if (adopted) console.log(`pack-models: adopted ${adopted} pre-hash packed files under hashed names`);
   console.log(`pack-models: packed ${n} (${(raw / 1e6).toFixed(2)} MB raw -> ${(packed / 1e6).toFixed(2)} MB)`);
 }
 
