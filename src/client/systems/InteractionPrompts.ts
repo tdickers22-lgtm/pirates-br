@@ -30,7 +30,7 @@ import { bailPoseOf, canScoop, throwLanding } from '../../shared/flooding/bail.j
 import { ECONOMY, HARVEST, PLAYER, SHIP_STATS, UPGRADE_COSTS } from '../../shared/constants/index.js';
 import { BROKER_NAME, BROKER_NAME_PLURAL } from '../ui/DisplayNames.js';
 import type { GameState, Island, IslandNpc, IslandProp, ItemStack, Player, Ship, ShipHole, ShipKeg, ShipUpgradeType, TreasureChest, UpgradeStation } from '../../shared/types/index.js';
-import { dist2D, getBraceStationLocals, getShipDeckY, getShipHoldFloorY, getIslandDockSwimLadderPoint, getIslandSurfaceY, getMainMastLocalZ, getNearestShipBoardingLadder, getSailRopeStationLocals } from '../../shared/utils/index.js';
+import { dist2D, getBraceStationLocals, getShipHoldFloorY, getIslandDockSwimLadderPoint, getIslandSurfaceY, getMainMastLocalZ, getNearestShipBoardingLadder, getSailRopeStationLocals } from '../../shared/utils/index.js';
 import {
   countOpenHoles,
   findBraceStationDir,
@@ -53,6 +53,8 @@ import {
   sideOfLocalX,
   sideTitle,
   toShipLocalPoint,
+  findRepairableHole as sharedFindRepairableHole,
+  getPlayerEyeHeight,
 } from '../../shared/interactions.js';
 import type { ClientInteractKind } from '../core/Game.js';
 import type { UiRefs } from '../ui/UiRefs.js';
@@ -74,8 +76,8 @@ const BRACE_PROMPT_REACH = 2.2;
  *  deck the strict gate is what keeps the leak from stealing the cannon's
  *  press; in the unlit hold, where the hole IS the reason you came down, it
  *  meant the bucket hint won every time (liveplay-v04). */
-const REPAIR_MIN_DOT_ON_DECK = 0.52;
-const REPAIR_MIN_DOT_BELOW_DECK = 0.2;
+/** b2.2e: the shared aim rule gates the plank; this only ranks it. */
+const REPAIR_MIN_DOT_AIMED = -1;
 /** Memo window for one arbitration. Long enough that the HUD pass and the input
  *  pass of the SAME frame always agree, short enough to feel instant. */
 const ARBITER_MEMO_MS = 40;
@@ -184,13 +186,29 @@ export class InteractionPrompts {
     repairHole: ShipHole | null,
   ): ResolvedInteraction | null {
     const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-    const key = `${player.id}|${ship?.id ?? '-'}|${nearbyCannon ?? '-'}|${repairHole?.id ?? '-'}`;
+    // b2.2e (holes-06): the caller's hole is the nearest one in REACH; the one
+    // [X] planks is the one the camera ray is on (the same shared rule the
+    // server runs on the input look vector), or none when looking away.
+    const nearHole = repairHole;
+    const aimedHole = ship && nearHole ? this.aimedRepairHole(player, ship) : null;
+    const key = `${player.id}|${ship?.id ?? '-'}|${nearbyCannon ?? '-'}|${nearHole?.id ?? '-'}|${aimedHole?.id ?? '-'}`;
     if (this.memo && this.memo.key === key && now - this.memo.at < ARBITER_MEMO_MS) {
       return this.memo.result;
     }
-    const result = this.arbitrate(player, ship, nearbyCannon, repairHole);
+    const result = this.arbitrate(player, ship, nearbyCannon, aimedHole, nearHole);
     this.memo = { at: now, key, result };
     return result;
+  }
+
+  /** The breach the camera ray is on (b2.2e): the shared findRepairableHole
+   *  with the eye at the camera height and the camera look direction. */
+  private aimedRepairHole(player: Player, ship: Ship): ShipHole | null {
+    const dir = this.view.getLookDirection(player);
+    const p = player.position;
+    return sharedFindRepairableHole(p, ship, {
+      origin: { x: p.x, y: p.y + getPlayerEyeHeight(player), z: p.z },
+      dir: { x: dir.x, y: dir.y, z: dir.z },
+    });
   }
 
   private arbitrate(
@@ -198,6 +216,7 @@ export class InteractionPrompts {
     ship: Ship | null,
     nearbyCannon: number | null,
     repairHole: ShipHole | null,
+    nearHole: ShipHole | null = repairHole,
   ): ResolvedInteraction | null {
     const candidates: InteractionCandidate[] = [];
     // A FOUNDERING ship offers no work: every station/repair/board prompt on
@@ -208,6 +227,7 @@ export class InteractionPrompts {
       ship = null;
       nearbyCannon = null;
       repairHole = null;
+      nearHole = null;
     }
 
     // Downed crewmate nearby → hold to revive (server drains reviveProgress).
@@ -498,7 +518,18 @@ export class InteractionPrompts {
       // the rail above it. But the deck-side [X] that used to work simply
       // stopped painting, with no refusal at the prompt: a working key silently
       // disappeared (review-4 P1). Say where the work is instead.
-      if (!repairHole && player.onShipId === ship.id && countOpenHoles(ship) > 0) {
+      if (!repairHole && nearHole) {
+        // In reach of a breach but looking elsewhere (b2.2e): say so.
+        candidates.push({
+          prompt: '⚠ Leak here',
+          label: 'Look at the breach to plank it',
+          score: -0.5,
+          kind: 'info',
+          tier: TIER_AMBIENT,
+          distance: 0,
+          dot: 0,
+        });
+      } else if (!repairHole && player.onShipId === ship.id && countOpenHoles(ship) > 0) {
         const inHold = isStandingInShipHold(player.position, ship);
         candidates.push({
           prompt: inHold ? '⚠ Leak above the deck beams' : '⚠ Leak below the waterline',
@@ -678,18 +709,20 @@ export class InteractionPrompts {
 
       // ONE breach, the one under your boots — not a whole quarter of the hull.
       if (repairHole) {
-        const repairPoint = this.view.getHoleRepairWorldPoint(ship, repairHole);
+        // The breach centre itself (reach frame): the aim test already put the
+        // camera ray within 0.5 m of it, so the look gate below only ranks.
+        const repairPoint = this.view.getShipReachPoint(ship, repairHole.x, repairHole.z, ship.position.y + repairHole.y);
         const plankCount = this.view.getRepairPlankCount(player, ship);
-        // Below the deck beams there is nothing else [X] could mean, and the
-        // hold is dark: relax the look gate so walking onto a breach offers the
-        // plank instead of "Equip the Bucket".
-        const belowDeck = player.position.y < getShipDeckY(ship.position.y, SHIP_STATS[ship.type]) - 0.35;
+        // The camera ray is already within 0.5 m of the breach (the aim rule),
+        // so the loose look gate only keeps the arbiter's ranking; a strict one
+        // could refuse a hole the server would plank (a breach at your feet
+        // measured from the boots, not the eye).
         this.pushInteractionCandidate(
           candidates,
           player,
           repairPoint,
           4.5,
-          belowDeck ? REPAIR_MIN_DOT_BELOW_DECK : REPAIR_MIN_DOT_ON_DECK,
+          REPAIR_MIN_DOT_AIMED,
           plankCount > 0 ? `${glyph('interact')} Hold — Plank This Leak` : '⚠ Leak here',
           plankCount > 0
             ? `${plankCount} plank${plankCount === 1 ? '' : 's'} ready`

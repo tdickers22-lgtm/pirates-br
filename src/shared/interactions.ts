@@ -264,6 +264,40 @@ export function isStandingInFloodedHold(
   return local.y < (SHIP.HOLD_FLOOR_OFFSET + stats.height + SHIP.DECK_STAND_OFFSET) * 0.5;
 }
 
+/** A look ray in WORLD space: eye origin and a unit direction. */
+export type LookRay = { origin: Vec3; dir: Vec3 };
+
+/** b2.2e (holes-06): the look ray must pass within this of the breach centre. */
+export const HOLE_REPAIR_AIM_RADIUS = 0.5;
+/** b2.2e: a half-planked breach keeps its progress this long after letting go
+ *  of [X] (same pirate, same hole); past it the work starts over. */
+export const HOLE_REPAIR_PROGRESS_KEEP_S = 3;
+
+/** Eye height above the feet the camera uses (Game.ts eyeHeight): a swimmer's
+ *  eye rides low, a crouch drops it. Shared so the server's aim ray starts
+ *  where the client camera does. */
+export function getPlayerEyeHeight(player: Pick<Player, 'state' | 'crouching'>): number {
+  if (player.state === 'swimming') return PLAYER.HEIGHT * 0.56;
+  return player.crouching ? PLAYER.EYE_Y - PLAYER.CROUCH_DROP : PLAYER.EYE_Y;
+}
+
+/** Look direction from yaw/pitch in the SAME convention as the client camera
+ *  (Game.getLookDirection): yaw 0 looks down +z, positive pitch looks up. */
+export function lookDirFromYawPitch(yaw: number, pitch: number): Vec3 {
+  const cp = Math.cos(pitch);
+  return { x: Math.sin(yaw) * cp, y: Math.sin(pitch), z: Math.cos(yaw) * cp };
+}
+
+/** The server's repair aim: the eye of this pirate along the input look vector. */
+export function getRepairLookRay(
+  player: Pick<Player, 'position' | 'state' | 'crouching'>,
+  yaw: number,
+  pitch: number,
+): LookRay {
+  const p = player.position;
+  return { origin: { x: p.x, y: p.y + getPlayerEyeHeight(player), z: p.z }, dir: lookDirFromYawPitch(yaw, pitch) };
+}
+
 /**
  * The unpatched hole this pirate can plank, or null. Reach is 3D (SINK-01,
  * ships-25): a breach has a HEIGHT on the hull, and a hand on the weather deck
@@ -271,28 +305,53 @@ export function isStandingInFloodedHold(
  * from the hold, which is what makes a flooded hold a place you have to go
  * rather than a swim tutorial.
  *
- * Two rules, both hull-local:
+ * Two reach rules, both hull-local:
  *  - vertical: |Δy| ≤ HOLE_REPAIR_REACH_Y (1.6 m), so the deck reaches topside
  *    breaches and the hold reaches the waterline strake, and neither reaches
  *    the other's;
- *  - planar: HOLE_REPAIR_REACH from the breach, measured to its hold working
- *    point when he is below decks (see getHoleHoldWorkingLocal) so the ends
- *    and the sides stay reachable.
+ *  - planar: HOLE_REPAIR_REACH (2.2 m) from the breach, measured to its hold
+ *    working point when he is below decks (see getHoleHoldWorkingLocal) so the
+ *    ends and the sides stay reachable.
+ * A swimmer alongside is in reach of the waterline strake by the same rules
+ * (b2.2e: repair from the water is allowed).
  *
- * Nearest qualifying hole wins. The server validates a repair with this and the
- * client prompt calls the very same function, so [X] can never offer a patch
- * the server then refuses.
+ * AIM (b2.2e, holes-06): with a `lookRay` the breach must also be LOOKED AT —
+ * the ray passes within HOLE_REPAIR_AIM_RADIUS (0.5 m) of the hole centre, in
+ * front of the eye — and the hole nearest the ray wins, so [X] never planks a
+ * hole behind you. The client prompt passes the camera ray, the server the
+ * input look vector. Without a ray (bots, legacy callers) the nearest hole in
+ * reach wins. The server validates a repair with this and the client prompt
+ * calls the very same function, so [X] can never offer a patch the server then
+ * refuses.
  */
 export function findRepairableHole(
   position: Vec3,
   ship: Pick<Ship, 'position' | 'rotation' | 'type' | 'pitch' | 'roll' | 'holes'>,
+  lookRay?: LookRay | null,
 ): ShipHole | null {
   const stats = SHIP_STATS[ship.type];
   const local = toShipLocal3(position, ship);
   const belowDecks = isStandingInShipHold(position, ship, local);
   const holdHalfLength = stats.length * 0.34;
   const reachSq = FLOODING.HOLE_REPAIR_REACH * FLOODING.HOLE_REPAIR_REACH;
+  // The ray in the hull frame (the holes live there): origin, and origin + dir
+  // through the same transform minus the origin (rotation only).
+  let ox = 0, oy = 0, oz = 0, rx = 0, ry = 0, rz = 0;
+  if (lookRay) {
+    const o = toShipLocal3(lookRay.origin, ship);
+    const tip = toShipLocal3({
+      x: lookRay.origin.x + lookRay.dir.x,
+      y: lookRay.origin.y + lookRay.dir.y,
+      z: lookRay.origin.z + lookRay.dir.z,
+    }, ship);
+    ox = o.x; oy = o.y; oz = o.z;
+    rx = tip.x - o.x; ry = tip.y - o.y; rz = tip.z - o.z;
+    const len = Math.hypot(rx, ry, rz) || 1;
+    rx /= len; ry /= len; rz /= len;
+  }
+  const aimSq = HOLE_REPAIR_AIM_RADIUS * HOLE_REPAIR_AIM_RADIUS;
   let best: ShipHole | null = null;
+  let bestAim = Infinity;
   let bestSq = Infinity;
   for (const hole of ship.holes ?? []) {
     if (hole.patched) continue;
@@ -310,7 +369,18 @@ export function findRepairableHole(
     const dx = atX - local.x;
     const dz = atZ - local.z;
     const d2 = dx * dx + dz * dz;
-    if (d2 <= reachSq && d2 < bestSq) {
+    if (d2 > reachSq) continue;
+    let aim = 0;
+    if (lookRay) {
+      // Distance from the hole centre to the ray (clamped to in front of the eye).
+      const vx = hole.x - ox, vy = hole.y - oy, vz = hole.z - oz;
+      const t = Math.max(0, vx * rx + vy * ry + vz * rz);
+      const px = vx - rx * t, py = vy - ry * t, pz = vz - rz * t;
+      aim = px * px + py * py + pz * pz;
+      if (aim > aimSq) continue;
+    }
+    if (aim < bestAim - 1e-9 || (Math.abs(aim - bestAim) <= 1e-9 && d2 < bestSq)) {
+      bestAim = aim;
       bestSq = d2;
       best = hole;
     }

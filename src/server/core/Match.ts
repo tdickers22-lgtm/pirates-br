@@ -83,6 +83,8 @@ import {
   toShipWorldPoint,
   countOpenHoles,
   findRepairableHole,
+  getRepairLookRay,
+  HOLE_REPAIR_PROGRESS_KEEP_S,
   getHoleHoldWorkingLocal,
   isNearBilgePump as isSharedNearBilgePump,
   isStandingInFloodedHold,
@@ -656,6 +658,10 @@ export class Match {
    *  how long he has held the hammer on the current breach (b2.2d). */
   private botBailReadyAt = new Map<string, number>();
   private botRepairHeld = new Map<string, { holeId: number; held: number }>();
+  /** b2.2e: the breach each pirate is hammering right now. */
+  private hullRepairWorking = new Map<string, { shipId: string; holeId: number }>();
+  /** b2.2e: progress parked when [X] was let go, kept HOLE_REPAIR_PROGRESS_KEEP_S. */
+  private hullRepairKept = new Map<string, { shipId: string; holeId: number; progress: number; releasedAt: number }>();
   /** Bucketfuls thrown inside the hull outline, running back to the bilge (b2.2d). */
   readonly pendingBailReturns: Array<{ shipId: string; at: number; volume: number }> = [];
   /** Splash events for heaves that landed aboard: {shipId, playerId, x, z, landing, t}.
@@ -3107,7 +3113,7 @@ export class Match {
         // Hull repair is now a HOLD (the hammer-swing block below patches one hole
         // per ~0.9s plank), so a bare press at a breach is consumed here rather than
         // falling through to another interaction.
-        if (this.getRepairableHole(player, ship)) return;
+        if (this.getRepairableHole(player, ship, input)) return;
 
         if (player.carryingChestId && this.tryStowCarriedChest(player, ship)) return;
 
@@ -3152,6 +3158,16 @@ export class Match {
           this.broadcast({ type: 'trade_request', ts: Date.now(), payload: session });
         }
       }
+    }
+
+    // b2.2e: planking from the WATER. A swimmer alongside his own hull can
+    // work a waterline breach from outside (same reach + aim rule), with
+    // planks from his pocket only (the ship's stores are not in reach).
+    // Off every deck and not swimming (ashore) there is nothing to work: the
+    // call with null parks any progress so no phantom hammer keeps swinging.
+    if (!player.onShipId) {
+      const ownShip = player.state === 'swimming' && player.shipId ? this.getAliveShip(player.shipId) : null;
+      this.updateHullRepair(player, ownShip && !ownShip.sinking ? ownShip : null, input, dt);
     }
 
     // Ship controls
@@ -3307,30 +3323,9 @@ export class Match {
         ship.sailRepairWoodTimer = 0;
       }
 
-      // Repair breached HULL sections by HOLDING [X] at the damage with wood: each
-      // ~0.9s hammer swing consumes one plank and patches one hole. The progress
-      // drives the first-person plank+hammer animation (and rides the wire so
-      // onlookers see the swing too). Replaces the old instant one-press patch.
-      const mendingHull = input.interactHeld
-        && input.interactIntent === 'repair'
-        && !player.atCannon && !player.atHelm && !player.atCrowNest;
-      const hullRepairTarget = mendingHull ? this.getRepairableHole(player, ship) : null;
-      if (hullRepairTarget && getRepairPlankCount(player, ship) > 0) {
-        // b2.2b: a bigger breach takes longer (1.6 / 2.4 / 3.2 s of held input).
-        player.hullRepairProgress = Math.min(1, player.hullRepairProgress + dt / holeRepairTime(hullRepairTarget.size));
-        if (player.hullRepairProgress >= 1) {
-          player.hullRepairProgress = 0;
-          if (this.consumeRepairPlank(player, ship)) {
-            this.physics.patchHole(ship, hullRepairTarget.id);
-            if (ship.onFire) {
-              ship.fireTimer = Math.max(0, ship.fireTimer - SHIP.FIRE_REPAIR_DOUSE_TIME);
-              if (ship.fireTimer <= 0) { ship.onFire = false; ship.fireTimer = 0; ship.fireDamageAccum = 0; }
-            }
-          }
-        }
-      } else if (player.hullRepairProgress > 0) {
-        player.hullRepairProgress = Math.max(0, player.hullRepairProgress - dt / 0.3);
-      }
+      // Repair breached HULL sections by HOLDING [X] at the damage with wood
+      // (b2.2e: aimed, by size, progress kept 3 s after letting go).
+      this.updateHullRepair(player, ship, input, dt);
 
       // Helm: A/D or arrow keys steer; W/S or arrow up/down trims sail while driving.
       if (player.atHelm) {
@@ -5860,10 +5855,15 @@ export class Match {
         return true;
       }
       case 'repair': {
-        if (!ship || player.onShipId !== ship.id) return this.refuse('not_aboard');
-        const repairHole = this.getRepairableHole(player, ship);
+        // b2.2e: a swimmer alongside his own hull may plank from the water.
+        const swimmerShip = !player.onShipId && player.state === 'swimming' && player.shipId
+          ? this.getAliveShip(player.shipId) : null;
+        const workShip = ship && player.onShipId === ship.id ? ship : swimmerShip;
+        if (!workShip) return this.refuse('not_aboard');
+        const repairHole = this.getRepairableHole(player, workShip, input);
         if (!repairHole) return this.refuse('nothing_there');
-        if (getRepairPlankCount(player, ship) <= 0) return this.refuse('no_plank');
+        const planks = workShip === swimmerShip ? player.pocketWood : getRepairPlankCount(player, workShip);
+        if (planks <= 0) return this.refuse('no_plank');
         // b2.2b: the press only starts the job. The plank goes in through the
         // held hammer block (holeRepairTime by size), never on a tap.
         return true;
@@ -8900,12 +8900,78 @@ export class Match {
     return isSharedNearCrowNestLadder(player, ship);
   }
 
+  /**
+   * HOLD [X] at a breach with wood (b2.2e, holes-06). The breach is the one
+   * the pirate is LOOKING at (the input look vector, the same shared rule the
+   * client prompt runs on the camera ray), the time is holeRepairTime(size)
+   * (1.6 / 2.4 / 3.2 s), and progress on a breach survives letting go for
+   * HOLE_REPAIR_PROGRESS_KEEP_S: pick the hammer back up on the same hole
+   * within 3 s and you carry on; later, or on another hole, you start over.
+   * While released the wire progress reads 0 so nobody swings a phantom hammer.
+   * `ship` null = nothing to work (a swimmer away from his hull).
+   */
+  private updateHullRepair(player: Player, ship: Ship | null, input: PlayerInput, dt: number): void {
+    const swimming = player.state === 'swimming';
+    const mendingHull = !!ship
+      && input.interactHeld
+      && input.interactIntent === 'repair'
+      && !player.atCannon && !player.atHelm && !player.atCrowNest;
+    const target = mendingHull && ship
+      ? findRepairableHole(player.position, ship, getRepairLookRay(player, input.yaw, input.pitch))
+      : null;
+    const planks = !ship ? 0 : swimming ? player.pocketWood : getRepairPlankCount(player, ship);
+    const kept = this.hullRepairKept.get(player.id);
+    if (ship && target && planks > 0) {
+      if (player.hullRepairProgress <= 0 && kept) {
+        // Resuming: the same hole within the keep window carries on.
+        if (kept.shipId === ship.id && kept.holeId === target.id
+          && this.t - kept.releasedAt <= HOLE_REPAIR_PROGRESS_KEEP_S) {
+          player.hullRepairProgress = kept.progress;
+        }
+        this.hullRepairKept.delete(player.id);
+      } else if (player.hullRepairProgress > 0 && kept && kept.holeId !== target.id) {
+        this.hullRepairKept.delete(player.id);
+      }
+      const working = this.hullRepairWorking.get(player.id);
+      if (working && (working.shipId !== ship.id || working.holeId !== target.id)) {
+        // Swung onto a different breach: the plank on the old one does not follow.
+        player.hullRepairProgress = 0;
+      }
+      this.hullRepairWorking.set(player.id, { shipId: ship.id, holeId: target.id });
+      // b2.2b: a bigger breach takes longer (1.6 / 2.4 / 3.2 s of held input).
+      player.hullRepairProgress = Math.min(1, player.hullRepairProgress + dt / holeRepairTime(target.size));
+      if (player.hullRepairProgress >= 1) {
+        player.hullRepairProgress = 0;
+        this.hullRepairWorking.delete(player.id);
+        if (this.consumeRepairPlank(player, ship)) {
+          this.physics.patchHole(ship, target.id);
+          if (ship.onFire) {
+            ship.fireTimer = Math.max(0, ship.fireTimer - SHIP.FIRE_REPAIR_DOUSE_TIME);
+            if (ship.fireTimer <= 0) { ship.onFire = false; ship.fireTimer = 0; ship.fireDamageAccum = 0; }
+          }
+        }
+      }
+      return;
+    }
+    // Let go (or looked away, or out of planks): park the progress for 3 s.
+    const working = this.hullRepairWorking.get(player.id);
+    if (player.hullRepairProgress > 0 && working) {
+      this.hullRepairKept.set(player.id, {
+        shipId: working.shipId, holeId: working.holeId, progress: player.hullRepairProgress, releasedAt: this.t,
+      });
+    }
+    this.hullRepairWorking.delete(player.id);
+    player.hullRepairProgress = 0;
+    if (kept && this.t - kept.releasedAt > HOLE_REPAIR_PROGRESS_KEEP_S) this.hullRepairKept.delete(player.id);
+  }
+
   /** The specific breach this pirate can plank right now — server truth. The
    *  client prompt calls the same shared findRepairableHole, so [X] can never
    *  offer a patch the server then refuses. Planks are NOT required to see the
    *  breach (the prompt reads "no planks ready"); the callers gate on stock. */
-  private getRepairableHole(player: Player, ship: Ship): ShipHole | null {
-    return findRepairableHole(player.position, ship);
+  private getRepairableHole(player: Player, ship: Ship, input?: Pick<PlayerInput, 'yaw' | 'pitch'>): ShipHole | null {
+    // b2.2e: a human's input carries his look; bots (no input) keep the reach rule.
+    return findRepairableHole(player.position, ship, input ? getRepairLookRay(player, input.yaw, input.pitch) : null);
   }
 
   /** Standing at the brake pump on the hold sole (shared truth, so the client

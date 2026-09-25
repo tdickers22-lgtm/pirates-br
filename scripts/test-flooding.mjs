@@ -1078,6 +1078,18 @@ console.log('\nHole sizes 1-3: a hit near a wound widens it, a bigger breach tak
     `holes=${planked.holes.length} patched=${planked.holes[0].patched} size=${planked.holes[0].size}`);
 }
 
+/** yaw/pitch that put the eye ray of `player` on the centre of `hole` (hull at
+ *  zero pitch/roll), in the client camera convention (b2.2e). */
+function aimAtHole(player, ship, hole, eyeY = PLAYER.EYE_Y) {
+  const cos = Math.cos(ship.rotation), sin = Math.sin(ship.rotation);
+  const hx = ship.position.x + hole.x * cos + hole.z * sin;
+  const hz = ship.position.z + hole.z * cos - hole.x * sin;
+  const hy = ship.position.y + hole.y;
+  const dx = hx - player.position.x, dz = hz - player.position.z;
+  const dy = hy - (player.position.y + eyeY);
+  return { yaw: Math.atan2(dx, dz), pitch: Math.atan2(dy, Math.hypot(dx, dz)) };
+}
+
 {
   // Held input on the REAL Match repair block: a size-3 breach needs >= 3.0 s.
   const heldToPlank = (size) => {
@@ -1087,6 +1099,7 @@ console.log('\nHole sizes 1-3: a hit near a wound widens it, a bigger breach tak
     const stats = SHIP_STATS[ship.type];
     ship.holes = [];
     ship.anchored = false;
+    ship.pitch = 0; ship.roll = 0;
     const [h] = match.physics.openHoleAt(ship, { x: stats.width * 0.45, y: 0.05, z: 0 }, 1, 'cannon', size);
     const player = match.state.players.find((p) => p.shipId === ship.id) ?? match.state.players[0];
     player.onShipId = ship.id;
@@ -1105,8 +1118,10 @@ console.log('\nHole sizes 1-3: a hit near a wound widens it, a bigger breach tak
     const client = { playerId: player.id, appliedInputSeq: 0, consumedSeq: {}, lastOneShotAt: {} };
     const dt = 1 / 30;
     let held = 0;
+    // b2.2e: the server plank is AIMED, so the hold looks at the breach.
+    const look = aimAtHole(player, ship, h);
     for (let seq = 1; seq < 400 && !h.patched; seq += 1) {
-      match.applyInput(client, { seq, yaw: 0, pitch: 0, interactHeld: true, interactIntent: 'repair' }, dt);
+      match.applyInput(client, { seq, ...look, interactHeld: true, interactIntent: 'repair' }, dt);
       held += dt;
     }
     return { reach, held: h.patched ? held : Infinity };
@@ -1116,6 +1131,136 @@ console.log('\nHole sizes 1-3: a hit near a wound widens it, a bigger breach tak
   expect('repair fixture: the pirate can reach the breach', s1.reach && s3.reach, `reach ${s1.reach}/${s3.reach}`);
   expect('a size-1 hole planks in ~1.6 s of held input', s1.held > 1.5 && s1.held < 1.8, `held=${s1.held.toFixed(2)} s`);
   expect('a size-3 repair needs >= 3.0 s of held input', s3.held >= 3.0 && s3.held < 3.5, `held=${s3.held.toFixed(2)} s`);
+}
+
+console.log('\nAimed plank repair (b2.2e, holes-06): look at the breach, progress kept 3 s, from the water too:');
+{
+  const setup = (id, size = 3) => {
+    const match = new Match({ matchId: `aim-${id}`, botCount: 1 });
+    match.state.phase = 'playing';
+    const ship = match.state.ships[0];
+    const stats = SHIP_STATS[ship.type];
+    ship.holes = []; ship.anchored = false; ship.pitch = 0; ship.roll = 0;
+    const [h] = match.physics.openHoleAt(ship, { x: stats.width * 0.45, y: 0.05, z: 0 }, 1, 'cannon', size);
+    const player = match.state.players.find((p) => p.shipId === ship.id) ?? match.state.players[0];
+    player.onShipId = ship.id;
+    player.atCannon = false; player.atHelm = false; player.atCrowNest = false;
+    player.pocketWood = 5;
+    const cos = Math.cos(ship.rotation), sin = Math.sin(ship.rotation);
+    const lx = stats.width * 0.45 * 0.4;
+    player.position = { x: ship.position.x + lx * cos, y: ship.position.y + SHIP.HOLD_FLOOR_OFFSET, z: ship.position.z - lx * sin };
+    const client = { playerId: player.id, appliedInputSeq: 0, consumedSeq: {}, lastOneShotAt: {} };
+    let seq = 0;
+    const dt = 1 / 30;
+    const step = (held, look, seconds) => {
+      const n = Math.round(seconds / dt);
+      for (let i = 0; i < n; i += 1) {
+        seq += 1; match.t += dt;
+        match.applyInput(client, { seq, ...look, interactHeld: held, interactIntent: held ? 'repair' : null }, dt);
+      }
+    };
+    return { match, ship, stats, h, player, step, dt };
+  };
+
+  // Shared rule: in reach, looking 90 deg away -> null; looking at it -> the hole.
+  {
+    const { ship, h, player } = setup('shared');
+    const at = aimAtHole(player, ship, h);
+    const eye = { x: player.position.x, y: player.position.y + PLAYER.EYE_Y, z: player.position.z };
+    const ray = (yaw, pitch) => ({ origin: eye, dir: { x: Math.sin(yaw) * Math.cos(pitch), y: Math.sin(pitch), z: Math.cos(yaw) * Math.cos(pitch) } });
+    expect('aim fixture: the breach is in reach (no ray = reach rule, the bots path)',
+      findRepairableHole(player.position, ship)?.id === h.id);
+    expect('a pirate in reach looking 90 deg away gets null',
+      findRepairableHole(player.position, ship, ray(at.yaw + Math.PI / 2, 0)) === null,
+      `got ${JSON.stringify(findRepairableHole(player.position, ship, ray(at.yaw + Math.PI / 2, 0)))}`);
+    expect('looking straight away (behind him) gets null',
+      findRepairableHole(player.position, ship, ray(at.yaw + Math.PI, -at.pitch)) === null);
+    expect('looking at it gets the hole',
+      findRepairableHole(player.position, ship, ray(at.yaw, at.pitch))?.id === h.id);
+    // Two breaches in reach: the one the ray is on wins, not the nearest.
+    const stats = SHIP_STATS[ship.type];
+    const far = h;
+    const near = { ...h, id: 99, z: 1.4 };
+    ship.holes.push(near);
+    // Stand abreast of the aft breach, look at the forward one 1.4 m away.
+    const cos = Math.cos(ship.rotation), sin = Math.sin(ship.rotation);
+    const lx = stats.width * 0.18, lz = 1.2;
+    const px = { ...player, position: { x: ship.position.x + lx * cos + lz * sin, y: player.position.y, z: ship.position.z + lz * cos - lx * sin } };
+    const aimFar = aimAtHole(px, ship, far);
+    const eye2 = { x: px.position.x, y: px.position.y + PLAYER.EYE_Y, z: px.position.z };
+    expect('two breaches in reach: without a ray the nearest wins',
+      findRepairableHole(px.position, ship)?.id === near.id);
+    expect('...with the ray on the other breach, the one looked at wins',
+      findRepairableHole(px.position, ship, { origin: eye2, dir: ray(aimFar.yaw, aimFar.pitch).dir })?.id === far.id);
+  }
+
+  // Server: the input look vector is the aim.
+  {
+    const { ship, h, player, step } = setup('server-away');
+    const at = aimAtHole(player, ship, h);
+    step(true, { yaw: at.yaw + Math.PI / 2, pitch: 0 }, 1.0);
+    expect('server: holding [X] while looking 90 deg away makes no progress',
+      player.hullRepairProgress === 0 && !h.patched, `progress=${player.hullRepairProgress}`);
+  }
+
+  // Progress survives a 2 s release, resets after 3 s.
+  {
+    const { ship, h, player, step } = setup('keep');
+    const look = aimAtHole(player, ship, h);
+    step(true, look, 1.0);
+    const before = player.hullRepairProgress;
+    step(false, look, 2.0);
+    const whileReleased = player.hullRepairProgress;
+    step(true, look, 1 / 30);
+    const resumed = player.hullRepairProgress;
+    expect('size-3 hole: 1 s of hammering is ~0.31 of the job', before > 0.28 && before < 0.34, `p=${before.toFixed(3)}`);
+    expect('while released the wire progress is 0 (no phantom hammer)', whileReleased === 0, `p=${whileReleased}`);
+    expect('progress survives a 2 s release (resumes where he left off)',
+      resumed > before && resumed < before + 0.05, `before=${before.toFixed(3)} resumed=${resumed.toFixed(3)}`);
+    let extra = 1 / 30;
+    while (!h.patched && extra < 5) { step(true, look, 1 / 30); extra += 1 / 30; }
+    expect('...and the plank goes in after the REST of the job (1 + ~2.2 s, not a fresh 3.2 s)',
+      h.patched && extra > 2.0 && extra < 2.4, `patched=${h.patched} extra=${extra.toFixed(2)} s`);
+  }
+  {
+    const { ship, h, player, step } = setup('reset');
+    const look = aimAtHole(player, ship, h);
+    step(true, look, 1.0);
+    const before = player.hullRepairProgress;
+    step(false, look, 3.5);
+    step(true, look, 1 / 30);
+    expect('progress resets after a 3 s release (starts over)',
+      before > 0.28 && player.hullRepairProgress < 0.05, `before=${before.toFixed(3)} after=${player.hullRepairProgress.toFixed(3)}`);
+  }
+  {
+    // Another breach picked up inside the window does not inherit the progress.
+    const { match, ship, stats, h, player, step } = setup('other');
+    const [h2] = match.physics.openHoleAt(ship, { x: stats.width * 0.45, y: 0.05, z: 1.5 }, 1, 'cannon', 3);
+    step(true, aimAtHole(player, ship, h), 1.0);
+    step(false, aimAtHole(player, ship, h), 1.0);
+    step(true, aimAtHole(player, ship, h2), 1 / 30);
+    expect('a different breach inside the keep window starts from 0',
+      h2 && player.hullRepairProgress < 0.05, `p=${player.hullRepairProgress.toFixed(3)}`);
+  }
+
+  // From the water: a swimmer alongside his own hull planks a waterline breach.
+  {
+    const { match, ship, stats, h, player, step } = setup('swim', 1);
+    player.onShipId = null; player.shipId = ship.id; player.state = 'swimming';
+    const cos = Math.cos(ship.rotation), sin = Math.sin(ship.rotation);
+    const lx = stats.width * 0.5 + 0.7;
+    player.position = { x: ship.position.x + lx * cos, y: ship.position.y - 0.2, z: ship.position.z - lx * sin };
+    expect('swimmer fixture: the waterline breach is in reach from the water',
+      findRepairableHole(player.position, ship)?.id === h.id);
+    const look = aimAtHole(player, ship, h, PLAYER.HEIGHT * 0.56);
+    const wood = player.pocketWood;
+    let t = 0;
+    while (!h.patched && t < 4) { step(true, look, 1 / 30); t += 1 / 30; }
+    expect('repair from the water is allowed (size 1 in ~1.6 s, a pocket plank spent)',
+      h.patched && t > 1.5 && t < 1.8 && player.pocketWood === wood - 1,
+      `patched=${h.patched} t=${t.toFixed(2)} wood ${wood}->${player.pocketWood}; state=${player.state} onShip=${player.onShipId}`);
+    void match;
+  }
 }
 
 console.log('\nThe SoT bucket (b2.2d, holes-05): scoop in the hold water, throw over the rail, bots walk the cycle, no auto-carpenter:');
