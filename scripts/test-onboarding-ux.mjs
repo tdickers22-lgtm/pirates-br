@@ -410,7 +410,12 @@ const stage = (which) => page.evaluate((w) => {
   // A breach is open for the ashore/aboard passes so the leak line is exercised.
   // Re-punched per stage: a snapshot landing between two stages restores the
   // server's (sound) hull, so staging it once is not enough.
-  const breach = () => [{ id: 1, localX: 0, localY: 0, localZ: 0, size: 1, plugged: false, repairProgress: 0 }];
+  // The hole speaks the ShipHole wire shape (x/y/z, patched, tier): the b2.2h
+  // card splits leaks by live depth and orders a plank only for one BELOW the
+  // waterline, so the breach sits on the bilge (hull-local y -0.4, LOW tier).
+  // The old localX/localY/plugged shape had no position, read as topside
+  // ("TOPSIDE 1") and could never carry the order this stage grades.
+  const breach = () => [{ id: 1, x: 1, y: -0.4, z: 0, size: 1, tier: 0, patched: false, repairProgress: 0 }];
   if (w === 'ashore') { p.onShipId = null; p.atHelm = false; ship.anchored = true; ship.holes = breach(); }
   if (w === 'aboard') { p.onShipId = ship.id; p.atHelm = false; ship.anchored = true; ship.holes = breach(); }
   if (w === 'helm') { p.onShipId = ship.id; p.atHelm = true; ship.anchored = false; ship.holes = []; }
@@ -438,7 +443,7 @@ expect('ashore the panel gives no key orders',
 expect('ashore it still reports the ship\'s state',
   /Anchored/.test(panels.ashore.sail), panels.ashore.sail);
 expect('ashore a breach is reported, not ordered',
-  /LEAK/.test(panels.ashore.leaks) && !/\[X\]/.test(panels.ashore.leaks), panels.ashore.leaks);
+  /BELOW 1/.test(panels.ashore.leaks) && !/\[X\]/.test(panels.ashore.leaks), panels.ashore.leaks);
 expect('aboard her the capstan/helm order comes back',
   /\[X\] at the capstan/.test(panels.aboard.sail), panels.aboard.sail);
 expect('aboard a breach names the key again',
@@ -750,20 +755,29 @@ expect('the minimap carries the first-gold mark too',
 
 // …and it stands down the moment the crew has an errand of their own: the
 // annulus must come back to the untouched chart, not merely dim.
+// The bare chart is re-read back to back with the stood-down one, on the same
+// Tallyman: ships, crews and the storm edge sail through that band in the
+// seconds since the breath was sampled (a live match moved 10 px of gold-ish
+// ink into it between the two readings: 15 px vs a 5 px baseline), so only a
+// same-frame delta says whether the RING is gone. The +4 px bar is unchanged.
 const afterFirstGold = await page.evaluate(() => {
   const g = window.__piratesBR;
   const p = g.getLocalPlayer();
+  const hoarder = g.getClosestGoldHoarder(p);
+  p.gold = 9999;
+  g.map.drawMaps();
+  const bare = window.__firstGoldRingInk(hoarder);
   p.gold = 4000;
   g.map.drawMaps();
-  const ink = window.__firstGoldRingInk(g.getClosestGoldHoarder(p));
+  const ink = window.__firstGoldRingInk(hoarder);
   p.gold = 0;
   g.map.mapOpen = false;
   document.getElementById('map-overlay').classList.remove('visible');
-  return ink;
+  return { ink, bare };
 });
 expect('the first-gold signpost stands down once the loop is found',
-  afterFirstGold <= chart.baseline + 4,
-  `${afterFirstGold} px still ringed (bare chart is ${chart.baseline})`);
+  afterFirstGold.ink <= afterFirstGold.bare + 4,
+  `${afterFirstGold.ink} px still ringed (bare chart now ${afterFirstGold.bare}, ${chart.baseline} at the breath)`);
 
 // ── Death screen names the real cause ────────────────────────
 console.log('\nDeath screen variants:');
