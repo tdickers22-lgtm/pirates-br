@@ -81,6 +81,33 @@ const STAGE = ({ fill, roll, tod }) => {
   return { shipId, plane: h.plane, halfL: h.clip.halfL, soleY, deckY: h.clip.deckY };
 };
 
+/** b2.3f (holes-07): park the eye UNDER the hold water (0.5 m over the sole,
+ *  aft of the hatch) and read what the game made of it: the camera water
+ *  state (breath HUD hook), the muffle depth, the scene fog and the program
+ *  count. */
+const STAGE_UNDER = ({ fill, tod }) => {
+  const g = window.__piratesBR;
+  g.setDayNightOverride(tod);
+  const sr = g.shipRenderer;
+  sr.setHoldWaterDebug({ fill, roll: 0, pitch: 0 });
+  const me = g.state.players.find((p) => p.id === g.localPlayerId);
+  const mesh = sr.shipMeshes.get(me?.shipId);
+  if (!mesh) return { error: `no ship mesh for ${me?.shipId}` };
+  const h = sr.getHoldWater(me.shipId);
+  const root = mesh.root;
+  root.updateMatrixWorld(true);
+  const eye = root.localToWorld(new root.position.constructor(0, h.clip.soleY + 0.5, -0.3 * h.clip.halfL));
+  const ahead = root.localToWorld(new root.position.constructor(0, h.clip.soleY + 0.5, 2)).sub(eye);
+  g.enableFreeCam(eye.x, eye.y, eye.z, Math.atan2(ahead.x, ahead.z), -0.1);
+  const ws = g.getCameraWaterState?.() ?? null;
+  const fog = g.renderer.scene.fog;
+  return {
+    ws: ws ? { ...ws } : null, muffle: g.cameraSubmergeDepth, fogDensity: fog?.density ?? null,
+    fogColor: fog ? [fog.color.r, fog.color.g, fog.color.b] : null,
+    programs: g.renderer.renderer.info.programs?.length ?? -1, plane: h.plane,
+  };
+};
+
 const READ_LINING = () => {
   const g = window.__piratesBR;
   const me = g.state.players.find((p) => p.id === g.localPlayerId);
@@ -219,6 +246,22 @@ async function main() {
     check('fill 0.75: water pixels >= 55%', shots.f75.waterFrac >= 0.55, `${(shots.f75.waterFrac * 100).toFixed(1)}%`);
     check('hold luminance at noon >= 0.12', shots.f50.meanLum >= 0.12, shots.f50.meanLum.toFixed(3));
     check('hold luminance at night >= 0.06', shots.night50.meanLum >= 0.06, shots.night50.meanLum.toFixed(3));
+
+    // b2.3f (holes-07): underwater in the hold. Control first (dry hold, same
+    // eye), then the flooded hold at noon; the program count must not move.
+    let dry = null; let under = null;
+    for (let k = 0; k < 6; k += 1) { dry = await page.evaluate(STAGE_UNDER, { fill: 0, tod: 854 }); await page.waitForTimeout(150); }
+    for (let k = 0; k < 8; k += 1) { under = await page.evaluate(STAGE_UNDER, { fill: 0.9, tod: 854 }); await page.waitForTimeout(150); }
+    await page.screenshot({ path: `${OUT}/under-hold.png`, timeout: 60_000 });
+    const underShot = classify(readPng(readFileSync(`${OUT}/under-hold.png`)));
+    console.log(`  under-hold: ${JSON.stringify({ dry: dry?.ws, under: under?.ws, muffle: under?.muffle, fog: under?.fogDensity, dryFog: dry?.fogDensity, fogColor: under?.fogColor, programs: [dry?.programs, under?.programs], lum: underShot.meanLum })}`);
+    check('dry hold, eye 0.5 m over the sole: water state dry, sea fog', dry?.ws?.source === 'dry' && dry?.ws?.depth === 0 && dry?.fogDensity < 0.05,
+      JSON.stringify({ ws: dry?.ws, fog: dry?.fogDensity }));
+    check('flooded hold 0.9, same eye: source hold, depth > 0.3 m, muffle == depth', under?.ws?.source === 'hold' && under.ws.holdDepth > 0.3
+      && Math.abs(under.muffle - under.ws.depth) < 1e-6, JSON.stringify({ ws: under?.ws, muffle: under?.muffle }));
+    check('flooded hold: 95% fog inside 4-6 m (FogExp2 density 0.28..0.44)', under?.fogDensity >= 0.28 && under?.fogDensity <= 0.44, String(under?.fogDensity));
+    check('flooded hold: 0 new programs (program count unchanged)', dry?.programs > 0 && under?.programs === dry?.programs, `${dry?.programs} -> ${under?.programs}`);
+    check('flooded hold: the frame is murky, not black (mean luminance >= 0.03)', underShot.meanLum >= 0.03, underShot.meanLum.toFixed(3));
 
     for (let k = 0; k < 6; k += 1) { await page.evaluate(STAGE, { fill: 0.5, roll: 0.2, tod: 854 }); await page.waitForTimeout(250); }
     await page.screenshot({ path: `${OUT}/roll20.png`, timeout: 60_000 });

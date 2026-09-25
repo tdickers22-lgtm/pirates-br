@@ -573,6 +573,7 @@ export const LOGIC = [
   quick(tsx('test-hold-wading.mjs')), // b2.2f: flooded hold is water: 0.2 unaffected, 0.5 <= 0.6x dry, 0.95 afloat + breath, surface tilt, client sampler bit-equal (2.4 s on 2026-09-25; quick per b2.2h over the 1.5 s guideline: every flood gate in the pre-commit tier)
   quick(tsx('test-hold-water-geometry.mjs')), // b2.3a: hold water clipped inside the loft for 200 random (fill, roll, pitch) per class, height = shared fill table (full exactly at 1.0), world-level tilt, client slosh re-sim, no literal 0.8, grids (~0.3 s)
   quick(tsx('test-flood-fx-model.mjs')), // b2.3b: breach jets read the shared flood model: v = sqrt(2 g h) (0.2 m 1.98, 1.0 m 4.43), client predicate == server evaluateHoleFlood on 1,000 samples, boil under the hold water, arc, 300 ms release, founder 60% (~0.3 s)
+  quick(tsx('test-water-environment.mjs')), // b2.3f: underwater in the flooded hold: eye depth > 0 inside the hull footprint under the hold surface and 0 outside it, combined = max(sea, hold), 4-6 m hold fog, hatch caustic flicker, Game wiring (muffle on the combined depth, ocean on the outside depth), 0 new programs (~0.3 s)
   tsx('test-seakeeping.mjs'), // b2.1e: 21-station buoyancy, roll periods, heel moment balance, berth heave, point loads, slams (~5 s)
   //   triage-beacons --self-test  — b2.0a (D35, rule 14): the bN.0 triage gate's red cases stay red (missing report,
   //                                 other batch, never pulled = VACUOUS, a >= 3-session signature with neither a

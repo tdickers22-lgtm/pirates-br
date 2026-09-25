@@ -7,7 +7,7 @@ import type {
 } from '../../shared/types/index.js';
 import { wheelPocketForSlot, wheelSlotForTool } from '../../shared/wheel.js';
 import { foliageWindInto } from '../rendering/signConventions.js';
-import { sampleLocalWind, WALK_FOOTPRINT_MARGIN, dist2D, finiteClamp, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, isOnDockDeck, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getSwimHullVerticalT, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
+import { sampleLocalWind, WALK_FOOTPRINT_MARGIN, dist2D, finiteClamp, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, isOnDockDeck, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getShipCompanionwayConfig, getSwimHullVerticalBand, getSwimHullVerticalT, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
 import { getPropGroundY, getSeatSurfaceY } from '../../shared/props.js';
 import { seatedEntityY } from '../world/island/EntityMeshes.js';
 import {
@@ -35,6 +35,7 @@ import { SpoilsRenderer } from '../rendering/SpoilsRenderer.js';
 import { SeaEventRenderer } from '../world/SeaEventRenderer.js';
 import { CombatFx } from '../rendering/CombatFx.js';
 import { FloodFx, type FloodEmitter, type FloodFxShip } from '../rendering/ship/floodFx.js';
+import { applyHoldUnderwater, combineWaterDepth, eyeInsideHold, hatchCausticFlicker, holdEyeDepth, holdUnderwaterPalette, type WaterSource } from '../rendering/waterEnvironment.js';
 import { SoundEngine, type FootstepSurface } from '../audio/SoundEngine.js';
 import { NetworkClient } from '../network/NetworkClient.js';
 import { connectCopy, waitForRetry, type ConnectPhase } from '../network/connectPolicy.js';
@@ -6913,17 +6914,70 @@ export class Game {
     overlay.style.backdropFilter = k > 0.01 ? `grayscale(${(k * 0.85).toFixed(2)}) contrast(${(1 + k * 0.15).toFixed(2)})` : 'none';
   }
 
+  /** Where the camera stands in water this frame (b2.3f). The breath HUD hook:
+   *  depth = max(outside sea, hold water), source says which. */
+  private readonly cameraWaterState: {
+    depth: number; outsideDepth: number; holdDepth: number; source: WaterSource; shipId: string | null;
+  } = { depth: 0, outsideDepth: 0, holdDepth: 0, source: 'dry', shipId: null };
+  private readonly holdEyeScratch = new THREE.Vector3();
+  private readonly holdEyeInverse = new THREE.Matrix4();
+
+  getCameraWaterState(): Readonly<Game['cameraWaterState']> {
+    return this.cameraWaterState;
+  }
+
+  /** Deepest hold water the camera is under (b2.3f): each ship near the camera,
+   *  the eye taken into the drawn hull frame (the hold water mesh's own world
+   *  matrix), measured against the plane b2.3a drew this frame. */
+  private sampleCameraHoldDepth(camera: THREE.Vector3): {
+    depth: number; shipId: string | null; fill: number; agitation: number; flicker: number; inside: boolean;
+  } {
+    const out = { depth: 0, shipId: null as string | null, fill: 0, agitation: 0, flicker: 0, inside: false };
+    const ships = this.state?.ships;
+    if (!ships) return out;
+    for (const ship of ships) {
+      const stats = SHIP_STATS[ship.type];
+      if (!stats) continue;
+      const reach = stats.length * 0.6 + 2;
+      if (Math.abs(camera.x - ship.position.x) > reach || Math.abs(camera.z - ship.position.z) > reach) continue;
+      const h = this.shipRenderer.getHoldWater(ship.id);
+      if (!h) continue;
+      const local = this.holdEyeScratch.copy(camera).applyMatrix4(this.holdEyeInverse.copy(h.mesh.matrixWorld).invert());
+      if (eyeInsideHold(h.clip, local)) out.inside = true;
+      if (!h.plane || !h.mesh.visible) continue;
+      const depth = holdEyeDepth(h.clip, h.plane, local);
+      if (!(depth > out.depth)) continue;
+      const cw = getShipCompanionwayConfig(stats);
+      out.depth = depth;
+      out.shipId = ship.id;
+      out.fill = h.fill;
+      out.agitation = THREE.MathUtils.clamp((h.uniforms.uAgitation.value - 1 - h.fill * 1.2) / 2, 0, 1);
+      out.flicker = hatchCausticFlicker(local.x, local.z, cw, this.ocean.getTime(), this.renderer.getAtmosphere().nightFactor);
+    }
+    return out;
+  }
+
   private updateWaterEnvironment() {
     const camera = this.renderer.camera.position;
     const camStorm = getStormWaveIntensity(this.state?.storm, camera.x, camera.z);
     const waveY = gerstnerHeight(camera.x, camera.z, this.ocean.getTime(), WAVE_PARAMS, camStorm);
     this.combatFx.setWaterSurfaceY(waveY);
-    const depthBelowSurface = Math.max(0, waveY + 0.18 - camera.y);
+    // b2.3f (holes-07): a flooded hold is water too. The camera's depth is
+    // max(outside sea, hold water); the hold palette takes over only when the
+    // hold is the deeper water. Inside a hold the sea is on the far side of the
+    // planking, so a low eye in a DRY hold under the outside waterline (a
+    // heeled hull, a crouch at the sole) is dry, not in the sea.
+    const hold = this.sampleCameraHoldDepth(camera);
+    const outsideDepth = hold.inside ? 0 : Math.max(0, waveY + 0.18 - camera.y);
+    const water = combineWaterDepth(outsideDepth, hold.depth);
     // The audio engine's submerge muffle rides the same depth the water shader
-    // uses, so the muffle lands exactly on the visual dunk.
-    this.cameraSubmergeDepth = depthBelowSurface;
+    // uses, so the muffle lands exactly on the visual dunk (sea or hold).
+    this.cameraSubmergeDepth = water.depth;
+    const ws = this.cameraWaterState;
+    ws.depth = water.depth; ws.outsideDepth = outsideDepth; ws.holdDepth = hold.depth;
+    ws.source = water.source; ws.shipId = water.source === 'hold' ? hold.shipId : null;
     this.renderer.updateWaterEnvironment(
-      depthBelowSurface,
+      outsideDepth,
       // The LOOK of the weather, not its force: see stormVisualIntensity.
       this.stormVisualIntensity,
       // The sky rides MATCH PROGRESS (one sunset, arriving with the late storm
@@ -6935,9 +6989,21 @@ export class Game {
           ? dayNightSecondsForMatchProgress(this.state.matchProgress)
           : this.ocean.getTime()),
     );
+    if (water.holdMix > 0) {
+      const night = THREE.MathUtils.clamp(this.renderer.getAtmosphere().nightFactor, 0, 1);
+      applyHoldUnderwater(
+        this.renderer.scene.fog as THREE.FogExp2 | null,
+        this.renderer.renderer,
+        holdUnderwaterPalette(hold.fill, hold.agitation, night, hold.flicker),
+        water.holdMix,
+      );
+    }
     this.ocean.setSunDirection(this.renderer.getSunDirection());
-    this.ocean.setUnderwaterDepth(depthBelowSurface);
+    // The sea's underside effect is about the SEA surface above the eye; in the
+    // hold that surface is outside the hull, so it keeps the outside depth.
+    this.ocean.setUnderwaterDepth(outsideDepth);
   }
+
 
   private getBlunderbussCrosshairSize(player: Player) {
     const spreadMultiplier = this.getLocalSpreadMultiplier(player, 'blunderbuss', this.input.isAiming());
