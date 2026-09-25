@@ -18,6 +18,7 @@ import {
   type FillCapReport, type GovernorLevers, type GovernorMode, type LeverCaps,
 } from './FrameGovernor.js';
 import { frameBudgetScale, setFrameBudgetScale } from './FrameBudget.js';
+import { SkyEnvironment, envPhaseKey, type EnvironmentStats } from './SkyEnvironment.js';
 
 export type { RenderQuality };
 
@@ -779,6 +780,10 @@ export class Renderer {
   private twilightAmount = 0;
   private nightAmount = 0;
   private stormLevel = 0;
+  /** PMREM of the live sky = scene.environment (b3.1d; see SkyEnvironment.ts). */
+  private skyEnvironment: SkyEnvironment | null = null;
+  /** Set by a context restore: the PMREM contents died with the context. */
+  private envCaptureDirty = false;
   private readonly qualityVerdict: QualityVerdict = decideRenderQuality();
   private readonly quality = this.qualityVerdict.quality;
   /**
@@ -1083,6 +1088,23 @@ export class Renderer {
     this.skyMesh.renderOrder = 100;
     this.skyMesh.frustumCulled = false;
     this.scene.add(this.skyMesh);
+
+    // ── Environment map (b3.1d) ────────────────────────────────
+    // Captured HERE, before any world material exists, so every standard
+    // program links once with the env map in its key (the warmer never meets a
+    // program that would re-link when the env map arrives), and the capture's
+    // own programs (sky-into-target variant, cubemap->cubeUV, blur) are paid
+    // before the first drawn frame. Refreshes then only happen on a phase
+    // change (render() -> refreshEnvironment), into the same render target.
+    try {
+      this.skyEnvironment = new SkyEnvironment(this.renderer, this.skyMaterial, this.quality, this.fillClass);
+      this.skyEnvironment.update(this.environmentPhaseKey(), this.skyMaterial.uniforms, performance.now(), true);
+      this.scene.environment = this.skyEnvironment.texture;
+    } catch (error) {
+      // A GPU without half-float cube targets: metals stay dark, nothing else changes.
+      console.warn('[env] sky environment unavailable', error);
+      this.skyEnvironment = null;
+    }
 
     // ── Sun ─────────────────────────────────────────────────────
     const sunWorldDir = this.sunDir.clone().multiplyScalar(400);
@@ -1970,6 +1992,35 @@ export class Renderer {
     return this.sunDir;
   }
 
+  /** Quantised sky state the env map was (or would be) captured at. */
+  private environmentPhaseKey(): string {
+    const u = this.skyMaterial.uniforms;
+    return envPhaseKey({
+      day: u.u_dayAmount.value as number,
+      twilight: u.u_twilightAmount.value as number,
+      night: u.u_nightAmount.value as number,
+      storm: u.u_stormIntensity.value as number,
+      overcast: u.u_overcast.value as number,
+    });
+  }
+
+  /** Re-captures the env map only when the phase key moved. Never per frame:
+   *  on an unchanged key this is one string compare. */
+  private refreshEnvironment() {
+    const env = this.skyEnvironment;
+    if (!env) return;
+    const force = this.envCaptureDirty;
+    this.envCaptureDirty = false;
+    env.update(this.environmentPhaseKey(), this.skyMaterial.uniforms, performance.now(), force);
+  }
+
+  /** Debug/probe read-out (scripts/probes/env-metal-probe.mjs). */
+  getEnvironmentStats(): (EnvironmentStats & { bound: boolean }) | null {
+    const env = this.skyEnvironment;
+    if (!env) return null;
+    return { ...env.stats(), bound: this.scene.environment !== null && this.scene.environment === env.texture };
+  }
+
   render() {
     if (this.contextLost) return;
     // The strike override goes on LAST, after every per-frame clamp that would
@@ -1979,6 +2030,7 @@ export class Renderer {
     // BEFORE anything is drawn (see LightBudget: the pool size never changes,
     // so no material ever re-links because a torch came into view).
     updateLightBudget(this.camera.position);
+    this.refreshEnvironment();
     // Sky dome follows camera so it always fills the background
     this.skyMesh.position.copy(this.camera.position);
     const sunPos = this.camera.position.clone().addScaledVector(this.sunDir, 2050);
@@ -2103,6 +2155,7 @@ export class Renderer {
       this.programWarmer.setGuard(true);
       this.programWarmer.setBoosted(true);
       this.markGpuResourcesDirty();
+      this.envCaptureDirty = true;
       // Released CPU copies (phone/iPad) come back from their backups; the
       // settle below holds the pill until they have (b1-ask-04).
       void restoreReleasedCpuCopies();
