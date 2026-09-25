@@ -175,5 +175,90 @@ if (M) {
   check('CombatFx desaturates through the model below 15 % HP', /lowHealthDesaturation\(/.test(fx6) && /mix-blend-mode:\s*saturation/.test(fx6));
 }
 
+// ── 7. the flooding ship card (b2.2h; holes-12, mechanicshud-06, PLAN 3.6/3.9) ──
+// Leaks split below the waterline / topside with a size glyph, a bilge bar with a
+// trend arrow from floodingRate, "Taking water fast" at >= 50 %, a hideable
+// gauge that follows the ship-card rule (own hull, aboard or within 30 m), and
+// the one alarm slot keeping its priority with the fast-flood line in it.
+if (M) {
+  const fc = M.floodCard;
+  check('floodCard exported', typeof fc === 'function');
+  if (typeof fc === 'function') {
+    const holes = [
+      { id: 1, patched: false, size: 3, tier: 0, depth: 0.4 },   // big breach under water
+      { id: 2, patched: false, size: 2, tier: 0 },               // no live depth: LOW tier = below
+      { id: 3, patched: false, size: 1, tier: 2, depth: -1.2 },  // topside, dry
+      { id: 4, patched: true, size: 3, tier: 0, depth: 0.5 },    // planked: not a leak
+      { id: 5, patched: false, size: 1, tier: 1, depth: -0.1 },  // MID dragged into the wash margin: floods, so below
+    ];
+    const c = fc({ holes, waterLevel: 0.3, floodingRate: 0.004, sinking: false });
+    check('flood card: below = open holes under the live surface (or LOW tier), largest first', JSON.stringify(c.below) === '[3,2,1]', JSON.stringify(c.below));
+    check('flood card: topside = open holes above it', JSON.stringify(c.topside) === '[1]', JSON.stringify(c.topside));
+    check('flood card: patched holes are not leaks', c.below.length + c.topside.length === 4);
+    const g = M.HOLE_SIZE_GLYPH;
+    check('size glyph: three distinct glyphs, small to large', Array.isArray(g) && new Set([g[1], g[2], g[3]]).size === 3 && g.slice(1).every((x) => typeof x === 'string' && x.length > 0), JSON.stringify(g));
+    if (Array.isArray(g)) {
+      check('flood card line: below first with its size glyphs', c.leaksLine.startsWith('BELOW') && c.leaksLine.includes(`${g[3]}${g[2]}${g[1]}`), c.leaksLine);
+      check('flood card line: topside with its glyph', /TOPSIDE 1/.test(c.leaksLine) && c.leaksLine.endsWith(g[1]), c.leaksLine);
+    }
+    check('flood card: sound hull says so', fc({ holes: [holes[3]], waterLevel: 0, floodingRate: 0, sinking: false }).leaksLine === 'Hull sound');
+    check('flood card: topside-only leaks say she is dry below', /^TOPSIDE/.test(fc({ holes: [holes[2]], waterLevel: 0, floodingRate: 0, sinking: false }).leaksLine));
+    const tr = (r) => fc({ holes: [], waterLevel: 0.3, floodingRate: r, sinking: false });
+    check('trend: floodingRate > 0 rises', tr(0.004).trend === 'rising' && tr(0.004).trendGlyph === '▲');
+    check('trend: floodingRate < 0 falls', tr(-0.004).trend === 'falling' && tr(-0.004).trendGlyph === '▼');
+    check('trend: ~0 is steady', tr(0.0001).trend === 'steady' && tr(undefined).trend === 'steady');
+    check('bilge pct rounds the fill', fc({ holes: [], waterLevel: 0.456, floodingRate: 0, sinking: false }).bilgePct === 46);
+    const fast = (w, r) => fc({ holes: [holes[0]], waterLevel: w, floodingRate: r, sinking: false }).fast;
+    check('"Taking water fast" at 50 % rising', fast(0.5, 0.003) === true);
+    check('"Taking water fast" also at 50 % steady (nobody is winning)', fast(0.62, 0) === true);
+    check('not fast at 49 %', fast(0.49, 0.01) === false);
+    check('not fast while the bailers are winning (no contradiction with the down arrow)', fast(0.7, -0.004) === false);
+    check('FLOOD_FAST_FILL is 0.5', M.FLOOD_FAST_FILL === 0.5);
+  }
+  // Gauge visibility: the card rule, plus water, plus the player's option.
+  const gv = (p) => M.hudVisibility({ ...base, ...p }).has('bilgeGauge');
+  check('bilge gauge: aboard own hull with water', gv({ nearOwnShip: true, ownWater: 0.3 }) === true);
+  check('bilge gauge: dry hull hides it', gv({ nearOwnShip: true, ownWater: 0.01 }) === false);
+  check('bilge gauge: beyond 30 m / on an enemy deck hides it (nearOwnShip false)', gv({ nearOwnShip: false, ownWater: 0.6 }) === false);
+  check('bilge gauge: swimming within 30 m of her keeps it (swimming back to a flooding ship)', gv({ playerState: 'swimming', nearOwnShip: true, ownWater: 0.4 }) === true);
+  check('bilge gauge: the option hides it', gv({ nearOwnShip: true, ownWater: 0.6, bilgeGaugeHidden: true }) === false);
+  check('bilge gauge: never for the dead', gv({ playerState: 'eliminated', nearOwnShip: true, ownWater: 0.6 }) === false && gv({ playerState: 'respawning', nearOwnShip: true, ownWater: 0.6 }) === false);
+  check('bilge gauge does not count as always-on chrome', !M.ALWAYS_ON.includes('bilgeGauge'));
+  check('bilge gauge pref: stored "0" hides, anything else shows', typeof M.bilgeGaugeHidden === 'function'
+    && M.bilgeGaugeHidden({ getItem: () => '0' }) === true && M.bilgeGaugeHidden({ getItem: () => null }) === false
+    && M.bilgeGaugeHidden({ getItem: () => { throw new Error('private mode'); } }) === false);
+  // Alarm slot priority with the fast-flood line.
+  const ms7 = {
+    playerState: 'alive', shipSinking: false, shipLeaks: 0, shipWater: 0, shipOnFire: false,
+    outsideRing: false, metresOutside: null, eyeCollapse: false, lootCarried: 0, lootSellAt: null,
+    defaultObjective: 'Objective: dig a chest', sailAlarm: null, bannerRequested: null, wheelGlyph: '[1]',
+  };
+  const p7 = (p) => M.hudMessagePlan({ ...ms7, ...p });
+  check('alarm: 2 leaks at 60 % rising says TAKING WATER FAST', /^TAKING WATER FAST/.test(p7({ shipLeaks: 2, shipWater: 0.6, shipFloodingRate: 0.003 }).alarm ?? ''), p7({ shipLeaks: 2, shipWater: 0.6, shipFloodingRate: 0.003 }).alarm);
+  check('alarm: 60 % while bailing wins is not "fast"', !/FAST/.test(p7({ shipLeaks: 0, shipWater: 0.6, shipFloodingRate: -0.004 }).alarm ?? ''));
+  check('alarm: 40 % rising is the plain flooding line', /^TAKING WATER ·/.test(p7({ shipLeaks: 1, shipWater: 0.4, shipFloodingRate: 0.003 }).alarm ?? ''));
+  check('alarm priority: sinking outranks the fast flood', p7({ shipSinking: true, shipLeaks: 3, shipWater: 0.95, shipFloodingRate: 0.01 }).alarm === 'SHIP IS SINKING');
+  check('alarm priority: fast flood outranks outside the ring', /FAST/.test(p7({ shipLeaks: 2, shipWater: 0.7, shipFloodingRate: 0.01, outsideRing: true, metresOutside: 50 }).alarm ?? ''));
+  check('alarm priority: fast flood outranks fire aboard (one slot)', /FAST/.test(p7({ shipLeaks: 2, shipWater: 0.7, shipFloodingRate: 0.01, shipOnFire: true }).alarm ?? ''));
+  check('alarm priority: dead shows no flood alarm', p7({ playerState: 'eliminated', shipLeaks: 2, shipWater: 0.7, shipFloodingRate: 0.01 }).alarm === null);
+}
+{
+  const hud7 = readFileSync(join(ROOT, 'src/client/ui/HudController.ts'), 'utf8');
+  check('HudController paints the leaks line through floodCard', /floodCard\(/.test(hud7));
+  check('HudController gates the gauge on the model (bilgeGauge)', /has\('bilgeGauge'\)/.test(hud7));
+  check('the old 80 m overboard gauge rule is gone', !/overboard[\s\S]{0,400}<\s*80\b/.test(hud7));
+  check('HudController passes floodingRate to the message plan', /shipFloodingRate:/.test(hud7));
+  check('Settings gets a "Show bilge gauge" option', /settings-bilge-gauge/.test(hud7) && /settings-controls-mount/.test(hud7));
+  // Every flood gate runs in the quick tier (holes-12).
+  const suites = readFileSync(join(ROOT, 'scripts/lib/suites.mjs'), 'utf8');
+  for (const s of ['test-flooding.mjs', 'test-flood-model.mjs', 'test-flood-trim.mjs', 'test-hold-wading.mjs', 'test-hud-visibility.mjs']) {
+    check(`quick tier runs ${s}`, new RegExp(`quick\\(\\s*tsx\\('${s.replace('.', '\\.')}'\\)`).test(suites));
+  }
+  const inv = readFileSync(join(ROOT, 'docs/TEST_SUITE_INVENTORY.md'), 'utf8');
+  for (const s of ['test-flooding.mjs', 'test-flood-model.mjs', 'test-flood-trim.mjs', 'test-hold-wading.mjs']) {
+    check(`inventory row for ${s} says quick`, new RegExp(`^\\|\\s*${s.replace('.', '\\.')}\\s*\\|\\s*quick`, 'm').test(inv));
+  }
+}
+
 console.log(`test-hud-visibility: ${passes} pass, ${fails} fail`);
 process.exit(fails ? 1 : 0);

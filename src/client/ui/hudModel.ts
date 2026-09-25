@@ -27,6 +27,8 @@
  *    behind it is visible.
  */
 
+import { FLOODING } from '../../shared/constants/index.js';
+
 export type HudElementId =
   | 'compass'
   | 'stormLine'
@@ -52,7 +54,8 @@ export type HudElementId =
   | 'respawnCard'
   | 'spectateBanner'
   | 'deathBar'
-  | 'serverNotice';
+  | 'serverNotice'
+  | 'bilgeGauge';
 
 /** The always-on set: what a living pirate at rest sees, and nothing else. */
 export const ALWAYS_ON: readonly HudElementId[] = [
@@ -92,6 +95,10 @@ export interface HudContext {
   /** Lines in the event feed right now. On a phone the feed is transient: it
    *  shows only while it has something to say, and never counts as chrome. */
   feedLines?: number;
+  /** 0..1 bilge fill of the OWN hull (b2.2h): the gauge shows only with water in her. */
+  ownWater?: number;
+  /** The player switched the bilge gauge off in Settings (b2.2h). */
+  bilgeGaugeHidden?: boolean;
 }
 
 /** The ship card's distance rule (PLAN 3.x HUD: "only aboard or within 30 m"). */
@@ -187,6 +194,9 @@ export function hudVisibility(ctx: HudContext): Set<HudElementId> {
 
   const alive = ctx.playerState === 'alive' || ctx.playerState === 'swimming';
   if (alive && ctx.nearOwnShip && ctx.playerState !== 'swimming') out.add('shipCard');
+  // The bilge gauge follows the card's own-hull 30 m rule, but it stays up
+  // while swimming back to her: that is the moment it matters most.
+  if (alive && ctx.nearOwnShip && (ctx.ownWater ?? 0) > BILGE_GAUGE_MIN_FILL && !ctx.bilgeGaugeHidden) out.add('bilgeGauge');
   // Stores are information only where they are spent (the wheel, a cannon, a
   // repair prompt). The permanent five-chip bar is gone.
   if (alive && (ctx.wheelHeld || ctx.atCannon || ctx.atRepairPrompt)) out.add('stores');
@@ -246,6 +256,8 @@ export interface HudMessageState {
   bannerRequested: string | null;
   /** Wheel glyph for the bucket hint (glyph('supplyWheel') etc.). */
   wheelGlyph?: string;
+  /** Net fill/s of the own hull (server floodingRate, bailing included). */
+  shipFloodingRate?: number;
 }
 
 export interface HudMessagePlan {
@@ -263,6 +275,8 @@ export function isFlooding(s: Pick<HudMessageState, 'shipLeaks' | 'shipWater'>):
 }
 
 export function hudMessagePlan(s: HudMessageState): HudMessagePlan {
+  const pctNow = Math.round(Math.max(0, Math.min(1, s.shipWater)) * 100);
+  const fastFlood = floodIsFast(s.shipWater, s.shipFloodingRate);
   const wheel = s.wheelGlyph ?? '[1]';
   let tier: HudTier;
   let objective: string;
@@ -283,10 +297,13 @@ export function hudMessagePlan(s: HudMessageState): HudMessagePlan {
       : 'Objective: bail her out, or abandon ship';
   } else if (isFlooding(s)) {
     tier = 'flooding';
-    const pct = Math.round(Math.max(0, Math.min(1, s.shipWater)) * 100);
-    alarm = s.shipLeaks > 0
-      ? `TAKING WATER · ${s.shipLeaks} LEAK${s.shipLeaks === 1 ? '' : 'S'} · ${pct}%`
-      : `WATER IN THE HOLD · ${pct}%`;
+    const pct = pctNow;
+    const leaks = s.shipLeaks > 0 ? ` · ${s.shipLeaks} LEAK${s.shipLeaks === 1 ? '' : 'S'}` : '';
+    alarm = fastFlood
+      ? `TAKING WATER FAST${leaks} · ${pct}%`
+      : s.shipLeaks > 0
+        ? `TAKING WATER${leaks} · ${pct}%`
+        : `WATER IN THE HOLD · ${pct}%`;
     objective = s.shipLeaks > 0
       ? `Objective: patch the leaks with planks, then bail. Hold ${wheel} wheel, pick Bucket (3)`
       : `Objective: bail the hold. Hold ${wheel} wheel, pick Bucket (3)`;
@@ -323,4 +340,105 @@ export function shipMotionWord(anchored: boolean, aground: boolean, knots: numbe
   if (aground) return `Aground · ${knots.toFixed(1)} kn`;
   if (knots < 0.15) return 'Adrift';
   return `Under way · ${knots.toFixed(1)} kn`;
+}
+
+// ── The flooding ship card (b2.2h; holes-12, mechanicshud-06, PLAN 3.6/3.9) ──
+
+/** Bilge fill at which the card and the alarm say "Taking water fast". */
+export const FLOOD_FAST_FILL = 0.5;
+/** Below this fill there is nothing in the hold worth a gauge. */
+export const BILGE_GAUGE_MIN_FILL = 0.02;
+/** |floodingRate| (fill/s) under which the trend arrow reads steady. */
+export const FLOOD_TREND_DEADBAND = 0.0005;
+/** Metres above the live surface a breach still takes wash (the flood model's own margin). */
+export const HUD_WASH_MARGIN: number = FLOODING.WASH_MARGIN;
+/** Size glyph per hole size (index 1..3): small, medium, large. */
+export const HOLE_SIZE_GLYPH: readonly string[] = ['', '•', '●', '⬤'];
+/** Settings key for the bilge gauge option ("0" = hidden). */
+export const BILGE_GAUGE_PREF_KEY = 'piratesBR.hud.bilgeGauge';
+
+export function bilgeGaugeHidden(storage: Pick<Storage, 'getItem'> | null | undefined): boolean {
+  try {
+    return storage?.getItem(BILGE_GAUGE_PREF_KEY) === '0';
+  } catch {
+    return false;
+  }
+}
+
+export type FloodTrend = 'rising' | 'falling' | 'steady';
+
+export function floodTrend(rate: number | undefined): FloodTrend {
+  const r = Number.isFinite(rate) ? (rate as number) : 0;
+  if (r > FLOOD_TREND_DEADBAND) return 'rising';
+  if (r < -FLOOD_TREND_DEADBAND) return 'falling';
+  return 'steady';
+}
+
+/** "Taking water fast": half full or worse and the bailers are not winning. */
+export function floodIsFast(fill: number, rate: number | undefined): boolean {
+  return Number.isFinite(fill) && fill >= FLOOD_FAST_FILL && floodTrend(rate) !== 'falling';
+}
+
+export interface FloodCardHole {
+  patched: boolean;
+  size?: number;
+  /** Height class stamped by the server: 0 LOW floods a level hull. */
+  tier?: number;
+  /** Metres below the LIVE outside surface (negative = above), when known. */
+  depth?: number;
+}
+
+export interface FloodCardInput {
+  holes: readonly FloodCardHole[] | undefined;
+  waterLevel: number | undefined;
+  floodingRate: number | undefined;
+  sinking: boolean;
+}
+
+export interface FloodCard {
+  /** Open leaks taking water (under the live surface or in its wash), sizes largest first. */
+  below: number[];
+  /** Open leaks above it, sizes largest first. */
+  topside: number[];
+  leaksLine: string;
+  bilgePct: number;
+  trend: FloodTrend;
+  trendGlyph: '▲' | '▼' | '▬';
+  fast: boolean;
+}
+
+const clampSize = (n: number | undefined): number => (n === 2 || n === 3 ? n : 1);
+
+/**
+ * The card's flooding rows. A breach is "below" while it is under the live
+ * surface or inside the wash margin above it (the same rule the flood model
+ * uses, so the card lists exactly the leaks that are letting water in); with
+ * no live depth the server's LOW tier stands in. Sizes print as glyphs.
+ */
+export function floodCard(input: FloodCardInput): FloodCard {
+  const below: number[] = [];
+  const topside: number[] = [];
+  for (const h of input.holes ?? []) {
+    if (h.patched) continue;
+    const size = clampSize(h.size);
+    const under = Number.isFinite(h.depth) ? (h.depth as number) > -HUD_WASH_MARGIN : h.tier === 0;
+    (under ? below : topside).push(size);
+  }
+  below.sort((a, b) => b - a);
+  topside.sort((a, b) => b - a);
+  const glyphs = (sizes: number[]) => sizes.map((n) => HOLE_SIZE_GLYPH[n]).join('');
+  const parts: string[] = [];
+  if (below.length) parts.push(`BELOW ${below.length} ${glyphs(below)}`);
+  if (topside.length) parts.push(`TOPSIDE ${topside.length} ${glyphs(topside)}`);
+  const fill = Math.max(0, Math.min(1, Number.isFinite(input.waterLevel) ? (input.waterLevel as number) : 0));
+  const trend = floodTrend(input.floodingRate);
+  return {
+    below,
+    topside,
+    leaksLine: parts.length ? parts.join(' · ') : 'Hull sound',
+    bilgePct: Math.round(fill * 100),
+    trend,
+    trendGlyph: trend === 'rising' ? '▲' : trend === 'falling' ? '▼' : '▬',
+    fast: !input.sinking && floodIsFast(fill, input.floodingRate),
+  };
 }

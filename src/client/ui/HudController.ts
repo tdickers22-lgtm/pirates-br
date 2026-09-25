@@ -4,7 +4,7 @@
  * through a narrow `HudView` handed in by Game; it never touches the scene.
  */
 import { braceCatch, idealBrace } from '../../shared/sailing.js';
-import { hudMessagePlan, hudVisibility, crosshairMode, shipCardNear, TIER_SEVERITY, type HudMessagePlan, type HudPlayerState, type HudElementId } from './hudModel';
+import { hudMessagePlan, hudVisibility, crosshairMode, shipCardNear, floodCard, bilgeGaugeHidden, BILGE_GAUGE_PREF_KEY, TIER_SEVERITY, type HudMessagePlan, type HudPlayerState, type HudElementId } from './hudModel';
 import * as THREE from 'three';
 import { BOT_EARLY_PEACE_SECONDS, ECONOMY, FIRST_SAIL_ASSIST, KILL_STREAK_LADDER, PLAYER, RESPAWN_HOLD_MAX_SECONDS, SHIP, STORM_ARC_SECONDS, STORM_PHASES, WEAPONS } from '../../shared/constants/index.js';
 import { WHEEL_SLOTS } from '../../shared/wheel.js';
@@ -16,8 +16,11 @@ import {
   STORM_GUST_BLOWOUT_PULSE,
   angleWrap,
   dist2D,
+  gerstnerHeight,
+  getStormWaveIntensity,
   isPointInsideIslandFootprint,
   sampleLocalWind,
+  WAVE_PARAMS,
 } from '../../shared/utils/index.js';
 import type { ClientInteractKind, FloatingDamageIndicator } from '../core/Game.js';
 import type { InputManager } from '../input/InputManager.js';
@@ -356,6 +359,52 @@ export class HudController {
 
   constructor(private readonly view: HudView) {
     this.watchFooterHeight();
+    this.mountBilgeGaugeSetting();
+  }
+
+  /** Settings > "Show bilge gauge" (b2.2h, PLAN D15: the gauge stays, secondary,
+   *  and can be hidden). Stored beside the other HUD prefs; "0" = hidden. */
+  private bilgeGaugeOff = typeof localStorage !== 'undefined' ? bilgeGaugeHidden(localStorage) : false;
+  private mountBilgeGaugeSetting(): void {
+    if (typeof document === 'undefined') return;
+    const mount = document.getElementById('settings-controls-mount');
+    if (!mount || document.getElementById('settings-bilge-gauge')) return;
+    const row = document.createElement('label');
+    row.className = 'settings-row';
+    row.style.cssText = 'display:flex;align-items:center;gap:10px;margin:6px 0;font-size:0.8rem;color:#f4e2b2;';
+    const text = document.createElement('span');
+    text.textContent = 'Show bilge gauge';
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.id = 'settings-bilge-gauge';
+    box.checked = !this.bilgeGaugeOff;
+    box.style.cssText = 'transform:scale(1.4);margin-left:8px;';
+    box.addEventListener('change', () => {
+      this.bilgeGaugeOff = !box.checked;
+      try { localStorage.setItem(BILGE_GAUGE_PREF_KEY, box.checked ? '1' : '0'); } catch { /* private mode: session only */ }
+    });
+    row.append(text, box);
+    mount.appendChild(row);
+  }
+
+  /** Metres each hole sits under the LIVE sea (negative = above), the same
+   *  attitude + Gerstner rule as FloodSystem.evaluateHoleFlood, so the card's
+   *  "below" list is exactly the set of breaches letting water in. */
+  private floodCardFor(ship: Ship) {
+    const t = this.view.ocean.getTime();
+    const sinR = Math.sin(ship.rotation);
+    const cosR = Math.cos(ship.rotation);
+    const sinPitch = Math.sin(ship.pitch ?? 0);
+    const sinRoll = Math.sin(ship.roll ?? 0);
+    const storm = getStormWaveIntensity(this.view.state?.storm, ship.position.x, ship.position.z);
+    const holes = (ship.holes ?? []).map((h) => {
+      if (h.patched) return { patched: true, size: h.size, tier: h.tier };
+      const wx = ship.position.x + h.x * cosR + h.z * sinR;
+      const wz = ship.position.z + h.z * cosR - h.x * sinR;
+      const y = ship.position.y + h.y + h.x * sinRoll - h.z * sinPitch;
+      return { patched: false, size: h.size, tier: h.tier, depth: gerstnerHeight(wx, wz, t, WAVE_PARAMS, storm) - y };
+    });
+    return floodCard({ holes, waterLevel: ship.waterLevel, floodingRate: ship.floodingRate, sinking: !!ship.sinking });
   }
 
   /**
@@ -1332,12 +1381,18 @@ export class HudController {
       this.renderOwnShipBearing(ship, player);
       // The four section bars are gone with the section model. What a captain
       // needs is the count of open planking and the bilge gauge beside it.
-      this.view.ui.shipLeaks.textContent = openLeaks > 0
-        ? `${openLeaks} LEAK${openLeaks === 1 ? '' : 'S'}${aboard ? ` — hold ${glyph('interact')} at a hole to plank it` : ' — she is taking water'}`
-        : 'Hull sound';
-      this.view.ui.shipLeaks.style.color = openLeaks >= 4
+      // b2.2h: leaks split below the waterline / topside, one size glyph per
+      // breach (• small, ● medium, ⬤ large), so the eye reads which end of the
+      // job is sinking her before the count.
+      const card = this.floodCardFor(ship);
+      const leakText = card.below.length > 0 && aboard
+        ? `${card.leaksLine} · hold ${glyph('interact')} at a hole to plank it`
+        : card.leaksLine;
+      if (this.view.ui.shipLeaks.textContent !== leakText) this.view.ui.shipLeaks.textContent = leakText;
+      const worstBelow = card.below[0] ?? 0;
+      this.view.ui.shipLeaks.style.color = card.fast || card.below.length >= 3 || worstBelow >= 3
         ? '#ff8a6a'
-        : openLeaks > 0 ? '#ffb37a' : '#7fe0a0';
+        : card.below.length > 0 ? '#ffb37a' : openLeaks > 0 ? '#e8d49a' : '#7fe0a0';
       // The wind WHERE SHE IS. PhysicsSystem sails every hull on sampleLocalWind,
       // so reading the prevailing breeze here would print a trim instruction for a
       // wind this hull is not in — the one place a captain outside the ring is
@@ -1417,7 +1472,6 @@ export class HudController {
     }
     this.renderShipUpgrades(ship);
     this.renderShipInventory(ship, player);
-    this.updateWaterGauge(player);
 
     let chestsInHold = 0;
     if (ship) {
@@ -1460,6 +1514,7 @@ export class HudController {
       shipSinking: !!ship?.sinking,
       shipLeaks: ship ? this.frameOpenLeaks : 0,
       shipWater: ship ? THREE.MathUtils.clamp(ship.waterLevel ?? 0, 0, 1) : 0,
+      shipFloodingRate: ship?.floodingRate ?? 0,
       shipOnFire,
       outsideRing: outsideStorm || (this.frameMetresOutside !== null && this.frameMetresOutside > 0),
       metresOutside: this.frameMetresOutside,
@@ -2196,55 +2251,32 @@ export class HudController {
     }
   }
 
-  /** Bilge water gauge — vertical ship-silhouette fill, trend arrow, red alarm > 75%.
-   *  Shows for the deck you are standing on, and ALSO for your own hull while
-   *  you are in the water beside her: the moment that mattered most (swimming
-   *  back to a flooding ship) used to be the one moment the gauge went blank,
-   *  even though the flooding audio was already playing. */
-  private updateWaterGauge(player: Player) {
-    const aboard = player.onShipId ? this.view.shipsById.get(player.onShipId) ?? null : null;
-    const own = player.shipId ? this.view.shipsById.get(player.shipId) ?? null : null;
-    const overboard = !aboard
-      && !!own
-      && !own.sinking
-      && (own.waterLevel ?? 0) > 0.02
-      && dist2D(player.position.x, player.position.z, own.position.x, own.position.z) < 80;
-    const ship = aboard ?? (overboard ? own : null);
-    this.view.ui.waterGaugeTitle.textContent = overboard ? 'Your Ship' : 'Bilge';
-    const level = ship ? THREE.MathUtils.clamp(ship.waterLevel ?? 0, 0, 1) : 0;
-    const show = !!ship
-      && level > 0.02
-      && player.state !== 'eliminated'
-      && player.state !== 'respawning';
-    this.view.ui.waterGauge.classList.toggle('visible', show);
-    if (!show || !ship) {
-      this.view.ui.waterGauge.classList.remove('danger');
-      // Damp the ship-status widget tint back to normal when not flooding.
+  /** Bilge water gauge (b2.2h): the OWN hull only, on the ship-card rule
+   *  (aboard, or within 30 m of her, swimming back included), and only while
+   *  hudVisibility says so (water in her, the Settings option on). Fill %,
+   *  a trend arrow from the server's net floodingRate, and "Taking water fast"
+   *  at 50 % or more while nobody is winning. */
+  private updateWaterGauge(ship: Ship | null) {
+    const gauge = this.view.ui.waterGauge;
+    gauge.classList.toggle('visible', !!ship);
+    if (!ship) {
+      gauge.classList.remove('danger');
       this.view.ui.shipStatus.classList.remove('flooding', 'flooding-critical');
       return;
     }
-
-    const pct = Math.round(level * 100);
-    this.view.ui.waterGaugeFill.style.height = `${pct}%`;
-    this.view.ui.waterGaugePct.textContent = `${pct}%`;
-    const danger = level > 0.75;
-    this.view.ui.waterGauge.classList.toggle('danger', danger);
-
-    const rate = ship.floodingRate ?? 0;
+    const card = floodCard({ holes: [], waterLevel: ship.waterLevel, floodingRate: ship.floodingRate, sinking: !!ship.sinking });
+    const title = card.fast ? 'Taking water fast' : 'Bilge';
+    if (this.view.ui.waterGaugeTitle.textContent !== title) this.view.ui.waterGaugeTitle.textContent = title;
+    this.view.ui.waterGaugeFill.style.height = `${card.bilgePct}%`;
+    this.view.ui.waterGaugePct.textContent = `${card.bilgePct}%`;
+    const danger = card.fast || card.bilgePct > 75;
+    gauge.classList.toggle('danger', danger);
     const trend = this.view.ui.waterGaugeTrend;
-    if (rate > 0.0005) {
-      trend.textContent = '▲';
-      trend.style.color = danger ? '#ff8a6a' : '#ffb37a';
-    } else if (rate < -0.0005) {
-      trend.textContent = '▼';
-      trend.style.color = '#7fe0a0';
-    } else {
-      trend.textContent = '▬';
-      trend.style.color = '#9aa8b8';
-    }
-
+    trend.textContent = card.trendGlyph;
+    trend.style.color = card.trend === 'rising' ? (danger ? '#ff8a6a' : '#ffb37a')
+      : card.trend === 'falling' ? '#7fe0a0' : '#9aa8b8';
     // Tint the ship-status widget so the hull panel reads "flooding" at a glance.
-    this.view.ui.shipStatus.classList.toggle('flooding', level > 0.02 && !danger);
+    this.view.ui.shipStatus.classList.toggle('flooding', !danger);
     this.view.ui.shipStatus.classList.toggle('flooding-critical', danger);
   }
 
@@ -2863,8 +2895,11 @@ export class HudController {
       bannerUp: performance.now() <= this.view.islandBannerHideAt,
       serverNotice: performance.now() < this.serverNoticeHideAt,
       feedLines: this.view.ui.killFeed.childElementCount,
+      ownWater: own ? THREE.MathUtils.clamp(own.waterLevel ?? 0, 0, 1) : 0,
+      bilgeGaugeHidden: this.bilgeGaugeOff,
     });
     this.frameVisibility = vis;
+    this.updateWaterGauge(vis.has('bilgeGauge') ? own : null);
     // The model owns whether these exist at all; their own writers only fill
     // them. A class, not style.display, so a writer that sets display (the
     // crew strip's flex) cannot fight the model back on.
