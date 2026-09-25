@@ -88,6 +88,7 @@ import {
   getShipGangwayPlan as gangwayPlanFor,
 } from '../../shared/interactions.js';
 import { stepPirate } from '../../shared/locomotion.js';
+import { hullPointVelocity, hullRatesOf } from '../../shared/ballistics.js';
 import { sanitizePlayerInput } from '../net/validate.js';
 
 // Weathered banner dyes — team identity without the LED-strip look.
@@ -4896,10 +4897,12 @@ export class Match {
     player.cannonFlightTimer = SHIP.CANNON_PLAYER_FLIGHT_MAX;
     player.state = 'alive';
     player.position = { ...muzzle };
+    // b2.1h (physics-12): the muzzle's own velocity, v + omega x r + heave.
+    const muzzleV = hullPointVelocity(ship, muzzle, hullRatesOf(ship));
     player.velocity = {
-      x: ship.velocity.x + dir.x * SHIP.CANNON_LAUNCH_SPEED,
-      y: dir.y * SHIP.CANNON_LAUNCH_SPEED + SHIP.CANNON_LAUNCH_VERTICAL_BIAS,
-      z: ship.velocity.z + dir.z * SHIP.CANNON_LAUNCH_SPEED,
+      x: muzzleV.x + dir.x * SHIP.CANNON_LAUNCH_SPEED,
+      y: muzzleV.y + dir.y * SHIP.CANNON_LAUNCH_SPEED + SHIP.CANNON_LAUNCH_VERTICAL_BIAS,
+      z: muzzleV.z + dir.z * SHIP.CANNON_LAUNCH_SPEED,
     };
     player.knockbackVelocity = { x: 0, y: 0, z: 0 };
     player.shipBoundaryGraceTimer = PLAYER.SHIP_EXIT_GRACE_TIME + 0.8;
