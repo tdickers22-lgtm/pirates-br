@@ -25,6 +25,14 @@
 //                   cannon crack crossfades over 120-220 m; Doppler ratio within 1% and applied
 //                   to the whistle's playbackRate; the AudioListener follows the pose.
 //
+//   Beds + foley (b2.4e; audio-06, vm:audio:3)
+//                   wind by APPARENT wind: > 0 in clear weather under way, a downwind run at wind
+//                   speed hears less than beating, rigging whistle only above 8 m/s aboard with
+//                   rising pitch; hull creak 0 off-ship whatever the load; 3 ocean layers by sea
+//                   state; surf by shore distance; luff flutter rate; sail fill thump at 10% trim;
+//                   bow slap once per pitch peak; the director positions anchor/cannon foley at
+//                   their stations; the engine's wind voice is audible on clear-weather beds.
+//
 //   node --import tsx scripts/test-audio-models.mjs
 import { readFileSync } from 'node:fs';
 
@@ -468,6 +476,103 @@ async function drain(bank) { for (let i = 0; i < 2000 && (bank.decodesInFlight >
   const wc = wSrc?.playbackRate.curve ?? [];
   check('engine: the cannonball whistle rides a Doppler playbackRate curve (approach > 1.1, recede < 0.9)',
     wc.length > 8 && wc[0] > 1.1 && wc[wc.length - 1] < 0.9, `rate ${wc[0]?.toFixed(3)} -> ${wc[wc.length - 1]?.toFixed(3)}`);
+}
+
+// ── 5. Beds by physics + ship handling foley (b2.4e; audio-06, vm:audio:3) ─────
+{
+  const D = await import('../src/client/audio/AudioDirector.ts');
+  const { hullCreakStrain } = await import('../src/client/audio/SoundEngine.ts');
+  // True wind 0.9 strength (6.3 m/s) blowing toward +z (direction 0).
+  const ship8Up = D.apparentWind(0, 0.9, 0, -8);            // beating straight into it at 8 m/s
+  const runAtWind = D.apparentWind(0, 0.9, 0, 0.9 * D.WIND_MS_PER_STRENGTH); // dead run at wind speed
+  const clearUnderway = D.windBedLevels({ apparentMs: D.apparentWind(0, 0.9, 8, 0).speed, storm01: 0, aboard: true });
+  check('wind: clear weather under way (8 m/s beam reach, storm 0) has wind > 0 (breeze layer and total)',
+    clearUnderway.breeze > 0.2 && clearUnderway.total > 0.2 && clearUnderway.gale === 0,
+    `apparent ${D.apparentWind(0, 0.9, 8, 0).speed.toFixed(2)} m/s, breeze ${clearUnderway.breeze.toFixed(3)}, total ${clearUnderway.total.toFixed(3)}`);
+  const beat = D.windBedLevels({ apparentMs: ship8Up.speed, storm01: 0, aboard: true });
+  const run = D.windBedLevels({ apparentMs: runAtWind.speed, storm01: 0, aboard: true });
+  check('wind: a downwind run at wind speed hears less than beating upwind (apparent, not true, wind)',
+    runAtWind.speed < 0.01 && run.total < beat.total * 0.2 && beat.total > 0.5,
+    `run ${runAtWind.speed.toFixed(3)} m/s total ${run.total.toFixed(3)} vs beat ${ship8Up.speed.toFixed(2)} m/s total ${beat.total.toFixed(3)}`);
+  const r7 = D.windBedLevels({ apparentMs: 7.9, storm01: 0, aboard: true });
+  const r12 = D.windBedLevels({ apparentMs: 12, storm01: 0, aboard: true });
+  const r16 = D.windBedLevels({ apparentMs: 16, storm01: 0, aboard: true });
+  const r12ashore = D.windBedLevels({ apparentMs: 12, storm01: 0, aboard: false });
+  check('wind: rigging whistle 0 below 8 m/s apparent, rises above it with pitch, silent ashore; gale follows the storm',
+    r7.rigging === 0 && r12.rigging > 0 && r16.rigging > r12.rigging && r16.riggingHz > r12.riggingHz && r12ashore.rigging === 0
+      && D.windBedLevels({ apparentMs: 3, storm01: 0.8, aboard: false }).gale >= 0.8,
+    `rigging 7.9=${r7.rigging} 12=${r12.rigging.toFixed(3)}@${r12.riggingHz}Hz 16=${r16.rigging.toFixed(3)}@${r16.riggingHz}Hz`);
+  check('creak: 0 off-ship even under full heel and load; load raises it aboard',
+    hullCreakStrain({ aboard: false, nearHullM: 300, heel01: 1, rough01: 1, load01: 1 }) === 0
+      && hullCreakStrain({ aboard: false, heel01: 1, rough01: 1, load01: 1 }) === 0
+      && hullCreakStrain({ aboard: true, heel01: 0.2, rough01: 0.1, load01: 0.8 }) > hullCreakStrain({ aboard: true, heel01: 0.2, rough01: 0.1, load01: 0 })
+      && D.creakLoad01({ heel01: 0, apparentMs: 14, sailHeight: 1 }) > D.creakLoad01({ heel01: 0, apparentMs: 14, sailHeight: 0.2 }),
+    `aboard load 0.8 ${hullCreakStrain({ aboard: true, heel01: 0.2, rough01: 0.1, load01: 0.8 }).toFixed(3)} vs 0 ${hullCreakStrain({ aboard: true, heel01: 0.2, rough01: 0.1, load01: 0 }).toFixed(3)}`);
+  const seas = [0, 0.25, 0.5, 0.75, 1].map((sea) => D.oceanLayers({ sea01: sea, night01: 0, swimming: false, underway01: 0 }));
+  check('ocean: three layers, swell and chop rise with sea state, calm sea has no chop but a lap',
+    seas.every((l, i) => i === 0 || (l.swell > seas[i - 1].swell && l.chop >= seas[i - 1].chop)) && seas[0].chop === 0 && seas[0].lap > 0.3 && seas[4].chop > 0.8,
+    seas.map((l) => `${l.swell.toFixed(2)}/${l.lap.toFixed(2)}/${l.chop.toFixed(2)}`).join(' '));
+  const surf = [0, 4, 20, 45, 89, 90, 400, Infinity].map(D.surfLevel);
+  check('surf: 1 on the beach, falling with shore distance, 0 past 90 m',
+    surf[0] === 1 && surf[1] === 1 && surf[2] < 1 && surf[3] < surf[2] && surf[4] < surf[3] && surf[4] > 0 && surf[5] === 0 && surf[6] === 0 && surf[7] === 0,
+    surf.map((v) => v.toFixed(3)).join(' '));
+  check('luff: flutter rate rises with apparent wind, bounded 2..11 Hz',
+    D.luffFlutterHz(2) < D.luffFlutterHz(8) && D.luffFlutterHz(8) < D.luffFlutterHz(16) && D.luffFlutterHz(0) >= 2 && D.luffFlutterHz(1e6) <= 11 && D.luffFlutterHz(NaN) >= 2,
+    `2 m/s ${D.luffFlutterHz(2).toFixed(2)} Hz, 16 m/s ${D.luffFlutterHz(16).toFixed(2)} Hz`);
+  const fd = new D.SailFillDetector();
+  fd.update(0.8, 0, false, 8);
+  const small = fd.update(0.85, 0, false, 8);
+  const big = fd.update(0.92, 0, false, 8);                 // cumulative 12% -> thump
+  const calm = new D.SailFillDetector(); calm.update(0.5, 0, false, 0); const noWind = calm.update(0.9, 0, false, 0);
+  const lf = new D.SailFillDetector(); lf.update(0.9, 0, true, 8); const refill = lf.update(0.9, 0, false, 8);
+  check('sail fill: a 5% trim step is silent, the step that reaches 10% thumps, no thump without wind, a luffing sail filling thumps',
+    small === 0 && big > 0 && noWind === 0 && refill > 0, `small ${small} big ${big.toFixed(3)} noWind ${noWind} refill ${refill.toFixed(3)}`);
+  const bs = new D.BowSlapDetector();
+  let slaps = 0;
+  for (let i = 0; i < 60 * 20; i++) if (bs.update(0.06 * Math.sin((i / 60) * 2 * Math.PI * 0.2), 1 / 60, 0.6) > 0) slaps += 1;
+  const flat = new D.BowSlapDetector();
+  let flatSlaps = 0;
+  for (let i = 0; i < 60 * 20; i++) if (flat.update(0.004 * Math.sin((i / 60) * 2 * Math.PI * 0.2), 1 / 60, 0) > 0) flatSlaps += 1;
+  check('bow slap: one slap per bow-dip peak on a 5 s pitch cycle (4 in 20 s), none on a flat sea',
+    slaps === 4 && flatSlaps === 0, `pitching ${slaps}, flat ${flatSlaps}`);
+
+  // Director on a fake sink: foley lands at its station.
+  const calls = [];
+  const sink = new Proxy({}, { get: (_t, name) => (...args) => calls.push({ name, args }) });
+  const dir = new D.AudioDirector(sink);
+  const ship = { id: 's1', type: 'sloop', position: { x: 100, y: 0, z: 50 }, rotation: 0, velocity: { x: 0, y: 0, z: 8 },
+    angularVelocity: 0, sailHeight: 0.8, sailAngle: 0, anchored: false, anchorRaiseProgress: 0, cannonCooldowns: [2, 0], roll: 0.1, pitch: 0, luffing: false };
+  const frame = (over = {}) => ({ dt: 1 / 60, time: 10, listener: { x: 100, y: 2, z: 50 }, nightFactor: 0, storminess: 0, rain01: 0, swimming: false,
+    shoreDistM: Infinity, storm: null, aboardShip: ship, crewShip: ship, ships: [ship], atHelm: false, helmIntent: 0, ...over });
+  dir.update(frame());
+  const amb = calls.find((c) => c.name === 'setAmbience')?.args[0];
+  const sail = calls.find((c) => c.name === 'setSailingState')?.args[0];
+  check('director: drives setAmbience with apparent-wind beds (clear weather under way -> breeze > 0) and setSailingState with load + luff rate',
+    !!amb?.beds && amb.beds.wind.breeze > 0 && amb.storminess === 0 && sail?.aboard === true && sail.load01 > 0 && sail.luffHz >= 2,
+    `apparent ${dir.last.apparentMs.toFixed(2)} m/s breeze ${amb?.beds?.wind.breeze?.toFixed(3)}`);
+  calls.length = 0;
+  ship.anchored = true; ship.cannonCooldowns = [0, 0];
+  dir.update(frame());
+  const L = (await import('../src/shared/constants/index.ts')).SHIP_STATS.sloop.length;
+  const anchor = calls.find((c) => c.name === 'playAnchorChange');
+  const load = calls.find((c) => c.name === 'playCannonLoad');
+  check('director: anchor run-out at the bow station (+0.42 L), cannon load/ram at the gun that just came ready, both positioned',
+    anchor?.args[0] === true && Math.abs(anchor.args[1].z - (50 + L * 0.42)) < 1e-6 && Math.abs(anchor.args[1].x - 100) < 1e-6 && anchor.args[2] > 0
+      && !!load && Number.isFinite(load.args[0]?.x) && calls.filter((c) => c.name === 'playCannonLoad').length === 1,
+    `anchor ${JSON.stringify(anchor?.args[1])}, load ${JSON.stringify(load?.args[0])}`);
+
+  // Engine on the fake graph.
+  const engine = new SoundEngine();
+  engine.unlock();
+  engine.setAmbience({ nightFactor: 0, storminess: 0, nearShore01: 0, rain01: 0, beds: amb.beds });
+  const windGain = engine.windLevel?.() ?? 0;
+  check('engine: clear-weather beds from the director make the wind voice audible (old code stopped it at storm 0)',
+    windGain > 0, `wind level ${windGain}`);
+  engine.setListenerPose({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: -1 }); // no pose = no panner (by design)
+  const before = created.length;
+  engine.playAnchorChange(true, { x: 0, y: 0, z: -30 }, 30);
+  const pan = created.slice(before).find((n) => n.kind === 'Panner');
+  check('engine: station foley is positioned (anchor at z=-30 gets a world panner there)', !!pan && pan.positionZ.value === -30);
 }
 
 let failed = 0;

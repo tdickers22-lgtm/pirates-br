@@ -10,6 +10,7 @@ import {
   makeWorldPanner, panningModelFor, rearShade, type SpatialCategory,
 } from './Spatial.js';
 import { CANNON_MUZZLE_SPEED } from '../../shared/ballistics.js';
+import { oceanLayers, windBedLevels, type AmbienceBeds, type WindBedLevels } from './AudioDirector.js';
 import {
   FloodAudio, type FloodAudioFrame, type FloodAudioHost, type FloodLoopHandle, type FloodLoopKind, type FloodOneShotKind,
   type FloodVec,
@@ -423,10 +424,12 @@ export function scheduleCaveDrips(
  *  Aboard: 0.14 idle + heel + roughness. Beside a hull (swimming, on a dock) it fades linearly
  *  to 0 at 15 m. Pure so test-audio-manifest can grade it without an AudioContext. */
 export const HULL_CREAK_RANGE_M = 15;
-export function hullCreakStrain(s: { aboard: boolean; nearHullM?: number; heel01: number; rough01: number }): number {
+export function hullCreakStrain(s: { aboard: boolean; nearHullM?: number; heel01: number; rough01: number; load01?: number }): number {
   const heel = finiteClamp(s.heel01, 0, 1, 0);
   const rough = finiteClamp(s.rough01, 0, 1, 0);
-  const base = Math.min(1, 0.14 + heel * 0.6 + rough * 0.34);
+  // b2.4e: the frame's load (heel + wind pressure on the set canvas, AudioDirector.creakLoad01).
+  const load = finiteClamp(s.load01 ?? 0, 0, 1, 0);
+  const base = Math.min(1, 0.14 + heel * 0.6 + rough * 0.34 + load * 0.3);
   if (s.aboard) return base;
   const d = s.nearHullM;
   if (d === undefined || !Number.isFinite(d) || d >= HULL_CREAK_RANGE_M) return 0;
@@ -491,6 +494,9 @@ export class SoundEngine {
   private canvasFlap: LoopVoice | null = null;
   // World ambience beds (driven by setAmbience)
   private breaker: LoopVoice | null = null;
+  /** b2.4e physics-driven bed layers (breeze, rigging, swell, chop, surf); one writer: setAmbience. */
+  private layers = new Map<string, { source: AudioBufferSourceNode; gain: GainNode; filter: BiquadFilterNode; sampled: boolean; silentSince: number; triedAt: number }>();
+  private windTotal = 0;
   private rainPatter: LoopVoice | null = null;
   private rainBody: LoopVoice | null = null;
   private submergedBed: LoopVoice | null = null;
@@ -1546,47 +1552,97 @@ export class SoundEngine {
     }
   }
 
-  playAnchorChange(dropped: boolean): void {
+  // ── Ship handling foley (b2.4e, vm:audio:3): every station voice is positioned (AudioDirector
+  // passes the station's world point: anchor/capstan at the bow, wheel at the helm, sail rope at
+  // the sail station, load/ram at the gun). No pos = centred on the listener, as before.
+  playAnchorChange(dropped: boolean, pos?: SoundPos, distance = 0): void {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
+    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.22, 'foley');
     const clankCount = dropped ? 5 : 3;
-    this.playTone(now, dropped ? 92 : 128, dropped ? 48 : 86, dropped ? 0.42 : 0.28, 0.26, 'triangle', 0.006);
-    this.playNoise(now, dropped ? 0.44 : 0.28, 260, 0.82, dropped ? 0.34 : 0.22, 'lowpass');
+    this.playTone(now, dropped ? 92 : 128, dropped ? 48 : 86, dropped ? 0.42 : 0.28, 0.26 * g, 'triangle', 0.006, dest);
+    this.playNoise(now, dropped ? 0.44 : 0.28, 260, 0.82, (dropped ? 0.34 : 0.22) * g, 'lowpass', dest);
     // Irregular clank spacing — a metronomic chain reads as a machine, not iron links.
     let at = now;
     for (let i = 0; i < clankCount; i++) {
-      this.playNoise(at, 0.055, 2800 + i * 180, 1.6, dropped ? 0.14 : 0.1, 'bandpass');
-      this.metalClang(at + 0.004, 2400 + Math.random() * 1000, dropped ? 0.34 : 0.26, undefined, 0.22);
+      this.playNoise(at, 0.055, 2800 + i * 180, 1.6, (dropped ? 0.14 : 0.1) * g, 'bandpass', dest);
+      this.metalClang(at + 0.004, 2400 + Math.random() * 1000, (dropped ? 0.34 : 0.26) * g, dest, 0.22);
       at += (dropped ? 0.04 : 0.06) + Math.random() * 0.05;
     }
-    // Rope running out through the hawse, then the anchor takes the water.
-    this.playNoiseCurve(now + 0.1, 0.5, [[0, 1100], [0.5, 520]], 0.6, 0.1, 'bandpass', 0.02);
-    if (dropped) this.playSplash(0.9, 6);
+    // Chain running out through the hawse (or hauled in), then the anchor takes the water.
+    this.playNoiseCurve(now + 0.1, 0.5, [[0, 1100], [0.5, 520]], 0.6, 0.1 * g, 'bandpass', 0.02, dest);
+    if (dropped) this.playSplash(0.9, Math.max(6, distance), pos);
   }
 
-  playAnchorMovement(amount = 1): void {
+  playAnchorMovement(amount = 1, pos?: SoundPos, distance = 0): void {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
-    const volume = THREE.MathUtils.clamp(amount, 0.25, 1.25);
-    // Capstan pawl, chain scrape, and a low wooden groan while the anchor is being raised.
-    this.playTone(now, 160, 96, 0.12, 0.09 * volume, 'triangle', 0.004);
-    this.playNoise(now, 0.16, 340, 1.2, 0.11 * volume, 'bandpass');
-    this.playNoise(now + 0.012, 0.08, 1900, 1.55, 0.09 * volume, 'bandpass');
-    this.metalClang(now + 0.026, 2200, 0.4 * volume, undefined, 0.2);
+    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.18, 'foley');
+    const volume = THREE.MathUtils.clamp(amount, 0.25, 1.25) * g;
+    // Capstan pawl ratchet, chain scrape, and a low wooden groan while the anchor is raised.
+    this.playTone(now, 160, 96, 0.12, 0.09 * volume, 'triangle', 0.004, dest);
+    this.playNoise(now, 0.16, 340, 1.2, 0.11 * volume, 'bandpass', dest);
+    this.playNoise(now + 0.012, 0.08, 1900, 1.55, 0.09 * volume, 'bandpass', dest);
+    this.metalClang(now + 0.026, 2200, 0.4 * volume, dest, 0.2);
   }
 
-  playHelmTurn(amount = 1): void {
+  playHelmTurn(amount = 1, pos?: SoundPos, distance = 0): void {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
-    const volume = THREE.MathUtils.clamp(amount, 0.25, 1.2);
+    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.18, 'foley');
+    const volume = THREE.MathUtils.clamp(amount, 0.25, 1.2) * g;
     // Old wooden wheel: axle creak plus rope/rudder strain.
-    this.playNoise(now, 0.16, 520, 1.05, 0.11 * volume, 'bandpass');
-    this.playTone(now, 260, 170, 0.18, 0.075 * volume, 'sawtooth', 0.025);
-    this.playTone(now + 0.035, 94, 72, 0.2, 0.045 * volume, 'triangle', 0.02);
+    this.playNoise(now, 0.16, 520, 1.05, 0.11 * volume, 'bandpass', dest);
+    this.playTone(now, 260, 170, 0.18, 0.075 * volume, 'sawtooth', 0.025, dest);
+    this.playTone(now + 0.035, 94, 72, 0.2, 0.045 * volume, 'triangle', 0.02, dest);
     // Spoke ticks — more of them the harder you spin the wheel.
     const ticks = 2 + Math.round(volume * 3);
     for (let i = 0; i < ticks; i++) {
-      this.playNoise(now + 0.02 + i * (0.045 + Math.random() * 0.02), 0.015, 2200, 3, 0.04 * volume, 'bandpass');
+      this.playNoise(now + 0.02 + i * (0.045 + Math.random() * 0.02), 0.015, 2200, 3, 0.04 * volume, 'bandpass', dest);
+    }
+  }
+
+  /** Canvas taking the wind (b2.4e): the fill thump when a trim change lands or a luffing sail
+   *  fills. The recorded cloth snap (pitched down) over a low boom of the yard taking load. */
+  playSailFill(amount = 1, pos?: SoundPos, distance = 0): void {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const v = THREE.MathUtils.clamp(amount, 0.2, 1.2);
+    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.2, 'foley');
+    const sampled = this.playSample('foley.cloth', { pos, volume: 0.6 * v, rate: 0.62, category: 'foley', priority: VOICE_PRIORITY.ambient });
+    if (!sampled) {
+      this.playNoiseCurve(now, 0.2, [[0, 380], [0.2, 900]], 0.8, 0.14 * v * g, 'bandpass', 0.01, dest);
+      this.playNoise(now + 0.02, 0.1, 2400, 0.9, 0.05 * v * g, 'bandpass', dest);
+    }
+    this.playTone(now + 0.01, 96, 58, 0.26, 0.12 * v * g, 'sine', 0.012, dest);
+    this.playNoise(now, 0.18, 300, 0.6, 0.1 * v * g, 'lowpass', dest);
+  }
+
+  /** Bow slap at a pitch peak (b2.4e): the flare slamming into the next crest, at the stem. */
+  playBowSlap(amount = 1, pos?: SoundPos, distance = 0): void {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const v = THREE.MathUtils.clamp(amount, 0.2, 1.25);
+    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.24, 'splash');
+    // The hull's own thud, then the water.
+    this.playTone(now, 72, 44, 0.24, 0.16 * v * g, 'sine', 0.004, dest);
+    if (this.playSample('splash.small', { pos, volume: 0.5 * v, rate: 0.78, category: 'splash', priority: VOICE_PRIORITY.ambient })) return;
+    this.playNoise(now, 0.36, 320, 0.5, 0.18 * v * g, 'lowpass', dest);
+    this.playNoise(now + 0.03, 0.22, 1300, 0.7, 0.11 * v * g, 'bandpass', dest);
+    this.playNoise(now + 0.08, 0.3, 4600, 1, 0.06 * v * g, 'highpass', dest);
+  }
+
+  /** Cannon load + ram (b2.4e): the ball clinks into the bore, the rammer seats it twice. */
+  playCannonLoad(pos?: SoundPos, distance = 0): void {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.2, 'foley');
+    if (!this.playSample('metal.hit', { pos, volume: 0.32, rate: 1.35, category: 'foley', priority: VOICE_PRIORITY.ambient })) {
+      this.metalClang(now, 1700, 0.18 * g, dest, 0.3);
+    }
+    for (const [dt, vol] of [[0.34, 1], [0.62, 0.8]] as const) {
+      this.playTone(now + dt, 150, 92, 0.12, 0.13 * vol * g, 'triangle', 0.003, dest);
+      this.playNoise(now + dt, 0.1, 420, 0.8, 0.12 * vol * g, 'lowpass', dest);
     }
   }
 
@@ -1623,17 +1679,18 @@ export class SoundEngine {
     }
   }
 
-  playSailTrim(amount = 1): void {
+  playSailTrim(amount = 1, pos?: SoundPos, distance = 0): void {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
-    const volume = THREE.MathUtils.clamp(amount, 0.35, 1.25);
-    this.playNoise(now, 0.18, 760, 0.8, 0.16 * volume, 'bandpass');
-    this.playNoise(now + 0.025, 0.12, 2100, 1.1, 0.13 * volume, 'bandpass');
+    const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.18, 'foley');
+    const volume = THREE.MathUtils.clamp(amount, 0.35, 1.25) * g;
+    this.playNoise(now, 0.18, 760, 0.8, 0.16 * volume, 'bandpass', dest);
+    this.playNoise(now + 0.025, 0.12, 2100, 1.1, 0.13 * volume, 'bandpass', dest);
     // Rope squealing through the block.
-    this.playNoiseCurve(now + 0.015, 0.09, [[0, 700], [0.09, 900]], 9, 0.05 * volume, 'bandpass', 0.005);
-    // Canvas taking the wind.
-    this.playNoise(now + 0.06, 0.12, 500, 0.6, 0.1 * volume, 'lowpass');
-    this.playTone(now + 0.1, 180, 130, 0.22, 0.06 * volume, 'triangle', 0.03);
+    this.playNoiseCurve(now + 0.015, 0.09, [[0, 700], [0.09, 900]], 9, 0.05 * volume, 'bandpass', 0.005, dest);
+    // Canvas shifting on the yard.
+    this.playNoise(now + 0.06, 0.12, 500, 0.6, 0.1 * volume, 'lowpass', dest);
+    this.playTone(now + 0.1, 180, 130, 0.22, 0.06 * volume, 'triangle', 0.03, dest);
   }
 
   // ── Footsteps ────────────────────────────────────────────────────
@@ -1815,6 +1872,96 @@ export class SoundEngine {
     if (this.playSample('ui.hover', { bus: 'ui', volume: 0.35 })) return;
     const now = this.ctx.currentTime;
     this.playTone(now, 1400, 1600, 0.04, 0.06, 'sine', 0, this.busUi ?? undefined, 0);
+  }
+
+  /** Combined wind bed level last written by setAmbience (breeze + rigging + gale), for gates/probes. */
+  windLevel(): number { return this.windTotal; }
+
+  /**
+   * One looped bed layer (b2.4e). With `key` it plays the CC0 recording once decoded (loop points
+   * from the manifest, always set: Safari may ignore the LAME gapless header) and swaps out the
+   * filtered-noise stand-in; without it, or before the decode, it is filtered noise. Returns true
+   * while the layer is the recording. `sampleOnly` builds nothing until the recording exists (the
+   * caller keeps its own procedural voice). A layer silent for 3 s is stopped and freed.
+   */
+  private setLayer(
+    name: string, key: string | null, level: number,
+    shape: { type: BiquadFilterType; freq: number; q: number; procGain: number; sampleGain?: number; rate?: number; sampleOnly?: boolean },
+    glide = 0.5,
+  ): boolean {
+    const ctx = this.ctx;
+    const bed = this.busBed;
+    const noise = this.noise;
+    if (!ctx || !bed || !noise) return false;
+    const lv = finiteClamp(level, 0, 1.5, 0);
+    const now = ctx.currentTime;
+    let layer = this.layers.get(name);
+    if (!layer && lv <= 0.001) return false;
+    let pick: ReturnType<SampleBank['pick']> | null = null;
+    if (key && this.bank && (!layer || !layer.sampled)) {
+      const last = layer?.triedAt ?? this.layerTriedAt.get(name) ?? -99;
+      if (now - last >= 1) {
+        this.layerTriedAt.set(name, now);
+        if (layer) layer.triedAt = now;
+        pick = this.bank.pick(key);
+      }
+    }
+    if (layer && pick) {
+      const old = layer;
+      safeSet(old.gain.gain, 'linear', 0, now + 0.8);
+      try { old.source.stop(now + 0.9); } catch { /* ignore */ }
+      this.layers.delete(name);
+      layer = undefined;
+    }
+    if (!layer) {
+      if (shape.sampleOnly && !pick) return false;
+      const source = ctx.createBufferSource();
+      source.buffer = (pick ? pick.buffer : noise) as AudioBuffer;
+      source.loop = true;
+      if (pick) {
+        const f = pick.file as { loopStart?: number; loopEnd?: number };
+        if (Number.isFinite(f.loopStart)) source.loopStart = f.loopStart as number;
+        if (Number.isFinite(f.loopEnd) && (f.loopEnd as number) > (f.loopStart ?? 0)) source.loopEnd = f.loopEnd as number;
+      }
+      const filter = ctx.createBiquadFilter();
+      filter.type = shape.type;
+      safeSet(filter.frequency, 'value', shape.freq);
+      safeSet(filter.Q, 'value', shape.q);
+      const gain = ctx.createGain();
+      safeSet(gain.gain, 'value', 0);
+      source.connect(filter);
+      filter.connect(gain);
+      gain.connect(bed);
+      const dur = (source.buffer as AudioBuffer | null)?.duration ?? 1;
+      source.start(0, Math.random() * Math.max(0.05, dur - 0.2));
+      layer = { source, gain, filter, sampled: !!pick, silentSince: -1, triedAt: now };
+      this.layers.set(name, layer);
+    }
+    const g = lv * (layer.sampled ? (shape.sampleGain ?? shape.procGain) : shape.procGain);
+    this.ramp(layer.gain.gain, g, glide);
+    this.ramp(layer.filter.frequency, finiteClamp(shape.freq, 40, 16000, 800), glide);
+    if (layer.sampled && shape.rate !== undefined) this.ramp(layer.source.playbackRate, finiteClamp(shape.rate, 0.25, 2, 1), glide);
+    if (lv <= 0.001) {
+      if (layer.silentSince < 0) layer.silentSince = now;
+      else if (now - layer.silentSince > 3) {
+        try { layer.source.stop(); } catch { /* ignore */ }
+        this.layers.delete(name);
+        return false;
+      }
+    } else layer.silentSince = -1;
+    return layer.sampled;
+  }
+  private layerTriedAt = new Map<string, number>();
+
+  /** Wind by APPARENT wind (b2.4e, audio-06): breeze (clear weather too), the rigging singing
+   *  above 8 m/s with pitch rising, and the gale voice (the storm, or a blow past 16 m/s). */
+  private setWindBeds(w: WindBedLevels): void {
+    this.setLayer('breeze', 'bed.wind', w.breeze, {
+      type: 'bandpass', freq: 280 + w.breeze * 520, q: 0.7, procGain: 0.1, sampleGain: 0.32, rate: 0.85 + w.breeze * 0.3,
+    }, 0.8);
+    this.setLayer('rigging', null, w.rigging, { type: 'bandpass', freq: w.riggingHz, q: 16, procGain: 0.06 }, 0.6);
+    this.setWindIntensity(w.gale);
+    this.windTotal = Math.hypot(w.breeze, w.rigging, w.gale);
   }
 
   // ── Storm wind (ambient, looped) ─────────────────────────────────
@@ -2627,7 +2774,7 @@ export class SoundEngine {
    * @param state.aboard set true while the listener is standing on the ship (drives
    *   rain-on-deck droplets); optional so existing callers keep working.
    */
-  setSailingState(state: { speed01: number; roughness01: number; heel01: number; luffing: boolean; aboard?: boolean; nearHullM?: number }): void {
+  setSailingState(state: { speed01: number; roughness01: number; heel01: number; luffing: boolean; aboard?: boolean; nearHullM?: number; load01?: number; luffHz?: number }): void {
     const ctx = this.ctx;
     const bed = this.busBed;
     if (!ctx || !bed || !this.noise) return;
@@ -2641,7 +2788,7 @@ export class SoundEngine {
     // Hull creak bed follows heel + roughness + speed, and is SILENT unless the listener is
     // aboard or within 15 m of a hull (audio-03). This is the bed's only writer.
     const aboard = state.aboard ?? (speed > 0.02 || heel > 0.02);
-    const strain = hullCreakStrain({ aboard, nearHullM: state.nearHullM, heel01: heel, rough01: rough });
+    const strain = hullCreakStrain({ aboard, nearHullM: state.nearHullM, heel01: heel, rough01: rough, load01: state.load01 });
     this.setHullCreakIntensity(
       strain,
       THREE.MathUtils.clamp(heel * 0.6 + speed * 0.4 + rough * 0.5, 0, 1),
@@ -2668,13 +2815,13 @@ export class SoundEngine {
       this.nextCreakAt = 0;
     }
     // Luffing adds irregular canvas flap.
-    this.setCanvasFlap(state.luffing ? THREE.MathUtils.clamp(0.4 + speed * 0.5, 0, 1) : 0);
+    this.setCanvasFlap(state.luffing ? THREE.MathUtils.clamp(0.4 + speed * 0.5, 0, 1) : 0, state.luffHz);
     this.aboardShip = aboard;
     // "Under way" for the idle whistle: aboard AND actually making way.
     this.underway01 = this.aboardShip ? speed : 0;
   }
 
-  private setCanvasFlap(amount: number): void {
+  private setCanvasFlap(amount: number, flutterHz?: number): void {
     const ctx = this.ctx;
     const bed = this.busBed;
     if (!ctx || !bed || !this.noise) return;
@@ -2688,6 +2835,8 @@ export class SoundEngine {
       this.canvasFlap = { ...v, lfo: trem.lfo, lfoGain: trem.lfoGain };
     }
     this.ramp(this.canvasFlap.gain.gain, THREE.MathUtils.clamp(amount, 0, 1) * 0.08, 0.25);
+    // Flutter rate from apparent wind (b2.4e): a slow slat in a zephyr, a rattle in a blow.
+    if (this.canvasFlap.lfo && flutterHz !== undefined) this.ramp(this.canvasFlap.lfo.frequency, finiteClamp(flutterHz, 1, 14, 4.5), 0.4);
   }
 
   // ── World / night ambience ───────────────────────────────────────
@@ -2697,7 +2846,7 @@ export class SoundEngine {
    * @param a.rain01 rain intensity; defaults to a storminess proxy so rain is
    *   audible even before the call site forwards the real value.
    */
-  setAmbience(a: { nightFactor: number; storminess: number; nearShore01: number; rain01?: number; swimming?: boolean }): void {
+  setAmbience(a: { nightFactor: number; storminess: number; nearShore01: number; rain01?: number; swimming?: boolean; beds?: AmbienceBeds }): void {
     const ctx = this.ctx;
     const bed = this.busBed;
     if (!ctx || !bed || !this.noise) return;
@@ -2709,17 +2858,36 @@ export class SoundEngine {
     // whistle only surfaces out in open water, not in the surf line.
     this.stormLevel = storm;
     this.nearShore01 = shore;
-    // Bed 1: storm wind.
-    this.setWindIntensity(storm);
-    // Bed 2: ocean wave bed — gentler "lap" at night, swells in a storm, closer in the water
-    // and louder under way (underway01 from setSailingState). The ONLY writer of this bed
-    // (audio-03: Game.ts used to write a second target every frame and the level zig-zagged).
-    const swim = a.swimming ? 0.26 : 0;
-    this.setWaveBed(THREE.MathUtils.clamp(THREE.MathUtils.lerp(0.6, 0.32, night) + storm * 0.4 + swim + this.underway01 * 0.32, 0, 1));
+    // b2.4e: the beds come from AudioDirector's physics (apparent wind, sea state, shore
+    // distance). Without it (old callers, tests) the same laws run on what this call knows:
+    // true wind unknown, so only the storm's gale; sea state = storm; surf = nearShore01.
+    // Every field is re-clamped: a malformed beds object falls back per layer, never throws.
+    const src = (a.beds && typeof a.beds === 'object' ? a.beds : {}) as Partial<AmbienceBeds>;
+    const w = src.wind && typeof src.wind === 'object' ? src.wind : windBedLevels({ apparentMs: 0, storm01: storm, aboard: false });
+    const oc = src.ocean && typeof src.ocean === 'object'
+      ? src.ocean : oceanLayers({ sea01: storm, night01: night, swimming: !!a.swimming, underway01: this.underway01 });
+    const beds: AmbienceBeds = {
+      wind: {
+        breeze: finiteClamp(w.breeze, 0, 1.5, 0), rigging: finiteClamp(w.rigging, 0, 1.5, 0),
+        riggingHz: finiteClamp(w.riggingHz, 200, 4000, 620), gale: finiteClamp(w.gale, 0, 1, 0), total: 0,
+      },
+      ocean: { swell: finiteClamp(oc.swell, 0, 1, 0), lap: finiteClamp(oc.lap, 0, 1, 0), chop: finiteClamp(oc.chop, 0, 1, 0) },
+      surf01: finiteClamp(src.surf01 ?? shore, 0, 1, shore),
+    };
+    // Bed 1: wind (breeze, rigging whistle, gale).
+    this.setWindBeds(beds.wind);
+    // Bed 2: the sea in three layers. Swell (the recording, pitched down and low-passed), the
+    // procedural lap (the ONLY writer of waveBed, audio-03) and whitecap chop by sea state.
+    const o = beds.ocean;
+    this.setLayer('swell', 'bed.ocean', o.swell, { type: 'lowpass', freq: 220 + o.swell * 420, q: 0.5, procGain: 0.06, sampleGain: 0.34, rate: 0.78 + o.swell * 0.12 }, 1);
+    this.setWaveBed(o.lap);
+    this.setLayer('chop', null, o.chop, { type: 'highpass', freq: 1700 + o.chop * 1500, q: 0.5, procGain: 0.032 }, 0.8);
     // Bed 3: night crickets (hushed in a storm) — scheduled chirps, not a hiss loop.
     this.setCrickets(night * (1 - storm * 0.7));
-    // Bed 4: near-shore breaker wash.
-    this.setBreaker(shore);
+    // Bed 4: surf by shore distance: the recording once decoded, else the procedural wash.
+    const surf = finiteClamp(beds.surf01, 0, 1, 0);
+    const surfSampled = this.setLayer('surf', 'bed.surf', surf, { type: 'lowpass', freq: 900 + surf * 3000, q: 0.5, procGain: 0.1, sampleGain: 0.42, sampleOnly: true }, 0.9);
+    this.setBreaker(surfSampled ? 0 : surf);
     // Bed 5: rain.
     this.setRain(rain);
     const now = ctx.currentTime;
