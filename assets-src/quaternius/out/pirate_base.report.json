@@ -22,7 +22,13 @@
     "cheekSamples": 40,
     "kit": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Female_Dark_BaseColor.png",
     "maskTexels": 24917,
-    "recoloured": "assets-src/quaternius/out/T_body_female_BaseColor.png"
+    "recoloured": "assets-src/quaternius/out/T_body_female_BaseColor.png",
+    "torsoLowPass": {
+     "keepDetail": 0.15,
+     "maskTexels": 305091,
+     "passes": 3,
+     "radiusPx": 36
+    }
    },
    "before": {
     "chin": 1.538089632987976,
@@ -142,7 +148,7 @@
    },
    "normal": {
     "kit": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Female_Normal.png",
-    "meanFlatten": 0.294,
+    "meanFlatten": 0.304,
     "softened": "assets-src/quaternius/out/T_body_female_Normal.png"
    },
    "repointed": [
@@ -174,7 +180,13 @@
     "cheekSamples": 24,
     "kit": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Male_Dark.png",
     "maskTexels": 23421,
-    "recoloured": "assets-src/quaternius/out/T_body_male_BaseColor.png"
+    "recoloured": "assets-src/quaternius/out/T_body_male_BaseColor.png",
+    "torsoLowPass": {
+     "keepDetail": 0.15,
+     "maskTexels": 343878,
+     "passes": 3,
+     "radiusPx": 36
+    }
    },
    "before": {
     "chin": 1.5765712261199951,
@@ -296,7 +308,7 @@
    },
    "normal": {
     "kit": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Male_Normal.png",
-    "meanFlatten": 0.284,
+    "meanFlatten": 0.295,
     "softened": "assets-src/quaternius/out/T_body_male_Normal.png"
    },
    "repointed": [
@@ -332,7 +344,13 @@
     "cheekSamples": 32,
     "kit": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Male_Dark.png",
     "maskTexels": 25156,
-    "recoloured": "assets-src/quaternius/out/T_body_stout_BaseColor.png"
+    "recoloured": "assets-src/quaternius/out/T_body_stout_BaseColor.png",
+    "torsoLowPass": {
+     "keepDetail": 0.15,
+     "maskTexels": 164012,
+     "passes": 3,
+     "radiusPx": 36
+    }
    },
    "before": {
     "chin": 1.5614628791809082,

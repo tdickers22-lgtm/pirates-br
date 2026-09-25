@@ -479,6 +479,54 @@ if (argv.includes('--glb')) {
     const lmx = lap(Lm);
     // red (64788b33): 4.29 mm, still a readable 8-pack at 4 m (tt-noon-front.png). Ceiling 3.2 mm (-25%).
     expect(`male abdomen sculpt relief ${(lmx * 1000).toFixed(2)} mm <= 3.20: no geometric 8-pack at 4 m`, lmx > 0 && lmx <= 0.0032);
+    // R1 re-review F2, second pass (b3.2b): the Laplacian went green (2.55 mm) and the 8-pack still read, because the
+    // kit 'Dark' albedo PAINTS the ab/pec shading and the 0.37x normal still carries the grooves. Three measures the
+    // vertex metric cannot see: albedo luminance CV over the abdomen vs the kit albedo, abdomen normal relief vs the
+    // kit map, and the rendered high-pass contrast inside the abdomen box of the fixed-camera torso shot.
+    const abd = (v) => TRUNK.has(v.j) && v.p[1] > Lm.joint('pelvis')[1] + 0.05 && v.p[1] < Lm.joint('spine_03')[1] + 0.06 && v.p[2] > Lm.joint('spine_01')[2] + 0.03;
+    const mat = Lm.g.gltf.materials?.[Lm.body.find((v) => v.uv)?.mat]?.name;
+    const shippedA = rep0?.materials?.[mat]?.a; const kitA = rep0?.bodies?.male?.baseColor?.kit;
+    const A = shippedA && await img(shippedA); const K = kitA && await img(kitA);
+    // local contrast: each abdomen vertex's 5x5 luminance over the skin-only mean of a 49 px window around it
+    // (shorts and padding excluded: the waistband sits inside the band and is not a painted ab), std across vertices
+    const cv = (I) => {
+      const at = (x, y) => { const o = (Math.min(I.h - 1, Math.max(0, y)) * I.w + Math.min(I.w - 1, Math.max(0, x))) * I.ch; return [I.data[o], I.data[o + 1], I.data[o + 2]]; };
+      const lum = (c) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; const isSkin = (c) => c[0] - c[2] > 15;
+      const rs = [];
+      for (const v of Lm.body.filter((q) => q.uv && abd(q))) {
+        const cx = Math.floor((v.uv[0] - Math.floor(v.uv[0])) * I.w); const cy = Math.floor((v.uv[1] - Math.floor(v.uv[1])) * I.h);
+        if (!isSkin(at(cx, cy))) continue;
+        let s = 0; let n = 0; let b = 0; let m = 0;
+        for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) { const c = at(cx + dx, cy + dy); if (isSkin(c)) { s += lum(c); n++; } }
+        for (let dy = -24; dy <= 24; dy += 3) for (let dx = -24; dx <= 24; dx += 3) { const c = at(cx + dx, cy + dy); if (isSkin(c)) { b += lum(c); m++; } }
+        if (n && m) rs.push((s / n) / (b / m));
+      }
+      const mu = rs.reduce((a, x) => a + x, 0) / rs.length;
+      return Math.sqrt(rs.reduce((a, x) => a + (x - mu) ** 2, 0) / rs.length);
+    };
+    if (A && K) {
+      const ca = cv(A); const ck = cv(K);
+      expect(`male abdomen albedo local contrast ${ca.toFixed(4)} <= 0.40x the kit's ${ck.toFixed(4)}: no 8-pack painted into the skin`, ca <= 0.4 * ck, `${shippedA} vs ${kitA}`);
+    } else expect('male shipped + kit albedo readable for the abdomen check', false, `${shippedA} / ${kitA}`);
+    const ar = await relief(Lm, rep0, 'male', abd);
+    expect(`male abdomen normal relief ${ar.ratio.toFixed(2)}x the kit map (<= 0.15, as the stout gut)`, ar.ratio <= 0.15, ar.why);
+    const shot = `${ROOT}docs/asset-sheets/characters/r1/torso-male-front-noon.png`;
+    if (existsSync(shot)) {
+      const { data, info } = await sharp(shot).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+      const W0 = info.width; const H0 = info.height; const L0 = new Float64Array(W0 * H0);
+      for (let i = 0; i < W0 * H0; i++) L0[i] = 0.2126 * data[i * 3] + 0.7152 * data[i * 3 + 1] + 0.0722 * data[i * 3 + 2];
+      // abdomen box of the fixed build camera (0,-2.2,1.15)->(0,0,1.1), 50 mm, 960x540: sternum to navel, inside the flanks
+      const bx = [Math.round(W0 * 0.438), Math.round(W0 * 0.562)]; const by = [Math.round(H0 * 0.26), Math.round(H0 * 0.52)]; const R = 14;
+      let s2 = 0; let n = 0; let mean = 0;
+      for (let y = by[0]; y < by[1]; y++) for (let x = bx[0]; x < bx[1]; x++) {
+        let b = 0; let c = 0;
+        for (let dy = -R; dy <= R; dy += 2) for (let dx = -R; dx <= R; dx += 2) { b += L0[(y + dy) * W0 + x + dx]; c++; }
+        const d = L0[y * W0 + x] - b / c; s2 += d * d; mean += L0[y * W0 + x]; n++;
+      }
+      const hp = Math.sqrt(s2 / n) / (mean / n);
+      // red (e9b9b001 sheet, clear 8-pack): measured when this row landed, see b3.2.json
+      expect(`rendered torso-male-front-noon abdomen high-pass contrast ${hp.toFixed(4)} <= 0.022: the 8-pack does not read in the lit render`, hp <= 0.022, shot);
+    } else expect('torso-male-front-noon.png rendered (build_pirates.py -- --renders)', false);
   }
   for (const [b, L] of [['male', Lm], ['female', Lf], ['stout', Ls]]) {
     const pr = L && await periocular(L, rep0, b);

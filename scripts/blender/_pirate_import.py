@@ -705,6 +705,8 @@ def soften_normals(arm, body, body_id, out_dir, report):
             t = sum(g.weight for g in v.groups if gi.get(g.group) in trunk_b) / tot
             f = max(f, min(1.0, 0.92 * t + 0.08 * t * math.exp(-(((bw @ v.co).z - z_belly) / span) ** 2)))
         fv[v.index] = f
+    # R1 re-review F2 (b3.2b): the abdomen and shoulder caps kept 0.36x of the kit grooves; flatten them to ~0.1x
+    fv = np.maximum(fv, 0.9 * _torso_field(arm, body, deltoid=0.85 if body_id == "male" else 0.5))
     big = _uv_field(body, fv, W, H)
     px = np.empty(W * H * 4, np.float32)
     src.pixels.foreach_get(px)
@@ -800,6 +802,68 @@ def recolor_periocular(arm, body, eyes, body_id, out_dir, report):
                            "maskTexels": int((m[..., 0] > 0.5).sum())}
 
 
+def _torso_field(arm, body, deltoid=0.0):
+    """R1 re-review F2 (b3.2b): per-vertex weight of the front trunk (pelvis to upper chest) and, with
+    ``deltoid``, the shoulder caps. Drives the albedo low-pass and the extra normal flatten: the kit paints and
+    maps the 8-pack, pec lines and deltoid cuts, so smoothing the geometry alone left them readable."""
+    import numpy as np
+    gi = {g.index: g.name for g in body.vertex_groups}
+    trunk = {"pelvis", "spine_01", "spine_02", "spine_03"}
+    shoulder = {"upperarm_l", "upperarm_r", "clavicle_l", "clavicle_r"}
+    y_spine = _jw(arm, "spine_02").y
+    z_lo, z_hi = _jw(arm, "pelvis").z, _jw(arm, "spine_03").z + 0.14
+    ua = {s: _jw(arm, f"upperarm_{s}") for s in "lr"}
+    bw = body.matrix_world
+    fv = np.zeros(len(body.data.vertices), np.float32)
+    for v in body.data.vertices:
+        tot = sum(g.weight for g in v.groups) or 1.0
+        t = sum(g.weight for g in v.groups if gi.get(g.group) in trunk) / tot
+        p = bw @ v.co
+        f = t * _smooth(-0.02, 0.04, y_spine - p.y) * _smooth(z_lo - 0.02, z_lo + 0.05, p.z) * (1 - _smooth(z_hi - 0.05, z_hi, p.z))
+        if deltoid > 0:
+            sh = sum(g.weight for g in v.groups if gi.get(g.group) in shoulder) / tot
+            near = 1 - _smooth(0.06, 0.13, min((p - ua[s]).length for s in "lr"))
+            f = max(f, deltoid * sh * near)
+        fv[v.index] = min(1.0, f)
+    return fv
+
+
+def flatten_torso_albedo(arm, body, body_id, report):
+    """R1 re-review F2 (b3.2b): the kit 'Dark' albedo PAINTS the ab, pec and deltoid shading (a luminance CV
+    of 0.29 over the abdomen). Inside the torso field replace the albedo by its skin-only low-pass (normalised
+    box blur, 3 passes of r 36 px at 2048, shorts and padding excluded so the waistband does not bleed in),
+    keeping 15% of the original detail. Rewrites the per-body T_body_<b>_BaseColor.png in place."""
+    import numpy as np
+    mat = body.data.materials[0]
+    tex = next(n for n in mat.node_tree.nodes if n.type == "TEX_IMAGE" and n.image
+               and n.image.name.startswith(f"T_body_{body_id}_BaseColor"))
+    img = tex.image
+    W, H = img.size
+    px = np.empty(W * H * 4, np.float32)
+    img.pixels.foreach_get(px)
+    px = px.reshape(H, W, 4)
+    rgb = px[..., :3]
+    skin = ((rgb[..., 0] - rgb[..., 2]) > 0.06).astype(np.float32)
+    def box(a, r):
+        cs = np.cumsum(np.cumsum(np.pad(a, ((r + 1, r), (r + 1, r)), mode="edge"), 0), 1)
+        k = 2 * r + 1
+        return (cs[k:, k:] - cs[:-k, k:] - cs[k:, :-k] + cs[:-k, :-k]) / (k * k)
+    r = max(4, int(36 * W / 2048))
+    num = [rgb[..., c] * skin for c in range(3)]
+    den = skin.copy()
+    for _ in range(3):
+        num = [box(a, r) for a in num]
+        den = box(den, r)
+    low = np.stack([a / np.maximum(den, 1e-4) for a in num], -1)
+    fv = _torso_field(arm, body, deltoid=1.0 if body_id == "male" else 0.6)
+    m = (_uv_field(body, fv, W, H) * skin)[..., None] * 0.85
+    px[..., :3] = rgb * (1 - m) + low * m
+    img.pixels.foreach_set(px.ravel())
+    img.save()
+    report["baseColor"]["torsoLowPass"] = {"radiusPx": r, "passes": 3, "keepDetail": 0.15,
+                                           "maskTexels": int((m[..., 0] > 0.4).sum())}
+
+
 def build_base(body_id, report, do_retarget=True, out_dir=None):
     """Returns (armature, [meshes]) for one body type, normalised; objects prefixed with the body id."""
     kit, hairs, stout = BODIES[body_id]
@@ -822,8 +886,9 @@ def build_base(body_id, report, do_retarget=True, out_dir=None):
         stoutify(arm, body)
     # R1 re-review F2: the male abdomen 0.5 x 6 left a geometric 8-pack at 4 m (4.29 mm sculpt relief)
     male = body_id == "male"
-    smooth_abs(arm, body, 1.0 if stout else (0.9 if male else 0.5), 18 if stout else (12 if male else 6),
-               shoulders=0.35 if male else 0.0)
+    # b3.2b: 0.9 x 12 still read at noon (2.55 mm); 1.0 x 28 plus a firmer shoulder cap pass
+    smooth_abs(arm, body, 1.0 if stout else (1.0 if male else 0.5), 18 if stout else (28 if male else 6),
+               shoulders=0.6 if male else 0.0)
     rep["before"] = measure(arm, body)
     rep["after"] = retarget(arm, body, meshes) if do_retarget else rep["before"]
     close_lids(arm, body, eyes, rep)
@@ -831,6 +896,7 @@ def build_base(body_id, report, do_retarget=True, out_dir=None):
     if out_dir:
         soften_normals(arm, body, body_id, out_dir, rep)
         recolor_periocular(arm, body, eyes, body_id, out_dir, rep)
+        flatten_torso_albedo(arm, body, body_id, rep)
     rep["bones"] = sorted(b.name for b in arm.data.bones)
     arm.name = f"{body_id}_rig"
     defaults = {h.lower() for h in DEFAULT_HAIR[body_id]}
