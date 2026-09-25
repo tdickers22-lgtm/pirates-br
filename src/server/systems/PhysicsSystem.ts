@@ -2196,8 +2196,15 @@ export class PhysicsSystem {
       player.nearShipId = null;
       const onIslandNow = player.onShipId === null
         && (this.findPlayerIsland(player, islands) !== null || this.findPlayerDock(player, islands) !== null);
-      for (const ship of ships) {
+      // performance-13: only a swimmer or a pirate ashore can be near a ladder,
+      // and a ladder lies within her length + beam of her centre (exact skip).
+      const ladderReach = player.state === 'swimming' || onIslandNow;
+      for (const ship of ladderReach ? ships : []) {
         if (!ship.alive) continue;
+        const reach = SHIP_STATS[ship.type].length + SHIP_STATS[ship.type].width + 4;
+        const ldx = player.position.x - ship.position.x;
+        const ldz = player.position.z - ship.position.z;
+        if (ldx * ldx + ldz * ldz > reach * reach) continue;
         const ladder = getNearestShipBoardingLadder(ship, player.position);
         if (!ladder) continue;
         if (player.state === 'swimming' && ladder.distance < 3.5) {
@@ -3865,6 +3872,14 @@ export class PhysicsSystem {
   }
 
   private pushShipOutOfSeaRock(ship: Ship, rock: SeaRock, t = 0) {
+    // performance-13: a hull-level broadphase before the per-sample chain is
+    // built. Every sample lies within half a length of her centre and is
+    // narrower than her beam, so length + beam + 4 m is a strict superset of
+    // the per-sample test below: exact, never a missed contact.
+    const reach = getSeaRockBoundsRadius(rock) + SHIP_STATS[ship.type].length + SHIP_STATS[ship.type].width + 4;
+    const rdx = ship.position.x - rock.position.x;
+    const rdz = ship.position.z - rock.position.z;
+    if (rdx * rdx + rdz * rdz > reach * reach) return;
     const samples = this.getShipHullContactSamples(ship);
     let deepest: {
       nx: number;
