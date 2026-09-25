@@ -17,6 +17,10 @@
 //   * every mesh primitive has UV0 (textures and the b3.2e atlas need it);
 //   * PROPORTIONS (D25, SoT family, not superhero): height / head height in [6.5, 7]; hand length
 //     (wrist joint to fingertip) 1.1-1.2x a realistic hand (0.108 x height);
+//   * BODY TYPES are real variety, not a rename: the stout's waist (between the pelvis joint and
+//     spine_02, trunk-weighted vertices only, so the T-posed arms never count) is 1.3-1.7x the male's
+//     width and >= 1.35x its depth, and <= 1.7x either (a sailor, not a balloon). R1 lineup, b3.2a2: the
+//     first 3 cm inflate measured 1.15 / 1.20 and read as the same man;
 //   * PROVENANCE (characters-10, D37): every third-party source the build reports has a row in
 //     public/assets/models/LICENSES.md and its kit licence text (CC0) is vendored next to it; every
 //     material has a normal map and none still points at the Godot export's missing *_png.png copies.
@@ -126,6 +130,21 @@ function skinned(g, W, nodeIdx) {
   return out;
 }
 
+const TRUNK = new Set(['pelvis', 'spine_01', 'spine_02', 'spine_03']);
+function waist(path) { // [width (x), depth (z, glTF front)] of the trunk between the pelvis joint and spine_02
+  if (!existsSync(path)) return null;
+  const g = readGlb(path);
+  const W = worlds(g.gltf);
+  const skin = g.gltf.skins?.[0];
+  const bodyI = g.gltf.nodes.findIndex((n) => n.mesh !== undefined && /^body$/i.test(n.name ?? ''));
+  if (bodyI < 0 || !skin) return null;
+  const at = (b) => { const k = skin.joints.findIndex((j) => g.gltf.nodes[j].name === b); return k < 0 ? null : xf(W[skin.joints[k]], [0, 0, 0])[1]; };
+  const lo = at('pelvis') + 0.05; const hi = at('spine_02');
+  const vs = skinned(g, W, bodyI).filter((v) => TRUNK.has(v.j) && v.p[1] >= lo && v.p[1] <= hi);
+  const span = (k) => Math.max(...vs.map((v) => v.p[k])) - Math.min(...vs.map((v) => v.p[k]));
+  return vs.length ? [span(0), span(2)] : null;
+}
+
 function grade(path, label) {
   console.log(`\n${label} (${path.replace(ROOT, '')})`);
   if (!existsSync(path)) { expect(`${label} exists`, false, 'build: Blender -b --factory-startup -P scripts/blender/build_pirates.py'); return; }
@@ -191,6 +210,13 @@ if (argv.includes('--glb')) {
 } else {
   console.log('Character asset contract (stage 1: normalised CC0 base, three body types)');
   for (const b of BODIES) grade(`${OUT}/pirate_base_${b}.glb`, `body ${b}`);
+
+  console.log('\nbody types');
+  const wm = waist(`${OUT}/pirate_base_male.glb`); const ws = waist(`${OUT}/pirate_base_stout.glb`);
+  const f = (w) => (w ? `${w[0].toFixed(3)} x ${w[1].toFixed(3)} m` : 'n/a');
+  expect(`stout waist 1.3-1.7x the male's width and 1.35-1.7x its depth (male ${f(wm)}, stout ${f(ws)})`,
+    !!wm && !!ws && ws[0] >= 1.3 * wm[0] && ws[1] >= 1.35 * wm[1] && ws[0] <= 1.7 * wm[0] && ws[1] <= 1.7 * wm[1],
+    wm && ws ? `ratios ${(ws[0] / wm[0]).toFixed(2)} / ${(ws[1] / wm[1]).toFixed(2)}` : '');
 
   console.log('\nprovenance and materials');
   const repPath = `${OUT}/pirate_base.report.json`;

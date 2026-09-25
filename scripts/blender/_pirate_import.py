@@ -19,6 +19,7 @@ What this stage guarantees to every later stage (clips, wardrobe, LODs, runtime)
     With the centre at 1.62 and head:height 6.75 the crown lands at 1.75 = PLAYER.HEIGHT.
 Pure bpy; no network, no generator output.
 """
+import math
 import os
 import bpy
 from mathutils import Vector
@@ -212,15 +213,58 @@ def retarget(arm, body, meshes):
     return measure(arm, body)
 
 
-def stoutify(body):
-    """Third body type: a barrel chest and belly (normal offset weighted by the trunk groups), same skeleton."""
-    wmap = {"spine_01": 1.0, "spine_02": 1.0, "pelvis": 0.7, "spine_03": 0.45, "thigh_l": 0.35, "thigh_r": 0.35}
-    idx = {body.vertex_groups[g].index: w for g, w in wmap.items() if g in body.vertex_groups}
+def stoutify(arm, body):
+    """Third body type: a heavy-set sailor on the same skeleton (bone lengths untouched, so every clip and the
+    HEAD_Y retarget still hold). Three vertex-only edits, each weighted by the skin so joints blend:
+      * mass: a normal offset over the trunk and the upper limbs (thicker neck, arms, thighs);
+      * waist: the trunk pushed out sideways around the navel, widest at the belly, fading to the chest and hips;
+      * belly: the front of the trunk pushed forward around the navel (a round gut, not a uniform inflate).
+    b3.2a first shipped a 3.2 cm offset only, which read as the male body at R1 (lineup); these numbers were
+    set against the lineup render so the stout reads at 20 m from the front AND the side."""
+    mass = {"spine_01": 1.0, "spine_02": 1.0, "pelvis": 0.8, "spine_03": 0.6, "neck_01": 0.5, "clavicle_l": 0.4,
+            "clavicle_r": 0.4, "thigh_l": 0.55, "thigh_r": 0.55, "upperarm_l": 0.45, "upperarm_r": 0.45,
+            "calf_l": 0.25, "calf_r": 0.25, "lowerarm_l": 0.3, "lowerarm_r": 0.3}
+    trunk = {"spine_01": 1.0, "spine_02": 1.0, "pelvis": 0.75, "spine_03": 0.5}
+    gi = {g.index: g.name for g in body.vertex_groups}
+    bones = arm.data.bones
+    mw = arm.matrix_world
+    z_belly = (mw @ bones["spine_01"].head_local).z * 0.35 + (mw @ bones["spine_02"].head_local).z * 0.65
+    span = (mw @ bones["spine_03"].head_local).z - (mw @ bones["pelvis"].head_local).z   # hip -> chest
+    y_spine = (mw @ bones["spine_01"].head_local).y     # the spine runs near the back; the gut is in front of it
+    bw = body.matrix_world
+    r, rinv = bw.to_3x3(), bw.inverted().to_3x3()      # edits are made in world space (front = -Y, up = +Z)
     me = body.data
+    # One offset per POSITION, not per vertex: the kit splits vertices along UV seams and layers the briefs
+    # over the skin, so per-vertex normals tore the trunk open at the seams (seen in the first R1 side view).
+    # Normals and weights are averaged over each welded position; waist and belly are smooth fields of the
+    # position alone, so coincident vertices and the briefs over the skin move together.
+    acc = {}
     for v in me.vertices:
-        w = min(1.0, sum(g.weight * idx[g.group] for g in v.groups if g.group in idx))
-        if w > 0:
-            v.co += v.normal * (0.032 * w)
+        p = bw @ v.co
+        k = (round(p.x, 4), round(p.y, 4), round(p.z, 4))
+        wm = min(1.0, sum(g.weight * mass.get(gi[g.group], 0) for g in v.groups if g.group in gi))
+        wt = min(1.0, sum(g.weight * trunk.get(gi[g.group], 0) for g in v.groups if g.group in gi))
+        e = acc.setdefault(k, [Vector(), 0.0, 0.0, 0, []])
+        e[0] += (r @ v.normal).normalized()
+        e[1] += wm
+        e[2] += wt
+        e[3] += 1
+        e[4].append(v.index)
+    for k, (nsum, wm, wt, cnt, idxs) in acc.items():
+        wm, wt = wm / cnt, wt / cnt
+        if wm <= 0 and wt <= 0:
+            continue
+        p = Vector(k)
+        n = nsum.normalized() if nsum.length > 1e-9 else Vector()
+        off = n * (0.030 * wm)
+        if wt > 0:
+            fall = math.exp(-(((p.z - z_belly) / (0.55 * span)) ** 2))
+            off.x += 0.040 * wt * fall * math.tanh(p.x / 0.06)
+            front = min(1.0, max(0.0, (y_spine - p.y) / 0.16))
+            off.y -= 0.075 * wt * fall * front * front * (3 - 2 * front)
+        d = rinv @ off
+        for i in idxs:
+            me.vertices[i].co += d
     me.update()
 
 
@@ -241,7 +285,7 @@ def build_base(body_id, report, do_retarget=True):
     rep["leafBonesRemoved"] = strip_leaves(arm, meshes)
     add_eye_bones(arm, eyes)
     if stout:
-        stoutify(body)
+        stoutify(arm, body)
     rep["before"] = measure(arm, body)
     rep["after"] = retarget(arm, body, meshes) if do_retarget else rep["before"]
     rep["bones"] = sorted(b.name for b in arm.data.bones)

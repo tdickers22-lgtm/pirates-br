@@ -147,6 +147,8 @@ def main():
     if "--renders" not in ARGS:
         return
     os.makedirs(SHEET, exist_ok=True)
+    for arm, _ in built.values():   # the glTF importer leaves QUATERNION mode, which ignores rotation_euler:
+        arm.rotation_mode = "XYZ"   # b3.2a's four turntable angles were all the same front view
     for i, (b, (arm, _)) in enumerate(built.items()):
         arm.location.x = 0 if b == "male" else 50 + i * 10   # park the others off camera
     male = built["male"][0]
@@ -155,10 +157,17 @@ def main():
         tag = "night" if night else "noon"
         for ang, name in ((0, "front"), (40, "threequarter"), (90, "side"), (180, "back")):
             male.rotation_euler.z = math.radians(ang)
-            camera((0, -4.2, 1.15), (0, 0, 0.95), lens=50)
+            # 40 mm from 4.6 m frames z -0.25..2.05: crown to soles (b3.2a2: the 50 mm shot cut at the shins)
+            camera((0, -4.6, 1.0), (0, 0, 0.9), lens=40)
             render(os.path.join(SHEET, f"turntable-{tag}-{name}.png"))
-        male.rotation_euler.z = math.radians(20)
-        camera((0.0, -1.0, 1.72), (0, 0, 1.70), lens=50)   # 1 m from the face
+        male.rotation_euler.z = math.radians(20)   # a slight three-quarter so the nose, lips and an ear read
+        bpy.context.view_layer.update()
+        # Aim at the DRAWN head centre (HEAD_Y), under the eyes' midpoint, from 1 m straight ahead: the frame
+        # (0.40 m tall at 50 mm) then holds hair to beard. b3.2a aimed at z 1.70 (the brow) and cut the mouth.
+        eyes = [male.matrix_world @ male.data.bones[b].head_local for b in ("eye_l", "eye_r")]
+        mid = (eyes[0] + eyes[1]) / 2
+        tgt = (mid.x, mid.y, imp.HEAD_Y)
+        camera((tgt[0], tgt[1] - 1.0, tgt[2] + 0.02), tgt, lens=50)
         render(os.path.join(SHEET, f"face-1m-{tag}.png"))
         male.rotation_euler.z = 0
     setup_render(False)
@@ -166,6 +175,9 @@ def main():
         built[b][0].location.x = x
     camera((0, -5.4, 1.1), (0, 0, 0.95), lens=45)
     render(os.path.join(SHEET, "bodies-lineup-noon.png"))
+    for b in built:   # the same three in profile: the stout's gut and the female's shape read from the side
+        built[b][0].rotation_euler.z = math.radians(90)
+    render(os.path.join(SHEET, "bodies-lineup-side-noon.png"))
 
 
 main()
