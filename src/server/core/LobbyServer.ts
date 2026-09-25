@@ -2384,6 +2384,10 @@ export class LobbyServer {
       const sims = Array.from(this.matches.values()).map((m) => ({
         simLagSec: Number(m.simLagSeconds().toFixed(2)),
         droppedTicks: m.droppedTickCount(),
+        // performance-13: what a tick COSTS (the cause of the lag above), from
+        // the match's TickProfiler; through a worker it rides the mirror.
+        tickP50Ms: m.tickCost().p50Ms,
+        tickP99Ms: m.tickCost().p99Ms,
       }));
       res.end(JSON.stringify({
         ok: !this.draining,
