@@ -9,9 +9,10 @@
 // The loft is narrow near the bilge and widest at the wale, so equal volume
 // rises fast at first and then slows: fill 0.5 sits BELOW the geometric middle
 // of the hold (test-flood-model pins that, plus monotonicity and the ends).
-import type { ShipType } from '../types/index.js';
-import { SHIP, SHIP_STATS } from '../constants/index.js';
+import type { Ship, ShipType, Vec3 } from '../types/index.js';
+import { PLAYER, SHIP, SHIP_STATS } from '../constants/index.js';
 import { getHullProfile, hullSurfacePointAt } from '../hull.js';
+import { getShipFloorYAt, isStandingInShipHold, toShipLocal3 } from '../interactions.js';
 
 /** Height samples between the sole and the deck underside. */
 const Y_SAMPLES = 64;
@@ -106,4 +107,98 @@ export function localYToFill(type: ShipType, y: number): number {
 export function fillToHeightFraction(type: ShipType, fill: number): number {
   const t = getHullVolumeTable(type);
   return (fillToLocalY(type, fill) - t.soleY) / Math.max(1e-6, t.deckY - t.soleY);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// b2.2f (holes-07): the flooded hold is WATER for the player.
+//
+// The hold water is a free surface that stays level in the WORLD while the
+// hull rolls and trims under it, so in the hull's own frame it tilts: deeper on
+// the low rail, deeper at a dipped bow. Everything here reads only fields that
+// are on the wire (type, waterLevel, pitch, roll, position, rotation), so the
+// server's wading/swimming (src/server/systems/holdMovement.ts) and a client
+// predictor that calls the same functions get bit-identical answers.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Water depth over the floor, as a fraction of PLAYER.HEIGHT, where wading
+ *  starts (knee deep) and where the pirate is off his feet and swims. */
+export const HOLD_WADE_IMMERSION = 0.35;
+export const HOLD_SWIM_IMMERSION = 0.75;
+/** Horizontal speed caps as a fraction of the dry walk (PLAN 4 b2.2f). */
+export const HOLD_WADE_SPEED_SCALE = 0.55;
+export const HOLD_SWIM_SPEED_SCALE = 0.5;
+
+export type HoldWaterMode = 'dry' | 'wade' | 'swim';
+
+/**
+ * Hull-local height of the hold-water surface at hull-local (x, z), or null
+ * when she is dry. The fill table gives the level-hull height at the hold
+ * centre; the live attitude tilts it (world-level water in a rolled hull):
+ * world up of a local point is cp*sr*x + cp*cr*y - sp*z (shipLocalUpY), so a
+ * level plane through the centre reads y0 - (cp*sr*x - sp*z) / (cp*cr).
+ * Clamped to the sole and the deck underside.
+ */
+export function holdWaterSurfaceLocalY(
+  type: ShipType,
+  fill: number,
+  localX: number,
+  localZ: number,
+  roll = 0,
+  pitch = 0,
+): number | null {
+  if (!(fill > 0.001)) return null;
+  const t = getHullVolumeTable(type);
+  const y0 = fillToLocalY(type, fill);
+  const r = Number.isFinite(roll) ? roll : 0;
+  const p = Number.isFinite(pitch) ? pitch : 0;
+  const cp = Math.cos(p);
+  const k = cp * Math.cos(r);
+  let y = y0;
+  if (k > 0.2 && (r !== 0 || p !== 0)) y = y0 - (cp * Math.sin(r) * localX - Math.sin(p) * localZ) / k;
+  return Math.min(t.deckY, Math.max(t.soleY, y));
+}
+
+/** Water depth over the floor under the pirate, in body heights (>= 0). */
+export function holdImmersion(surfaceLocalY: number | null, floorLocalY: number): number {
+  if (surfaceLocalY == null) return 0;
+  return Math.max(0, (surfaceLocalY - floorLocalY) / PLAYER.HEIGHT);
+}
+
+export function holdWaterMode(immersion: number): HoldWaterMode {
+  if (immersion > HOLD_SWIM_IMMERSION) return 'swim';
+  if (immersion >= HOLD_WADE_IMMERSION) return 'wade';
+  return 'dry';
+}
+
+/** Horizontal speed cap (m/s) in the hold water; Infinity when dry. */
+export function holdSpeedCap(mode: HoldWaterMode, crouching = false): number {
+  if (mode === 'wade') return HOLD_WADE_SPEED_SCALE * PLAYER.MOVE_SPEED * (crouching ? 0.55 : 1);
+  if (mode === 'swim') return HOLD_SWIM_SPEED_SCALE * PLAYER.MOVE_SPEED;
+  return Infinity;
+}
+
+export interface HoldWaterSample {
+  mode: HoldWaterMode;
+  immersion: number;
+  /** Hull-local surface height at the pirate (null when dry or not below). */
+  surfaceLocalY: number | null;
+  /** Hull-local floor under him (the sole, or a companionway tread). */
+  floorLocalY: number;
+  /** His feet in the hull frame. */
+  local: Vec3;
+}
+
+type HoldShip = Pick<Ship, 'position' | 'rotation' | 'type' | 'pitch' | 'roll' | 'waterLevel'>;
+
+/** Where the hold water stands on a pirate at `position` aboard `ship`. */
+export function sampleHoldWater(position: Vec3, ship: HoldShip): HoldWaterSample {
+  const local = toShipLocal3(position, ship);
+  const floorWorldY = getShipFloorYAt(position, ship);
+  const floorLocalY = toShipLocal3({ x: position.x, y: floorWorldY, z: position.z }, ship).y;
+  if (!isStandingInShipHold(position, ship, local)) {
+    return { mode: 'dry', immersion: 0, surfaceLocalY: null, floorLocalY, local };
+  }
+  const surfaceLocalY = holdWaterSurfaceLocalY(ship.type, ship.waterLevel ?? 0, local.x, local.z, ship.roll ?? 0, ship.pitch ?? 0);
+  const immersion = holdImmersion(surfaceLocalY, floorLocalY);
+  return { mode: holdWaterMode(immersion), immersion, surfaceLocalY, floorLocalY, local };
 }

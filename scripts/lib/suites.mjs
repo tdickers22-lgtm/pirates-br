@@ -570,6 +570,7 @@ export const LOGIC = [
   quick(tsx('test-ballistics.mjs')),
   quick(tsx('test-ship-collision-mass.mjs')), // b2.1g: mass-weighted rams + rock strikes, damage bands, hull jolts, array-order bit-equal
   tsx('test-flood-trim.mjs'), // b2.2c: water mass, slosh centroid list persists after patching, draft, free-surface roll, slosh settle (~3 s)
+  tsx('test-hold-wading.mjs'), // b2.2f: flooded hold is water: 0.2 unaffected, 0.5 <= 0.6x dry, 0.95 afloat + breath, surface tilt, client sampler bit-equal (~3 s)
   tsx('test-seakeeping.mjs'), // b2.1e: 21-station buoyancy, roll periods, heel moment balance, berth heave, point loads, slams (~5 s)
   //   triage-beacons --self-test  — b2.0a (D35, rule 14): the bN.0 triage gate's red cases stay red (missing report,
   //                                 other batch, never pulled = VACUOUS, a >= 3-session signature with neither a
