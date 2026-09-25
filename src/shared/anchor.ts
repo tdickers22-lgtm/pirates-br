@@ -52,9 +52,11 @@ export const ANCHOR_RAISE_PAIR_SECONDS = 2.0;
  * (half the hull length). Per unit of way the longer hull swings less (the
  * half-length divides), so the galleon's anchor turn is the shallowest; every
  * class lands in the 45-90 deg band of PLAN 3.7 when the helm goes over at the bite.
+ * Sloop 1.7 since the rudder became a force (b2.1d): the helm now sheds way
+ * in the 2 s pay-out, and the gate still wants >= 90 deg in 6 s from the drop.
  */
 export const ANCHOR_TURN_GAIN: Readonly<Record<ShipType, number>> = {
-  sloop: 1.35,
+  sloop: 1.7,
   brigantine: 1.4,
   galleon: 1.55,
 };

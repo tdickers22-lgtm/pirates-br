@@ -181,6 +181,7 @@ for (const type of CLASSES) {
     // which for the galleon is itself ~31% of top; vMin (whole manoeuvre) is
     // printed for the record.
     let vMin = entry; let vCone = entry; let exited = false; let done = null; let crossed = false; let reversed = false;
+    let yawSum = 0; let yawTicks = 0; // |omega| while the bow is inside the no-go cone (OD5)
     for (let i = 0; i < 40 / TICK && done === null; i++) {
       const w = sampleWind(t);
       const sr = angleWrap(w.direction - ship.rotation);
@@ -193,12 +194,24 @@ for (const type of CLASSES) {
       const sr1 = angleWrap(sampleWind(t).direction - ship.rotation);
       if (!crossed && Math.sign(sr1) === -side0 && Math.PI - Math.abs(sr1) < 0.5) crossed = true;
       if (!exited) vCone = Math.min(vCone, Math.hypot(ship.velocity.x, ship.velocity.z));
+      if (!exited && Math.PI - Math.abs(sr1) <= SHIP.SAIL_NO_GO_ANGLE) { yawSum += Math.abs(ship.angularVelocity); yawTicks++; }
       if (crossed && Math.PI - Math.abs(sr1) > SHIP.SAIL_NO_GO_ANGLE) exited = true;
       if (crossed && Math.PI - Math.abs(sr1) >= 60 * DEG) done = i * TICK + TICK;
     }
     expect(`${type}: hard-over tack completes within ${TACK_MAX[type]} s`, done !== null && done <= TACK_MAX[type], `${done === null ? 'never' : done.toFixed(2)} s`);
     expect(`${type}: the tack keeps >= 45% of entry speed through the no-go cone (way carried through irons)`, exited && vCone >= 0.45 * entry && !reversed,
       `entry ${entry.toFixed(2)} through-cone min ${vCone.toFixed(2)} m/s (${(100 * vCone / entry).toFixed(0)}%); whole-manoeuvre min ${vMin.toFixed(2)} (${(100 * vMin / entry).toFixed(0)}%)`);
+    // OD5 (c'): the galleon crosses irons on BACKED CANVAS (fore yards aback),
+    // not on a faster rudder: her mean yaw through the cone must reach ~0.42
+    // rad/s to keep her way, and stay <= 0.5 rad/s to be a plausible moment
+    // for a 3.6x-mass hull. Sloop and brig are printed for the record.
+    const yawMean = yawSum / Math.max(1, yawTicks);
+    if (type === 'galleon') {
+      expect('galleon: backed canvas carries her through irons at a plausible 0.42-0.50 rad/s mean yaw (OD5)', yawMean >= 0.42 && yawMean <= 0.5,
+        `mean ${yawMean.toFixed(3)} rad/s over ${(yawTicks * TICK).toFixed(2)} s in the cone`);
+    } else {
+      console.log(`     ${type}: mean yaw through irons ${yawMean.toFixed(3)} rad/s over ${(yawTicks * TICK).toFixed(2)} s`);
+    }
   }
   // World edge: sail at the wall at full speed; no bounce, never past it.
   {

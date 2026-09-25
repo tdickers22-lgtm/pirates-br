@@ -284,7 +284,15 @@ export const RUDDER_CREEP_OMEGA = 0.012;
  */
 /** Share of the lateral kinetic energy the keel sheds that it turns into way along the keel. */
 export const KEEL_REDIRECT = 0.85;
-export const BACKED_YAW_OMEGA: Record<ShipType, number> = { sloop: 1.0, brigantine: 0.8, galleon: 0.72 };
+/**
+ * Per class, the rig decides it (OD5): the sloop's fore-and-aft rig tacks on
+ * the rudder and a backed jib, the brigantine backs one square foremast, the
+ * galleon backs a whole fore course and spritsail far forward of her pivot,
+ * the longest lever of the three, so she gets the largest target: her mean yaw
+ * through irons lands at ~0.48 rad/s (gate 0.42-0.50), enough to keep 45% of
+ * her way through the cone without a faster rudder (section-3 diameters kept).
+ */
+export const BACKED_YAW_OMEGA: Record<ShipType, number> = { sloop: 1.0, brigantine: 0.9, galleon: 1.3 };
 const BACKED_YAW_MIN_HELM = 0.5;
 export function backedCanvasOmega(type: ShipType, rudderFrac: number, sailDeployment: number, windStrength: number): number {
   if (Math.abs(rudderFrac) < BACKED_YAW_MIN_HELM) return 0;
