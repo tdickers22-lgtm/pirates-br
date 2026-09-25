@@ -44,7 +44,7 @@ import { makeLoftedSlabGeometry, makeSheerRunGeometry, sheerHalfWidthAt, makeBil
 import { applyFlagWave, FLAG_DROP, FLAG_FLY, flagPhaseFromId, flagTexture, makeBarrel, makeCylinderBetween, makeFigurehead, makeHatchGrating, makeLanternFixture, makeRopeCoil, makeWindowFrame } from './ship/dressing.js';
 import type { FlagUniforms, ShipFlag } from './ship/dressing.js';
 import {
-  HOLD_FLOOR_Y, HOLD_HALF_LENGTH_F, holdHalfWidthAt, makeHoldCargoStacks, makeShipInterior,
+  BILGE_BOARD_LEN_F, bilgeBoardInboardFaceAt, HOLD_FLOOR_Y, HOLD_HALF_LENGTH_F, holdHalfWidthAt, makeHoldCargoStacks, makeShipInterior,
 } from './ship/interior.js';
 import { createHoldWater, disposeHoldWater, updateHoldWater, type HoldWaterHandle } from './ship/holdWater.js';
 // ─────────────────────────────────────────────────────────────────────────────
@@ -258,6 +258,8 @@ interface ShipMeshGroup {
   /** Hold lining inner half-width at hull-local z, and the hold's half-length. */
   holdHalfAt: (z: number) => number;
   holdHalfLen: number;
+  /** holes-06: the bilge board's inboard face at height y (null above/below it). */
+  bilgeFaceAt: (side: -1 | 1, y: number) => { x: number; nx: number; ny: number } | null;
   /** Waterline contact collar (wet-edge foam hugging the hull's own waterline). */
   waterlineFoam: THREE.Mesh;
   /** Phase-A planking uniforms: the hull-local wet line, moved every frame. */
@@ -2659,6 +2661,7 @@ export class ShipRenderer {
       hullHoleUniform,
       hullHoleEnds,
       holdHalfAt: (z: number) => holdHalfWidthAt(stats, profile, z),
+      bilgeFaceAt: (side: -1 | 1, y: number) => bilgeBoardInboardFaceAt(stats, profile, side, y),
       holdHalfLen: stats.length * HOLD_HALF_LENGTH_F,
       waterlineFoam,
       plankUniforms,
@@ -2838,8 +2841,19 @@ export class ShipRenderer {
     }
     const half = mesh.holdHalfAt(point.z);
     if (point.y >= HOLD_FLOOR_Y + 0.06) {
-      inner.set(side * (half - 0.01), point.y, point.z);
-      innerNormal.set(-side, 0, 0);
+      // The angled bilge board stands 0.24 m inboard of the lining over the
+      // whole above-sole band, so the tube ends 1 cm past ITS inboard face:
+      // seated on the lining, the board hid the opening from every pose in
+      // the hold (b2.3c probe, 0% open at the seat).
+      const board = Math.abs(point.z) < mesh.holdHalfLen * BILGE_BOARD_LEN_F
+        ? mesh.bilgeFaceAt(side, point.y) : null;
+      if (board && Math.abs(board.x) < half) {
+        innerNormal.set(board.nx, board.ny, 0);
+        inner.set(board.x + board.nx * 0.01, point.y + board.ny * 0.01, point.z);
+      } else {
+        inner.set(side * (half - 0.01), point.y, point.z);
+        innerNormal.set(-side, 0, 0);
+      }
       return { hasSeat: true, belowSole: false };
     }
     inner.set(side * Math.max(0.2, half - FLOODING.HOLE_VISUAL_RADIUS * 0.9), HOLD_FLOOR_Y + 0.004, point.z);

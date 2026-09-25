@@ -96,6 +96,71 @@ const READ_LINING = () => {
   return { port: h.plane.y0 + h.plane.sx * hw, stbd: h.plane.y0 - h.plane.sx * hw, plane: h.plane, visible: h.mesh.visible };
 };
 
+/** b2.3c (holes-06): stage probe-only breaches on the local hull and aim the
+ *  free camera from under the deck beams, down and outboard at the breach's
+ *  INBOARD seat (the bilge-board face for a hole above the sole, the sole edge
+ *  for one below it). Returns pending until the hole's vis is built: on the
+ *  software rasteriser one frame is seconds, so a fixed wait is not a frame. */
+const STAGE_BREACH = ({ holes, tod }) => {
+  const g = window.__piratesBR;
+  g.setDayNightOverride(tod);
+  const sr = g.shipRenderer;
+  sr.setHoldWaterDebug({ fill: 0, roll: 0, pitch: 0 });
+  const me = g.state.players.find((p) => p.id === g.localPlayerId);
+  const mesh = sr.shipMeshes.get(me?.shipId);
+  if (!mesh) return { error: 'no ship mesh' };
+  sr.setBreachDebug(me.shipId, holes);
+  const vis = mesh.holeVis.get(holes[0].id);
+  if (!vis || vis.patched !== !!holes[0].patched) return { pending: true };
+  const V = mesh.root.position.constructor;
+  mesh.root.updateMatrixWorld(true);
+  const s = vis.inner;
+  const deckY = sr.getHoldWater(me.shipId)?.clip?.deckY ?? 2.4;
+  const target = mesh.root.localToWorld(new V(s.x, s.y, s.z));
+  // Outboard of the centreline stairwell and its handrail, which otherwise
+  // stand between a mid-hold eye and any breach amidships.
+  const eye = mesh.root.localToWorld(new V(0.55 * s.x, deckY - 0.45, s.z - 0.7));
+  const d = target.clone().sub(eye);
+  g.enableFreeCam(eye.x, eye.y, eye.z, Math.atan2(d.x, d.z), Math.atan2(d.y, Math.hypot(d.x, d.z)));
+  return { seat: { x: s.x, y: s.y, z: s.z }, hasSeat: vis.hasSeat, belowSole: vis.belowSole, inboard: vis.inboard.visible, patched: vis.patched };
+};
+
+/** Where the seat lands on screen through the GAME camera (not assumed centre). */
+const PROJECT_SEAT = ({ id }) => {
+  const g = window.__piratesBR;
+  const me = g.state.players.find((p) => p.id === g.localPlayerId);
+  const mesh = g.shipRenderer.shipMeshes.get(me?.shipId);
+  const vis = mesh?.holeVis.get(id);
+  if (!vis) return null;
+  mesh.root.updateMatrixWorld(true);
+  const w = mesh.root.localToWorld(vis.inner.clone());
+  const cam = g.renderer.camera;
+  cam.updateMatrixWorld(true);
+  const n = w.clone().project(cam);
+  return { x: (n.x * 0.5 + 0.5) * innerWidth, y: (0.5 - n.y * 0.5) * innerHeight, z: n.z };
+};
+const nextFrames = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(r))));
+
+/** Box pixel census around the projected seat. Lining, sole, bilge board and
+ *  plank patch are brown (r >= g >= 0.9 b, r > 1.2 b); anything else that is
+ *  not near-black is the opening (sea, daylight, welling water). */
+function seatBox(png, cx, cy, half = 10) {
+  const { width, height, data, channels } = png;
+  let open = 0; let n = 0;
+  const x0 = Math.max(0, Math.round(cx) - half), x1 = Math.min(width, Math.round(cx) + half);
+  const y0 = Math.max(0, Math.round(cy) - half), y1 = Math.min(height, Math.round(cy) + half);
+  for (let y = y0; y < y1; y += 1) {
+    for (let x = x0; x < x1; x += 1) {
+      const i = (y * width + x) * channels;
+      const r = data[i]; const gg = data[i + 1]; const b = data[i + 2];
+      n += 1;
+      const brown = r >= gg && gg >= 0.9 * b && r > 1.2 * b;
+      if (!brown && r + gg + b > 30) open += 1;
+    }
+  }
+  return n > 0 ? open / n : 0;
+}
+
 function classify(png) {
   const { width, height, data, channels } = png;
   let water = 0; let n = 0; let lum = 0; let all = 0;
@@ -161,7 +226,41 @@ async function main() {
     check('roll 0.2: port and starboard waterlines differ >= 0.3 m (live renderer plane)',
       !!lining && lining.visible && Math.abs(lining.port - lining.stbd) >= 0.3,
       lining ? `port ${lining.port.toFixed(3)} stbd ${lining.stbd.toFixed(3)}` : 'no hold-water readback');
-    writeFileSync(`${OUT}/report.json`, JSON.stringify({ shots, lining, results }, null, 2));
+    // b2.3c: the breach seen from inside. Open rows must show non-lining pixels
+    // at the seat; the PATCHED control (same pose, inboard planks nailed on)
+    // must not, so the row can fail.
+    const breach = {};
+    const breachRows = [
+      { key: 'breach-above', holes: [{ id: 901, x: 1, y: 0.44, z: 0, patched: false }] },
+      { key: 'breach-below', holes: [{ id: 902, x: -1, y: 0.14, z: 0.5, patched: false }] },
+      { key: 'breach-patched', holes: [{ id: 903, x: 1, y: 0.44, z: 0, patched: true }] },
+    ];
+    for (const row of breachRows) {
+      let staged = null;
+      const until = Date.now() + 90_000;
+      do {
+        staged = await page.evaluate(STAGE_BREACH, { ...row, tod: 854 });
+        if (staged?.error) throw new Error(staged.error);
+        await page.evaluate(nextFrames);
+      } while (staged?.pending && Date.now() < until);
+      if (staged?.pending) throw new Error(`${row.key}: breach vis never built`);
+      // Two more staged frames so the free camera and the uniforms settle.
+      for (let k = 0; k < 2; k += 1) { staged = await page.evaluate(STAGE_BREACH, { ...row, tod: 854 }); await page.evaluate(nextFrames); }
+      const at = await page.evaluate(PROJECT_SEAT, { id: row.holes[0].id });
+      const path = `${OUT}/${row.key}.png`;
+      await page.screenshot({ path, timeout: 60_000 });
+      const onScreen = !!at && at.z < 1 && at.x > 10 && at.x < 950 && at.y > 10 && at.y < 530;
+      breach[row.key] = { openFrac: onScreen ? seatBox(readPng(readFileSync(path)), at.x, at.y) : 0, at, staged };
+      console.log(`  ${row.key}: non-lining at the seat ${(breach[row.key].openFrac * 100).toFixed(1)}% at ${at ? `${at.x.toFixed(0)},${at.y.toFixed(0)}` : '-'} ${JSON.stringify(staged)}`);
+    }
+    await page.evaluate(() => window.__piratesBR.shipRenderer.setBreachDebug(null));
+    check('breach above the sole: the opening shows through the lining (>= 60% non-lining at the seat)',
+      breach['breach-above'].openFrac >= 0.6, `${(breach['breach-above'].openFrac * 100).toFixed(1)}%`);
+    check('breach below the sole: water shows through the cut sole (>= 60% non-lining at the seat)',
+      breach['breach-below'].openFrac >= 0.6, `${(breach['breach-below'].openFrac * 100).toFixed(1)}%`);
+    check('control, patched: the inboard planks cover the seat (<= 30% non-lining, seat on screen)',
+      !!breach['breach-patched'].at && breach['breach-patched'].at.z < 1 && breach['breach-patched'].openFrac <= 0.3, `${(breach['breach-patched'].openFrac * 100).toFixed(1)}%`);
+    writeFileSync(`${OUT}/report.json`, JSON.stringify({ shots, lining, breach, results }, null, 2));
   } finally {
     if (browser) await browser.close().catch(() => {});
     await teardown();

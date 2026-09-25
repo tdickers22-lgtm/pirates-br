@@ -45,6 +45,37 @@ export function holdHalfWidthAt(
   return Math.max(0.2, Math.min(footprint, planking));
 }
 
+/** The low angled bilge boards (one per side): 0.16 m thick, 0.34 H tall,
+ *  centred 0.24 m inboard of holdHalfWidthAt(0) at y 0.52, top leaning outboard
+ *  by 0.12 pi. Shared with ShipRenderer's breach seat (holes-06): above the sole
+ *  the board, not the lining, is what a crewmate sees in front of a breach. */
+const BILGE_BOARD_THICK = 0.16;
+const BILGE_BOARD_H_F = 0.34;
+const BILGE_BOARD_INSET = 0.24;
+const BILGE_BOARD_Y = 0.52;
+const BILGE_BOARD_TILT = Math.PI * 0.12;
+export const BILGE_BOARD_LEN_F = 0.9;
+
+/**
+ * The bilge board's INBOARD face at height y on one side: hull-local x and the
+ * face's inboard normal (nx, ny). null where the board does not reach that
+ * height. The board runs 0.9 of the hold length at one constant x.
+ */
+export function bilgeBoardInboardFaceAt(
+  stats: { width: number; length: number; height: number },
+  profile: HullProfile,
+  side: -1 | 1,
+  y: number,
+): { x: number; nx: number; ny: number } | null {
+  const c = Math.cos(BILGE_BOARD_TILT), s = Math.sin(BILGE_BOARD_TILT);
+  const half = BILGE_BOARD_THICK * 0.5;
+  // Board-local v (along its height) where the inboard face crosses y.
+  const v = (y - BILGE_BOARD_Y - half * s) / c;
+  if (Math.abs(v) > stats.height * BILGE_BOARD_H_F * 0.5) return null;
+  const cx = holdHalfWidthAt(stats, profile, 0) - BILGE_BOARD_INSET;
+  return { x: side * (cx - half * c + v * s), nx: -side * c, ny: s };
+}
+
 export interface StairwellHole {
   cx: number;
   cz: number;
@@ -142,11 +173,11 @@ export function makeShipInterior(
   }
   for (const sx of [-1, 1] as const) {
     const bilge = new THREE.Mesh(
-      new THREE.BoxGeometry(0.16, H * 0.34, holdZ * 2 * 0.9),
+      new THREE.BoxGeometry(BILGE_BOARD_THICK, H * BILGE_BOARD_H_F, holdZ * 2 * BILGE_BOARD_LEN_F),
       bilgeMat,
     );
-    bilge.position.set(sx * (holdHalf(0) - 0.24), 0.52, 0);
-    bilge.rotation.z = -sx * Math.PI * 0.12;
+    bilge.position.set(sx * (holdHalf(0) - BILGE_BOARD_INSET), BILGE_BOARD_Y, 0);
+    bilge.rotation.z = -sx * BILGE_BOARD_TILT;
     g.add(bilge);
   }
 

@@ -304,12 +304,25 @@ const R = FLOODING.HOLE_VISUAL_RADIUS;
   expect('above-sole breach: the inboard seat is inboard of the shell by >= 0.1 m',
     !!vA?.inner && Math.abs(vA.inner.x) < Math.abs(vA.point.x) - 0.1,
     vA?.inner ? `seat x ${vA.inner.x.toFixed(2)} vs shell x ${vA.point.x.toFixed(2)}` : 'no vis.inner');
-  const liningA = vA?.inner ? nearestOn('hold-inner-wall', vA.inner) : { d: Infinity, p: new THREE.Vector3() };
-  const liningFar = vA?.inner ? nearestOn('hold-inner-wall', vA.inner.clone().add(new THREE.Vector3(0, 0, 1.4))) : liningA;
-  console.log(`  inside: shell (${vA?.point.x.toFixed(2)}, ${vA?.point.y.toFixed(2)}) seat ${vA?.inner ? `(${vA.inner.x.toFixed(2)}, ${vA.inner.y.toFixed(2)})` : '-'}; lining ${liningA.d.toFixed(3)} m from the seat`);
+  // The lining where the tube crosses it: nearest lining to the tube's midpoint
+  // (the seat itself sits on the bilge board, 0.24 m inboard of the lining).
+  const midA = vA?.inner ? vA.inner.clone().lerp(vA.point, 0.5) : null;
+  const liningA = midA ? nearestOn('hold-inner-wall', midA) : { d: Infinity, p: new THREE.Vector3() };
+  const liningFar = midA ? nearestOn('hold-inner-wall', midA.clone().add(new THREE.Vector3(0, 0, 1.4))) : liningA;
+  console.log(`  inside: shell (${vA?.point.x.toFixed(2)}, ${vA?.point.y.toFixed(2)}) seat ${vA?.inner ? `(${vA.inner.x.toFixed(2)}, ${vA.inner.y.toFixed(2)})` : '-'}; lining ${liningA.d.toFixed(3)} m from the tube midpoint`);
   expect('above-sole breach: the lining at the seat is cut (tube through both skins)',
     liningA.d < 0.2 && cut(liningA.p), `nearest lining ${liningA.d.toFixed(3)} m, cut ${cut(liningA.p)}`);
   expect('control: the lining 1.4 m along the hull is NOT cut', liningFar.d < 0.3 && !cut(liningFar.p));
+  // b2.3c probe finding: seated on the lining, the angled bilge board 0.24 m
+  // inboard still covered the opening from every hold pose. Whatever stands
+  // on the VIEWER's side must be cut: the board face nearest a point 0.3 m
+  // further inboard of the seat.
+  const viewA = vA?.inner ? vA.inner.clone().add(new THREE.Vector3(-Math.sign(vA.point.x) * 0.3, 0, 0)) : null;
+  const boardA = viewA ? nearestOn('hold-bilge-board', viewA) : { d: Infinity, p: new THREE.Vector3() };
+  expect('above-sole breach: the bilge board in front of the lining is cut on the hold side',
+    boardA.d < 0.45 && cut(boardA.p), `board face ${boardA.d.toFixed(3)} m from the viewer point, cut ${cut(boardA.p)}`);
+  const boardFar = viewA ? nearestOn('hold-bilge-board', viewA.clone().add(new THREE.Vector3(0, 0, 1.4))) : boardA;
+  expect('control: the bilge board 1.4 m along is NOT cut', boardFar.d < 0.45 && !cut(boardFar.p));
   const soleB = vB?.inner ? nearestOn('hold-floor', vB.inner) : { d: Infinity, p: new THREE.Vector3() };
   expect('below-sole breach: the sole above it is cut open (you see into the bilge)',
     !!vB?.inner && vB.inner.y > 0.3 && soleB.d < 0.1 && cut(soleB.p),
