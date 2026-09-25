@@ -313,6 +313,68 @@ export const TICK_BUDGET = { p99Ms: 4.0, p50Ms: 2.0 };
 // measured 2026-09-25 at fefa9f47 (one entry, no split): entry 375.0, toMenu 491.8, total 497.0.
 export const BUNDLE_BUDGETS_KB = { entryBr: 180, toMenuBr: 330, totalBr: 520, chunkBr: 300 };
 
+// ═══ test-model-transport + test-memory-budget: bytes and residency PER ASSET FAMILY (b3.1g, D27) ══════
+// Brotli MB on the wire per download set (moved here from test-model-transport, b3.1a): boot = the 11
+// files the hull and the player's hands need; world = everything fetched before the countdown ends
+// (world GLBs, far siblings, story proxies); lazy = story LOD0 streamed by distance; far = *_far only.
+export const MODEL_SET_BUDGETS_MB = { boot: 0.6, world: 6, lazy: 12, far: 1 };
+
+/** Every GLB key belongs to exactly one family (src/client/assets/modelManifest.ts MODEL_FAMILY_OF). */
+export const MODEL_FAMILIES = ['shared', 'characters', 'weapons-tools', 'ship-hardware-kit', 'rocks-cliffs',
+  'flora-canopy', 'props-poi', 'buildings-story', 'creatures-kraken', 'instruments'];
+
+/** D27 allocation, wire (brotli MB). world* gate the countdown, streamed* never do. The per-family rows
+ *  are NOT in ALL_BUDGETS on purpose: a [realloc] commit may move bytes between rows (rule 13). What the
+ *  ratchet grades is the column sums below, and test-model-transport fails unless every column of this
+ *  table sums to its FAMILY_WIRE_TOTALS_MB value exactly (so raising a row means lowering another). */
+export const FAMILY_WIRE_MB = {
+  shared: { worldDesktop: 0.6, worldMobile: 0.5, streamedDesktop: 0, streamedMobile: 0 },
+  characters: { worldDesktop: 1.3, worldMobile: 1.1, streamedDesktop: 2.0, streamedMobile: 0.8 },
+  'weapons-tools': { worldDesktop: 0.9, worldMobile: 0.7, streamedDesktop: 0, streamedMobile: 0 },
+  'ship-hardware-kit': { worldDesktop: 0.5, worldMobile: 0.4, streamedDesktop: 1.2, streamedMobile: 0.5 },
+  'rocks-cliffs': { worldDesktop: 0.8, worldMobile: 0.6, streamedDesktop: 1.8, streamedMobile: 0.9 },
+  'flora-canopy': { worldDesktop: 0.5, worldMobile: 0.3, streamedDesktop: 1.0, streamedMobile: 0.4 },
+  'props-poi': { worldDesktop: 0.4, worldMobile: 0.3, streamedDesktop: 1.0, streamedMobile: 0.5 },
+  'buildings-story': { worldDesktop: 0.7, worldMobile: 0.35, streamedDesktop: 4.4, streamedMobile: 2.4 },
+  'creatures-kraken': { worldDesktop: 0.25, worldMobile: 0.2, streamedDesktop: 0.6, streamedMobile: 0.5 },
+  instruments: { worldDesktop: 0.05, worldMobile: 0.05, streamedDesktop: 0, streamedMobile: 0 },
+};
+export const FAMILY_WIRE_TOTALS_MB = { worldDesktop: 6.0, worldMobile: 4.5, streamedDesktop: 12.0, streamedMobile: 6.0 };
+
+/** D27 allocation, GPU texture MB resident per tier (iPad grades the low column). The D27 table has nine
+ *  rows: instruments share the creatures-kraken row (FAMILY_TEXTURE_ROW_OF). Same realloc rule. */
+export const FAMILY_TEXTURE_MB = {
+  shared: { high: 48, balanced: 28, low: 22, phone: 14 },
+  characters: { high: 24, balanced: 12, low: 8, phone: 6 },
+  'weapons-tools': { high: 16, balanced: 12, low: 10, phone: 8 },
+  'ship-hardware-kit': { high: 32, balanced: 16, low: 12, phone: 8 },
+  'rocks-cliffs': { high: 40, balanced: 16, low: 12, phone: 8 },
+  'flora-canopy': { high: 32, balanced: 14, low: 10, phone: 6 },
+  'props-poi': { high: 24, balanced: 10, low: 8, phone: 5 },
+  'buildings-story': { high: 28, balanced: 12, low: 8, phone: 5 },
+  'creatures-kraken': { high: 12, balanced: 8, low: 6, phone: 4 },
+};
+export const FAMILY_TEXTURE_ROW_OF = { instruments: 'creatures-kraken' };
+export const FAMILY_TEXTURE_TOTALS_MB = { high: 256, balanced: 128, low: 96, phone: 64 };
+
+/** DECLARED deviations: family rows today's (unrebuilt) GLBs overflow, measured at b3.1g (HEAD cd33720b,
+ *  brotli q9). `upTo` is the reading rounded up to 10 KB; a reading above it FAILS, and so does an entry
+ *  whose family is back inside its D27 row (delete it: this list may only shrink, the ratchet holds each
+ *  upTo). The owner lane's rebuild (LOD chains, KTX2, weld-then-decimate) brings the row inside. */
+export const FAMILY_WIRE_DEVIATIONS_MB = {
+  'weapons-tools.worldDesktop': { upTo: 1.02, owner: 'b3.4 (hero weapons/tools)', measured: 1.011 },
+  'weapons-tools.worldMobile': { upTo: 1.02, owner: 'b3.4 (hero weapons/tools)', measured: 1.011 },
+  'ship-hardware-kit.worldDesktop': { upTo: 0.61, owner: 'b3.4 (ship hardware kit)', measured: 0.606 },
+  'ship-hardware-kit.worldMobile': { upTo: 0.61, owner: 'b3.4 (ship hardware kit)', measured: 0.606 },
+  'rocks-cliffs.worldDesktop': { upTo: 1.03, owner: 'b4 (islands: rocks/cliffs LOD chains)', measured: 1.026 },
+  'rocks-cliffs.worldMobile': { upTo: 1.03, owner: 'b4 (islands: rocks/cliffs LOD chains)', measured: 1.026 },
+  'flora-canopy.worldMobile': { upTo: 0.46, owner: 'b4 (islands: flora LOD chains, phone set)', measured: 0.457 },
+  'buildings-story.worldDesktop': { upTo: 1.22, owner: 'b4 (buildings/fort/docks LOD chains)', measured: 1.217 },
+  'buildings-story.worldMobile': { upTo: 1.22, owner: 'b4 (buildings/fort/docks LOD chains)', measured: 1.217 },
+  'buildings-story.streamedMobile': { upTo: 3.75, owner: 'b4 (phones stream story LOD1, never LOD0: D27)', measured: 3.748 },
+  'total.worldMobile': { upTo: 4.91, owner: 'the rows above (phones fetch the desktop world set today)', measured: 4.905 },
+};
+
 // ═══ the ratchet's view ═════════════════════════════════════════════════════════════════════════════
 /** Every graded family, by the name the ratchet and the baseline fixture use. */
 export const ALL_BUDGETS = {
@@ -330,6 +392,10 @@ export const ALL_BUDGETS = {
   memory: MEMORY_BUDGETS,
   tick: TICK_BUDGET,
   bundle: BUNDLE_BUDGETS_KB,
+  modelSets: MODEL_SET_BUDGETS_MB,
+  modelFamilyWireTotals: FAMILY_WIRE_TOTALS_MB,
+  modelFamilyTextureTotals: FAMILY_TEXTURE_TOTALS_MB,
+  modelFamilyWireDeviations: FAMILY_WIRE_DEVIATIONS_MB,
 };
 
 /** Keys that are readings or scene inputs, never budgets. */
