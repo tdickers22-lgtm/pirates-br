@@ -694,6 +694,17 @@ export const SERVER = [
   // "$@" forwards a gate name's arguments (OD1: `probes/throttled-load-probe
   // --rows A` in b1-b3, `--rows A,B` from b4) to the probe, not to the build.
   { file: 'probes/throttled-load-probe.mjs', cmd: ['sh', '-c', 'npx vite build && node scripts/postbuild-compress.mjs && node scripts/probes/throttled-load-probe.mjs "$@"', 'sh'], timeoutMs: 600_000 },
+  // b2 probes, registered at the b2 gate. Each stands up its OWN 3101 (and 8091 where
+  // it needs a match) stack and one headless SwiftShader Chromium, killed in finally,
+  // so they run in this tier, before the runner's browser stack exists.
+  //   hold-water-probe   — water pixels >= 15/35/55% at fill 0.25/0.5/0.75, port vs starboard
+  //                        waterline >= 0.3 m at roll 0.2, hold luminance >= 0.12 noon / 0.06 night
+  //   founder-probe      — a sunk ship's wreck rides the live sea and drifts, draw cost bounded
+  //   audio-render-probe — the real SoundEngine graph through an OfflineAudioContext: broadside peak
+  //                        <= -1 dBFS, no NaN, every sample key audible, geyser louder when erupting
+  { ...plain('probes/hold-water-probe.mjs'), timeoutMs: 600_000 },
+  { ...plain('probes/founder-probe.mjs'), timeoutMs: 600_000 },
+  { ...plain('probes/audio-render-probe.mjs'), timeoutMs: 600_000 },
 ];
 
 /** Watchdog per tier (ms); an entry's `timeoutMs` overrides it. A suite silent
