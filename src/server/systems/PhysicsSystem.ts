@@ -1698,14 +1698,24 @@ export class PhysicsSystem {
         }
 
         if (groundY > -Infinity && !swimHere) {
-          // Wading band: shin-deep water keeps you 'alive' but caps walk speed.
-          // Pull back the walk step Match already applied and slow the velocity.
+          // Wading band: shin-deep water keeps you 'alive' but CAPS walk speed
+          // at WADE_SPEED_SCALE of the dry walk (crouch-aware), exactly like
+          // holdMovement's hold wade. A per-tick multiply compounded with
+          // stepPirate's ground acceleration (b2.1h) to ~0.16x walk
+          // (b2-ask-01). Pull back the part of the walk step Match already
+          // applied that exceeds the cap.
           if (!standingOnDock && submergeDepth > LOCO.WADE_MIN_DEPTH) {
-            const keep = LOCO.WADE_SPEED_SCALE;
-            player.position.x -= player.velocity.x * dt * (1 - keep);
-            player.position.z -= player.velocity.z * dt * (1 - keep);
-            player.velocity.x *= keep;
-            player.velocity.z *= keep;
+            const cap = PLAYER.MOVE_SPEED * (player.crouching ? 0.55 : 1) * LOCO.WADE_SPEED_SCALE;
+            const vx = player.velocity.x;
+            const vz = player.velocity.z;
+            const v = Math.hypot(vx, vz);
+            if (v > cap) {
+              const keep = cap / v;
+              player.position.x -= vx * dt * (1 - keep);
+              player.position.z -= vz * dt * (1 - keep);
+              player.velocity.x = vx * keep;
+              player.velocity.z = vz * keep;
+            }
           }
           player.velocity.y += PHYSICS.GRAVITY * dt;
           player.position.y += player.velocity.y * dt;
