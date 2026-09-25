@@ -237,7 +237,7 @@ console.log('\nA crew caught outside the wall can outrun it home');
     (worst, p) => Math.max(worst, (p.startRadius - p.endRadius) / p.shrinkSec), 0);
   expect('she reaches shelter instead of dying at the wall',
     insideAt !== null && player.state !== 'eliminated',
-    `insideAt=${insideAt} state=${player.state} d=${dist2D(ship.position.x, ship.position.z, 0, 0).toFixed(0)}`);
+    `insideAt=${insideAt} state=${player.state} d=${dist2D(ship.position.x, ship.position.z, 0, 0).toFixed(0)} t=${match.t.toFixed(1)} health=${player.health} hull=${ship.health?.toFixed?.(0)} sinking=${ship.sinking} water=${(ship.waterLevel ?? 0).toFixed(2)} holes=${JSON.stringify(ship.holes.map((h) => [+h.y.toFixed(2), h.size ?? 1, h.patched ? 1 : 0]))}`);
   expect('and she does it fast enough to beat the ring closing on her',
     peak >= ringRate,
     `peak ${peak.toFixed(2)} u/s vs ring ${ringRate.toFixed(2)} m/s`);
