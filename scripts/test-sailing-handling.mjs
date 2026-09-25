@@ -13,7 +13,8 @@
 //   H  hull params: mass 1 : 1.9 : 3.6, drag solved to the D16 top speeds and
 //      t90 targets, keel >= 25x, yaw inertia m(L^2+B^2)/12 (design analytics;
 //      the force-based dynamics that consume them are b2.1b, section 1)
-// Section 3 (turning: yaw inertia, rudder moment) lands with b2.1d.
+//   3  turning (b2.1d): time to 90% yaw rate, tactical diameter, steady-turn
+//      speed loss vs a straight-line twin, hard helm from rest (canvas struck)
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -224,6 +225,84 @@ for (const type of CLASSES) {
     expect(`${type}: at the world edge the heading velocity never reverses`, minFwd >= -1e-6, `min forward ${minFwd.toFixed(3)} m/s`);
     expect(`${type}: the edge is a soft current, not a bounce (inward normal speed <= 1 m/s)`, minNormal >= -1, `min outward-normal ${minNormal.toFixed(2)} m/s`);
     expect(`${type}: never past the boundary`, maxPos <= boundary + 1e-6, `max |pos| ${maxPos.toFixed(2)} / ${boundary}`);
+  }
+}
+
+// ── Section 3: turning (yaw inertia, rudder moment, induced drag; b2.1d) ─────
+// PLAN 3.7: time to 90% yaw rate sloop 1.2-1.8 / brig 2-3 / galleon 3.5-5 s;
+// tactical diameter sloop 36-42 / brig 56-64 / galleon 88-110 m; steady-turn
+// speed loss 15-30%; 10 s of hard helm from rest turns <= 12 deg.
+// Protocol: steady on the beam (45 s, ideal brace), then hard over BEARING
+// AWAY (through the run, never into the no-go cone), brace re-trimmed every
+// tick. Yaw-rate reference = the peak |omega| of the first 180 deg; tactical
+// diameter = transfer (perpendicular to the entry heading) at 180 deg of
+// heading change; speed loss = 1 - |v| / |v twin| at 180 deg of heading
+// change (the beam again, on the other tack; 200 deg would be the cone), where the twin is the same hull forced onto the SAME heading every
+// tick with her velocity kept on her bow (a straight-line sailer at the same
+// points of sail, no rudder, no scrub), so wind and polar cancel out.
+console.log('\nSection 3: turning (yaw inertia, rudder moment, turn drag)');
+const YAW90_WIN = { sloop: [1.2, 1.8], brigantine: [2, 3], galleon: [3.5, 5] };
+const TAC_WIN = { sloop: [36, 42], brigantine: [56, 64], galleon: [88, 110] };
+const LOSS_WIN = [0.15, 0.30];
+for (const type of CLASSES) {
+  const physics = new PhysicsSystem();
+  const twinPhysics = new PhysicsSystem();
+  const ship = makeShip(type);
+  const twin = { ...makeShip(type), id: `twin-${type}` };
+  ship.rudderAngle = 0; twin.rudderAngle = 0;
+  let t = 0;
+  for (let i = 0; i < 45 / TICK; i++) {
+    holdPointOfSail(ship, t, 90, 1); holdPointOfSail(twin, t, 90, 1);
+    t += TICK;
+    physics.update(TICK, t, [ship], [], [], [], []);
+    twinPhysics.update(TICK, t, [twin], [], [], [], []);
+  }
+  const side0 = Math.sign(angleWrap(sampleWind(t).direction - ship.rotation));
+  const bearAway = -side0; // steer sign whose yaw carries the bow toward the wind's heading (the run)
+  const helm = helmFor(ship);
+  const r0 = ship.rotation; const p0 = { x: ship.position.x, z: ship.position.z };
+  const h0 = { x: Math.sin(r0), z: Math.cos(r0) };
+  const omegas = []; let turned = 0; let transfer = null; let loss = null; let vA = 0; let vB = 0; let luffed = false;
+  for (let i = 0; i < 90 / TICK && loss === null; i++) {
+    const w = sampleWind(t);
+    ship.sailAngle = idealBrace(angleWrap(w.direction - ship.rotation));
+    applyShipRudderSteering(ship, TICK, bearAway, 1);
+    const rBefore = ship.rotation;
+    t += TICK;
+    physics.update(TICK, t, [ship], [helm], [], [], []);
+    if (ship.luffing && turned < Math.PI) luffed = true;
+    turned += Math.abs(angleWrap(ship.rotation - rBefore));
+    // Twin: same heading as the turner had this tick, velocity kept on her bow.
+    twin.rotation = rBefore; twin.angularVelocity = 0;
+    twin.sailAngle = idealBrace(angleWrap(w.direction - twin.rotation));
+    twinPhysics.update(TICK, t, [twin], [], [], [], []);
+    const sp = Math.hypot(twin.velocity.x, twin.velocity.z);
+    twin.velocity.x = Math.sin(twin.rotation) * sp; twin.velocity.z = Math.cos(twin.rotation) * sp;
+    if (turned <= Math.PI) omegas.push([i * TICK + TICK, Math.abs(ship.angularVelocity)]);
+    if (transfer === null && turned >= Math.PI) {
+      const dx = ship.position.x - p0.x; const dz = ship.position.z - p0.z;
+      transfer = Math.abs(dx * h0.z - dz * h0.x);
+    }
+    if (turned >= Math.PI) { vA = Math.hypot(ship.velocity.x, ship.velocity.z); vB = sp; loss = 1 - vA / vB; }
+  }
+  const peak = omegas.reduce((m, [, w]) => Math.max(m, w), 0);
+  const hit = omegas.find(([, w]) => w >= 0.9 * peak);
+  const t90y = hit ? hit[0] : null;
+  expect(`${type}: time to 90% yaw rate ${YAW90_WIN[type].join('-')} s`, t90y !== null && t90y >= YAW90_WIN[type][0] && t90y <= YAW90_WIN[type][1],
+    `${t90y === null ? 'never' : t90y.toFixed(2)} s to 90% of peak ${peak.toFixed(3)} rad/s`);
+  expect(`${type}: tactical diameter ${TAC_WIN[type].join('-')} m`, transfer !== null && transfer >= TAC_WIN[type][0] && transfer <= TAC_WIN[type][1],
+    `transfer at 180 deg ${transfer === null ? 'never' : transfer.toFixed(1)} m`);
+  expect(`${type}: steady-turn speed loss 15-30% vs a straight-line twin on the same headings`, loss !== null && loss >= LOSS_WIN[0] && loss <= LOSS_WIN[1],
+    `${loss === null ? 'never reached 180 deg' : `${(100 * loss).toFixed(1)}% (turner ${vA.toFixed(2)} / twin ${vB.toFixed(2)} m/s)`}`);
+  expect(`${type}: the bear-away turn never luffs (a clean section-3 measurement)`, !luffed);
+  // From rest, canvas struck: 10 s of hard helm turns <= 12 deg.
+  {
+    const p2 = new PhysicsSystem();
+    const s2 = makeShip(type); s2.sailHeight = 0; s2.rudderAngle = 0;
+    const h2 = helmFor(s2); let t2 = 0; const rStart = s2.rotation;
+    for (let i = 0; i < 10 / TICK; i++) { applyShipRudderSteering(s2, TICK, 1, 1); t2 += TICK; p2.update(TICK, t2, [s2], [h2], [], [], []); }
+    const swung = Math.abs(angleWrap(s2.rotation - rStart)) / DEG;
+    expect(`${type}: 10 s of hard helm from rest (canvas struck) turns <= 12 deg`, swung <= 12, `${swung.toFixed(1)} deg`);
   }
 }
 

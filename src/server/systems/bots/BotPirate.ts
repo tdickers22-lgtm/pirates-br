@@ -537,11 +537,11 @@ export class BotPirate {
     // on top of that nobody was at the wheel so the un-helmed decay took the
     // rest — a bot answered her helm at 0.38x a player on the same hull.
     // Difficulty tiers are decisions now, not a physics handicap.
+    // physics-11 (b2.1d): the rudder is a force now, way is what steers, so
+    // the sail plan no longer caps the turn; chainshot still fouls the gear.
     const chainshotted = t < (ship.chainshottedUntil ?? 0);
-    const omegaCapScale = (0.5 + ship.sailHeight * 0.5)
-      * (chainshotted ? 0.75 : 1)
-      * ((ship.sailIntegrity ?? 1) < 0.5 ? 0.9 : 1);
-    applyShipRudderSteering(ship, dt, steer, omegaCapScale);
+    const rudderAuthority = chainshotted ? 0.75 : 1;
+    applyShipRudderSteering(ship, dt, steer, rudderAuthority);
     // Rotation is integrated once for all ships in PhysicsSystem.updateShips;
     // integrating here too would double the bot turn rate.
   }

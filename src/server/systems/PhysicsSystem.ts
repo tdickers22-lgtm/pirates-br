@@ -239,43 +239,118 @@ export function computeSailPolar(offWind: number, type: ShipType = 'sloop'): num
 }
 
 /**
+ * RUDDER FORCE AND YAW INERTIA (physics-11, b2.1d). The helm no longer sets a
+ * yaw rate: the blade makes LIFT ~ v|v| sin(delta) at a lever of half the
+ * length, the hull resists yaw with a damping that grows with the water
+ * flowing past it, and her yaw inertia I_z = m(L^2 + B^2)/12 (HULL_PARAMS)
+ * decides how long she takes to answer:
+ *
+ *   I dw/dt = -liftK v|v| sin(delta) lever - (dampV |v| + damp0) w
+ *
+ * Both lift and damping scale with the flow, so the steady yaw rate is
+ * proportional to the speed and the TURNING CIRCLE is a property of the hull
+ * (tactical diameter), not of how fast she is going. The constants are solved
+ * per class from three design numbers: the yaw time constant at the turn
+ * speed (RUDDER_DESIGN.tau, gives the time to 90% yaw rate), the tactical
+ * diameter, and the rest damping (damp0 = I / REST_YAW_TAU), so a becalmed
+ * hull with the helm hard over only creeps (RUDDER_CREEP_OMEGA). Going astern
+ * the lift reverses, as it does on a real rudder.
+ */
+export const RUDDER_DESIGN: Record<ShipType, { tau: number; tacticalDiameter: number; driftDrag: number }> = {
+  // tau (s) at the design turn speed; diameter (m); driftDrag = sin of the
+  // steady drift angle: the keel's centripetal force times it is the induced
+  // drag of the turn (15-30% speed loss, test-sailing-handling section 3).
+  sloop: { tau: 0.8, tacticalDiameter: 36.6, driftDrag: 0.13 },
+  brigantine: { tau: 1.3, tacticalDiameter: 58.5, driftDrag: 0.15 },
+  galleon: { tau: 2.2, tacticalDiameter: 95, driftDrag: 0.19 },
+};
+/** The design turn speed as a share of the class top speed (a steady hard turn). */
+const RUDDER_DESIGN_SPEED_SHARE = 0.75;
+/** s: yaw time constant of a hull with no way on (cross-flow damping only). */
+const REST_YAW_TAU = 6;
+/** rad/s: what full helm makes of a hull with no way on (a crew can still creep her head round). */
+export const RUDDER_CREEP_OMEGA = 0.012;
+/**
+ * BACKED CANVAS IN STAYS (physics-11 x physics-02, b2.1d). With the rudder
+ * alone a hull swings at w = v / R, so crossing the no-go cone costs a fixed
+ * share of her way per radian whatever the helm does (dv/ds = -a over an arc
+ * R theta), and every class stalls in irons at the section-3 turning circles.
+ * Real crews tack by backing the headsail / fore yards: the wind on the
+ * backed canvas pushes the bow through the eye of the wind. While she luffs
+ * with the helm at least half over, her yaw is carried toward
+ * BACKED_YAW_OMEGA (rad/s at wind 1, full canvas) in the helm's sense over the
+ * class's yaw time constant. Out of the cone, or with the helm amidships, it
+ * does nothing, so the section-3 turning numbers are the rudder's alone.
+ */
+/** Share of the lateral kinetic energy the keel sheds that it turns into way along the keel. */
+export const KEEL_REDIRECT = 0.85;
+export const BACKED_YAW_OMEGA: Record<ShipType, number> = { sloop: 1.0, brigantine: 0.8, galleon: 0.72 };
+const BACKED_YAW_MIN_HELM = 0.5;
+export function backedCanvasOmega(type: ShipType, rudderFrac: number, sailDeployment: number, windStrength: number): number {
+  if (Math.abs(rudderFrac) < BACKED_YAW_MIN_HELM) return 0;
+  return -Math.sign(rudderFrac) * BACKED_YAW_OMEGA[type] * clamp(sailDeployment, 0, 1) * clamp(windStrength, 0, 1.5);
+}
+export interface RudderParams { inertia: number; lever: number; liftK: number; dampV: number; damp0: number; driftDrag: number }
+function solveRudder(type: ShipType): RudderParams {
+  const d = RUDDER_DESIGN[type];
+  const inertia = HULL_PARAMS[type].yawInertia;
+  const lever = 0.5 * SHIP_STATS[type].length;
+  const vRef = RUDDER_DESIGN_SPEED_SHARE * CLASS_TOP_SPEED[type];
+  const damp0 = inertia / REST_YAW_TAU;
+  const dampV = Math.max(0, inertia / d.tau - damp0) / vRef;
+  // Steady at vRef: liftK vRef^2 sin(dMax) lever = (dampV vRef + damp0) vRef / R.
+  const radius = 0.5 * d.tacticalDiameter;
+  const liftK = (dampV * vRef + damp0) / (radius * vRef * Math.sin(SHIP.RUDDER_MAX_ANGLE) * lever);
+  return { inertia, lever, liftK, dampV, damp0, driftDrag: d.driftDrag };
+}
+export const RUDDER_PARAMS: Record<ShipType, RudderParams> = {
+  sloop: solveRudder('sloop'),
+  brigantine: solveRudder('brigantine'),
+  galleon: solveRudder('galleon'),
+};
+
+/**
  * Rudder steering shared by the player helm (Match) and bot helmsmen.
- * Slews ship.rudderAngle toward the requested deflection, then blends
- * angularVelocity toward a yaw rate that only bites with way on the ship:
- * full-sail handling keeps the classic turnRate cap, a stationary ship
- * barely answers the helm.
+ * Slews ship.rudderAngle toward the requested deflection, then steps the yaw
+ * equation above one tick (damping taken implicitly, so it can never flip the
+ * swing at any dt).
  *
  * `steer` is the requested rudder fraction in [-1, 1] (positive = helm right,
- * same sign as the old helm input). `omegaCapScale` carries the sail/chainshot
- * handling modifiers so stats.turnRate stays the hard cap.
+ * same sign as the old helm input: omega < 0). `authority` scales the blade's
+ * lift (chainshot fouling the steering gear); the sail plan no longer caps
+ * the turn (the old sailHeight omegaCap was not physics: way is what steers).
  */
-export function applyShipRudderSteering(ship: Ship, dt: number, steer: number, omegaCapScale = 1) {
+export function applyShipRudderSteering(ship: Ship, dt: number, steer: number, authority = 1) {
   const stats = SHIP_STATS[ship.type];
+  const rp = RUDDER_PARAMS[ship.type];
   const target = clamp(steer, -1, 1) * SHIP.RUDDER_MAX_ANGLE;
   const current = ship.rudderAngle ?? 0;
   const maxStep = SHIP.RUDDER_SLEW * SHIP.RUDDER_MAX_ANGLE * dt;
   ship.rudderAngle = current + clamp(target - current, -maxStep, maxStep);
 
-  const speed = Math.hypot(ship.velocity.x, ship.velocity.z);
-  const way = clamp(speed / (stats.maxSpeed * 0.42), 0, 1);
-  // Quadratic-ish rise with a whisper of a floor so a becalmed ship can still
-  // creep its bow around instead of feeling bricked.
-  //
-  // A HULL ON THE GROUND IS NOT BECALMED, SHE IS PINNED, AND SHE PIVOTS. With
-  // way as the only input, a beached ship answers at the 0.05 floor — 43° of
-  // swing in 25 seconds while her grounding breaches take her from 0.31 to 0.84
-  // of bilge, which is drowning in place with no input that helps. The keel is
-  // held and the rig is loaded, so she turns about the point she is stuck on.
-  const effectiveness = Math.max(
-    ship.aground ? SHIP.AGROUND_HELM_AUTHORITY : 0,
-    0.05 + 0.95 * way * (0.35 + 0.65 * way),
-  );
-  // Weight of water in the bilge dulls the helm — a swamped hull barely answers.
+  // Flow past the blade: the way along her keel (astern reverses the lift).
+  const vFwd = Math.sin(ship.rotation) * ship.velocity.x + Math.cos(ship.rotation) * ship.velocity.z;
+  const vAbs = Math.abs(vFwd);
+  // Weight of water in the bilge dulls the helm: a swamped hull barely answers.
   const waterAuthority = 1 - clamp(ship.waterLevel ?? 0, 0, 1) * FLOODING.RUDDER_PENALTY;
-  const targetOmega = -(ship.rudderAngle / SHIP.RUDDER_MAX_ANGLE)
-    * stats.turnRate * omegaCapScale * effectiveness * waterAuthority;
-  const blend = 1 - Math.exp(-dt * SHIP.RUDDER_SLEW);
-  ship.angularVelocity += (targetOmega - ship.angularVelocity) * blend;
+  const lift = rp.liftK * vFwd * vAbs * Math.sin(ship.rudderAngle) * authority * waterAuthority;
+  const damp = rp.dampV * vAbs + rp.damp0;
+  // Creep: with no way on, full helm still swings her at RUDDER_CREEP_OMEGA.
+  const creep = rp.damp0 * RUDDER_CREEP_OMEGA * (ship.rudderAngle / SHIP.RUDDER_MAX_ANGLE) * authority * waterAuthority;
+  const moment = -(lift * rp.lever) - creep;
+  ship.angularVelocity = (rp.inertia * ship.angularVelocity + moment * dt) / (rp.inertia + damp * dt);
+
+  // A HULL ON THE GROUND IS NOT BECALMED, SHE IS PINNED, AND SHE PIVOTS. With
+  // way as the only input a beached ship would only creep while her grounding
+  // breaches drown her in place; the keel is held and the rig is loaded, so
+  // she turns about the point she is stuck on (kinematic, as before).
+  if (ship.aground) {
+    const pivot = -(ship.rudderAngle / SHIP.RUDDER_MAX_ANGLE)
+      * stats.turnRate * SHIP.AGROUND_HELM_AUTHORITY * authority * waterAuthority;
+    if (Math.abs(pivot) > Math.abs(ship.angularVelocity) || Math.sign(pivot) !== Math.sign(ship.angularVelocity)) {
+      ship.angularVelocity += (pivot - ship.angularVelocity) * (1 - Math.exp(-dt * SHIP.RUDDER_SLEW));
+    }
+  }
 }
 
 /**
@@ -837,6 +912,12 @@ export class PhysicsSystem {
         (chainshotted ? 0.42 : 1) * ship.sailHeight * clamp(ship.sailIntegrity, 0, 1);
       // Inside the no-go cone with canvas set the sails visibly luff (client flutter).
       ship.luffing = offWind <= SHIP.SAIL_NO_GO_ANGLE && sailDeployment > 0.08 && !rodeOn;
+      if (ship.luffing && !ship.aground) {
+        const backed = backedCanvasOmega(ship.type, (ship.rudderAngle ?? 0) / SHIP.RUDDER_MAX_ANGLE, sailDeployment, wind.strength);
+        if (backed !== 0 && (Math.sign(backed) !== Math.sign(ship.angularVelocity) || Math.abs(backed) > Math.abs(ship.angularVelocity))) {
+          ship.angularVelocity += (backed - ship.angularVelocity) * (1 - Math.exp(-dt / RUDDER_DESIGN[ship.type].tau));
+        }
+      }
       // Full canvas held through a squall tears it out of the bolt-ropes. The
       // dwell is what makes this a decision and not a dice roll: two seconds is
       // long enough to see the pulse on the HUD and shorten sail.
@@ -890,12 +971,26 @@ export class PhysicsSystem {
       // Semi-implicit Euler at the fixed tick: the drag is taken implicitly
       // (linearised about |v|), so it can slow a hull to zero but never flip
       // her velocity, at any dt.
-      const fwdDragCoef = dragMult * (hull.c1 + (hull.c2 + luffC2) * Math.abs(currentFwd));
+      // Induced drag of the turn (physics-11): the keel's centripetal force
+      // m v w times the sine of the drift angle, linear in the way, taken
+      // implicitly with the hull drag. A hard turn costs 15-30% of her speed.
+      // In stays (luffing) the canvas is backed and she pivots on her keel;
+      // that swing is not a drawing turn, so it carries no drift-angle drag.
+      const turnDragCoef = ship.luffing ? 0 : hull.mass * RUDDER_PARAMS[ship.type].driftDrag * Math.abs(ship.angularVelocity);
+      const fwdDragCoef = dragMult * (hull.c1 + (hull.c2 + luffC2) * Math.abs(currentFwd)) + turnDragCoef;
       let forwardSpeed = (currentFwd * hull.mass + fSail * dt) / (hull.mass + fwdDragCoef * dt);
       // The keel: lateral resistance >= 25x the forward drag (KEEL_LATERAL_RATIO),
       // so turning redirects the momentum instead of skidding it away.
       const latDragCoef = hull.cLat1 + hull.cLat2 * Math.abs(currentLat);
       let lateralSpeed = (currentLat * hull.mass) / (hull.mass + latDragCoef * dt);
+      // The keel is a FOIL, not a brake (b2.1d): the sideways way it takes out
+      // is mostly turned along her length (KEEL_REDIRECT of that energy), the
+      // rest is its own induced drag. Without this a swinging hull skidded her
+      // momentum away and every tack stalled in irons.
+      if (currentFwd > 0 && forwardSpeed > 0) {
+        const shed = currentLat * currentLat - lateralSpeed * lateralSpeed;
+        if (shed > 0) forwardSpeed = Math.sqrt(forwardSpeed * forwardSpeed + KEEL_REDIRECT * shed);
+      }
       if (anchorPhase === 'biting') {
         // The rode takes up: never more than 0.6 g, never a reversal, and a
         // canvas still set cannot drive her through it.
