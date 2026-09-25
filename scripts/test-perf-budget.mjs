@@ -113,7 +113,7 @@ const ALLOW_ANY_MAP = process.env.PIRATES_BR_ANY_MAP === '1';
 
 // Ceilings live in scripts/lib/budgets.mjs (b1.7a, PLAN rule 13); test-budget-ratchet
 // fails any of them looser than at f5fee97e, on release or in the PLAN tables.
-import { PERF_BUDGETS as BUDGETS, WRECK_BUDGET, LOW_TIER_MAX_RATIO, MID_TIER_MAX_RATIO, midRatioFor } from './lib/budgets.mjs';
+import { PERF_BUDGETS as BUDGETS, WRECK_BUDGET, LOW_TIER_MAX_RATIO, MID_TIER_MAX_RATIO, midRatioFor, SHADOW_PASS_MAX_SHARE, SHADOW_POLICY_MAX_KEEP } from './lib/budgets.mjs';
 /** Seconds after the horn the dev server raises her for this measurement. */
 const WRECK_RAISE_SEC = 12;
 /** How long to wait for her after the join before giving up and skipping. */
@@ -124,6 +124,106 @@ let failures = 0;
  *  deletes that placement after planScenes, and the row-count assertion below
  *  must then FAIL. A gate that cannot fail is a bug; this shows it can. */
 const MUTATE_DROP_SCENE = process.env.PIRATES_BR_MUTATE_DROP_SCENE ?? '';
+/** MUTATION KNOB for the shadow rows (b3.1h): PIRATES_BR_MUTATE_SHADOW_LOD0=1
+ *  (or --mutate-shadow) puts the shadow proxy in 'lod0' mode, so every caster
+ *  renders its LOD0 (near) geometry into the depth map whatever it displays:
+ *  LOD0 casting everywhere. The share row and the policy-saving row must FAIL. */
+const MUTATE_SHADOW_LOD0 = process.env.PIRATES_BR_MUTATE_SHADOW_LOD0 === '1' || process.argv.includes('--mutate-shadow');
+
+/**
+ * SHADOW SPLIT — the sun's depth pass against the main pass, in triangles, plus
+ * which casters the depth pass paid for.
+ *
+ * Driven the way PASS_SPLIT (lib/cost-model-probes) drives it: one
+ * renderer.render(scene, camera) with the counter reset, the renderer's OWN
+ * shadowMap.render wrapped for that one call (it is the Renderer's gated
+ * wrapper, so the proxy swap inside it is what gets measured), and
+ * renderBufferDirect wrapped inside the pass so every depth draw is charged to
+ * the named builder root it came from. The gate is told to run this pass
+ * (shadowSkipFrames = 0) so an empty-pass skip cannot read as a free shadow.
+ */
+const SHADOW_SPLIT = (mutate) => {
+  const g = window.__piratesBR;
+  const R = g.renderer;
+  const renderer = R.renderer;
+  const info = renderer.info;
+  if (!renderer.shadowMap.enabled) return null;
+  if (R.shadowProxy) R.shadowProxy.setMode(mutate ? 'lod0' : 'policy');
+  const bucketFor = (node) => {
+    for (let c = node; c; c = c.parent) {
+      const n = c.name;
+      if (!n) continue;
+      if (n.startsWith('props-') || n.startsWith('island-') || n.startsWith('decor-') || n.startsWith('sea-rock')
+        || n.startsWith('ship') || n.startsWith('hull') || n.startsWith('cave') || n.startsWith('landmark')
+        || n.startsWith('dock') || n.startsWith('story')) return n;
+      if (c.parent === R.scene) return n;
+    }
+    return node.name || '(unnamed)';
+  };
+  const wasAuto = info.autoReset;
+  info.autoReset = false;
+  const shadowMap = renderer.shadowMap;
+  const origShadow = shadowMap.render;
+  const origRbd = renderer.renderBufferDirect;
+  const by = new Map();
+  let shadow = { calls: 0, tris: 0 };
+  let inShadow = false;
+  renderer.renderBufferDirect = function wrappedRbd(camera, scene, geometry, material, object, group) {
+    if (!inShadow) return origRbd.apply(this, arguments);
+    const t0 = info.render.triangles;
+    const out = origRbd.apply(this, arguments);
+    const k = bucketFor(object);
+    by.set(k, (by.get(k) ?? 0) + (info.render.triangles - t0));
+    return out;
+  };
+  shadowMap.render = function wrapped(...args) {
+    const c0 = info.render.calls, t0 = info.render.triangles;
+    inShadow = true;
+    try { return origShadow.apply(this, args); } finally {
+      inShadow = false;
+      shadow = { calls: info.render.calls - c0, tris: info.render.triangles - t0 };
+    }
+  };
+  let total;
+  // The same frame twice: as shipped (or mutated), then with the policy OFF
+  // (every caster renders the LOD it displays: the pre-b3.1h cost). The
+  // second number is what the policy is graded as saving.
+  let offShadowTris = null;
+  let topOn = null;
+  try {
+    R.shadowSkipFrames = 0;
+    R.lastShadowPassAt = 0;
+    info.reset();
+    renderer.render(R.scene, R.camera);
+    total = { calls: info.render.calls, tris: info.render.triangles };
+    if (R.shadowProxy) {
+      const keep = shadow;
+      const mode = R.shadowProxy.getMode();
+      R.shadowProxy.setMode('off');
+      topOn = [...by.entries()];
+      R.shadowSkipFrames = 0;
+      R.lastShadowPassAt = 0;
+      info.reset();
+      renderer.render(R.scene, R.camera);
+      offShadowTris = shadow.tris;
+      shadow = keep;
+      R.shadowProxy.setMode(mode);
+    }
+  } finally {
+    shadowMap.render = origShadow;
+    renderer.renderBufferDirect = origRbd;
+    info.reset();
+    info.autoReset = wasAuto;
+  }
+  const proxy = R.shadowProxy?.stats?.() ?? null;
+  return {
+    shadowTris: shadow.tris, shadowCalls: shadow.calls, offShadowTris,
+    mainTris: total.tris - shadow.tris, mainCalls: total.calls - shadow.calls,
+    top: (topOn ?? [...by.entries()]).sort((a, b) => b[1] - a[1]).slice(0, 10),
+    proxy,
+    proxyEnabled: R.shadowProxy ? R.shadowProxy.isEnabled() : null,
+  };
+};
 function expect(label, condition, detail = '') {
   if (condition) {
     console.log(`  ✓ ${label}`);
@@ -272,6 +372,24 @@ async function measureTier(browser, quality, { wantWreck }) {
       const sources = await page.evaluate(TALLY_DRAW_SOURCES).catch(() => []);
       results[budget.scene] = { draws: Math.round(r.draws), tris: Math.round(r.tris), peakDraws: r.peakDraws, programs: r.programs, sources };
       report(quality, budget, results[budget.scene], r);
+      const shadowShare = SHADOW_PASS_MAX_SHARE[quality];
+      if (shadowShare !== undefined) {
+        const sp = await page.evaluate(SHADOW_SPLIT, MUTATE_SHADOW_LOD0);
+        if (!sp) {
+          expect(`[${quality}] ${budget.label}: shadow map enabled`, false, 'shadowMap.enabled is false on a tier with a shadow-share row');
+        } else {
+          const share = sp.mainTris > 0 ? sp.shadowTris / sp.mainTris : Infinity;
+          console.log(`      shadow pass ${Math.round(sp.shadowTris / 1000)}k tris / ${sp.shadowCalls} draws vs main ${Math.round(sp.mainTris / 1000)}k / ${sp.mainCalls} = ${(share * 100).toFixed(1)}%`
+            + `  proxy ${sp.proxyEnabled === null ? 'ABSENT' : sp.proxyEnabled ? 'on' : 'OFF (mutated)'}${sp.proxy ? ` ${JSON.stringify(sp.proxy)}` : ''}`);
+          console.log(`      shadow by caster: ${sp.top.map(([k, v]) => `${k}=${Math.round(v / 1000)}k`).join('  ')}`);
+          results[budget.scene].shadow = sp;
+          expect(
+            `[${quality}] ${budget.label}: shadow pass <= ${Math.round(shadowShare * 100)}% of main-pass triangles`,
+            share <= shadowShare,
+            `shadow ${Math.round(sp.shadowTris / 1000)}k vs main ${Math.round(sp.mainTris / 1000)}k (${(share * 100).toFixed(1)}%)`,
+          );
+        }
+      }
       if (profile) {
         console.log(`      framebuffer ${fill?.width}x${fill?.height} = ${fill?.mpx?.toFixed(3)} Mpx at ratio ${fill?.ratio?.toFixed(4)}`);
         expect(
@@ -307,6 +425,22 @@ async function measureTier(browser, quality, { wantWreck }) {
         results.wreck = { draws: Math.round(r.draws), tris: Math.round(r.tris), peakDraws: r.peakDraws, sources: [] };
         report(quality, { scene: 'wreck', ...WRECK_BUDGET }, results.wreck, r);
       }
+    }
+
+    // THE POLICY MUST BUY SOMETHING. Summed over the graded scenes, the depth
+    // pass as shipped against the same frames with the policy off (every
+    // caster at its displayed LOD). A proxy that silently stopped swapping
+    // passes the share row on a light scene; it cannot pass this.
+    const keep = SHADOW_POLICY_MAX_KEEP[quality];
+    if (keep !== undefined) {
+      const rows = Object.values(results).filter((x) => x.shadow && x.shadow.offShadowTris !== null);
+      const on = rows.reduce((a, x) => a + x.shadow.shadowTris, 0);
+      const off = rows.reduce((a, x) => a + x.shadow.offShadowTris, 0);
+      expect(
+        `[${quality}] shadow proxy policy keeps <= ${Math.round(keep * 100)}% of the display-LOD depth pass (${rows.length} scenes)`,
+        rows.length > 0 && off > 0 && on <= off * keep,
+        `policy ${Math.round(on / 1000)}k vs display-LOD ${Math.round(off / 1000)}k tris (${off > 0 ? Math.round((on / off) * 100) : 'n/a'}%)`,
+      );
     }
 
     expect(`No page errors at quality=${quality}`, errors.length === 0, errors.join('\n'));
