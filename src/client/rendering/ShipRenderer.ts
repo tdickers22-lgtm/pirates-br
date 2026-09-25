@@ -229,6 +229,13 @@ interface HoleVis {
  *  backdrop): only a pirate aboard or alongside can see into a hold. */
 const BREACH_INBOARD_DIST_SQ = 45 * 45;
 
+/** Camera range inside which a SEALED hull draws its hold (b2-device-04). The
+ *  hold interior is ~14k verts on a galleon (floor, bilge boards, inner wall,
+ *  hammocks, cargo) behind closed planking: beyond this it only shows down the
+ *  companionway or through an open breach, so a far hull with no open breach
+ *  skips it (and its shadow-pass copy). Own ship always draws it. */
+const HOLD_INTERIOR_DIST_SQ = 60 * 60;
+
 interface ShipMeshGroup {
   root: THREE.Group;
   detailRoot: THREE.Group;
@@ -270,6 +277,11 @@ interface ShipMeshGroup {
   /** Cumulative cargo-stack variants, index 0 = tier 1 … index 3 = tier 4.
    *  Exactly one (or none) is visible; see ship.cargoGold. */
   holdCargoTiers: THREE.Object3D[];
+  /** Meshes whose material only the hold uses (merged per material, so hiding
+   *  them costs no draw call and hides nothing on deck), plus the cargo stack.
+   *  Hidden on a sealed hull beyond HOLD_INTERIOR_DIST_SQ. */
+  holdInterior: THREE.Object3D[];
+  holdInteriorShown: boolean;
   wake: ShipWake;
   /** vec4 (xyz = hull-local hole center, w = radius) driving the hull's
    *  fragment-discard breaches, one slot per UNPATCHED hole; radius 0 =
@@ -2634,6 +2646,21 @@ export class ShipRenderer {
     // team colour is a material, breaches a uniform, sails/flags/upgrades/patches
     // are all excluded above — so the merged buffers are shared and refcounted
     // instead of copied per hull. 25.7 MB of ship geometry becomes one set.
+    // b2-device-04: materials the hold uses and nothing outside it does. The
+    // merge batches by material, so the merged meshes carrying these are pure
+    // hold and can be culled without splitting a draw.
+    const holdOnlyMats = new Set<THREE.Material>();
+    interior.traverse((o) => {
+      const m = (o as THREE.Mesh).material;
+      if ((o as THREE.Mesh).isMesh && m && !Array.isArray(m)) holdOnlyMats.add(m);
+    });
+    const dropSharedMats = (o: THREE.Object3D) => {
+      if (o === interior) return;
+      const m = (o as THREE.Mesh).material;
+      if (m) for (const mm of Array.isArray(m) ? m : [m]) holdOnlyMats.delete(mm);
+      for (const c of o.children) dropSharedMats(c);
+    };
+    dropSharedMats(group);
     mergeStaticMeshes(group, mergeExclude, `detail-${ship.type}`);
 
     // ── Wake foam ─────────────────────────────────────────────
@@ -2686,6 +2713,18 @@ export class ShipRenderer {
       nightLight,
       holdWater,
       holdCargoTiers: holdCargo.tiers,
+      holdInterior: [
+        holdCargo.group,
+        ...(() => {
+          const out: THREE.Object3D[] = [];
+          detailRoot.traverse((o) => {
+            const m = (o as THREE.Mesh).material;
+            if ((o as THREE.Mesh).isMesh && m && !Array.isArray(m) && holdOnlyMats.has(m)) out.push(o);
+          });
+          return out;
+        })(),
+      ],
+      holdInteriorShown: true,
       wake,
       hullHoleUniform,
       hullHoleEnds,
@@ -3720,6 +3759,7 @@ void main() {
       this.breachFxUniforms.uTime.value = t;
       this.breachFxUniforms.uDay.value = 1 - 0.85 * this.nightFactor;
       const breachNear = distSq < BREACH_INBOARD_DIST_SQ;
+      let openBreaches = 0;
       // Breaches are ENTITIES: diff the wire list against the decals we already
       // built, keyed by ShipHole.id. A new id spawns a decal exactly where the
       // shot landed; a patched flip swaps it for crossed planks at the SAME
@@ -3782,6 +3822,7 @@ void main() {
         for (const vis of mesh.holeVis.values()) {
           if (vis.marker.visible) vis.marker.scale.setScalar(markerPulse * vis.markerScale);
         }
+        openBreaches = holeSlot;
         for (; holeSlot < mesh.hullHoleUniform.value.length; holeSlot++) {
           mesh.hullHoleUniform.value[holeSlot].set(0, 0, 0, 0);
           mesh.hullHoleEnds.value[holeSlot].set(0, 0, 0, 0);
@@ -3793,6 +3834,13 @@ void main() {
       // stack GROWS as they bank and empties the moment a boarder cuts it out of
       // them. This is the only place in the game where "who is winning" is a
       // question you answer by looking at a ship instead of reading a number.
+      // b2-device-04: a sealed far hull skips its hold (see HOLD_INTERIOR_DIST_SQ).
+      const holdShown = !cameraPosition || localCrewShip || openBreaches > 0 || ship.sinking
+        || distSq < HOLD_INTERIOR_DIST_SQ;
+      if (holdShown !== mesh.holdInteriorShown) {
+        mesh.holdInteriorShown = holdShown;
+        for (let i = 0; i < mesh.holdInterior.length; i += 1) mesh.holdInterior[i].visible = holdShown;
+      }
       if (mesh.holdCargoTiers.length > 0) {
         const tier = ship.sinking ? 0 : cargoTier(ship.cargoGold ?? 0);
         for (let i = 0; i < mesh.holdCargoTiers.length; i += 1) {
