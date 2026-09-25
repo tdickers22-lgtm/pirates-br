@@ -79,7 +79,6 @@ const methods = new Map();
   const KNOWN_DEAD = {
     startFire: 'burning-ship fire loop: needs a Game/CombatFx caller (b2.3 hook)',
     playGoldCount: 'HUD gold tally counter (HUD lane)',
-    playFootLanding: 'jump/fall landing (vy > 3 m/s): Game.ts updateFootsteps caller (b2.3 hook, handoff in b2.4.json)',
   };
   const unexpected = dead.filter((n) => !(n in KNOWN_DEAD));
   const stale = Object.keys(KNOWN_DEAD).filter((n) => !dead.includes(n));

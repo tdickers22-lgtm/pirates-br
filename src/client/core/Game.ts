@@ -7399,6 +7399,8 @@ export class Game {
    *  two-step gait cycle, so a step sounds on every planted foot. */
   private static readonly FOOTSTEP_STRIDE_M = 1.4;
   private readonly footstepDistance = new Map<string, number>();
+  /** Fastest fall (m/s, >0) while airborne, per pirate: the landing thud on touchdown (b2-ask-04). */
+  private readonly footFallSpeed = new Map<string, number>();
 
   /**
    * Stride-locked footfalls for the local pirate (dry, first-person) and for
@@ -7426,8 +7428,18 @@ export class Game {
         && Math.abs(player.velocity.y ?? 0) < 2.2;
       // Aboard a ship the server keeps velocity deck-relative (the hull's carry
       // is applied to position), so this is the pirate's own walking speed.
-      const speed = Math.hypot(player.velocity.x, player.velocity.z);
-      if (!grounded || speed < 0.55) {
+      // b2-ask-04: a mast climb steps on the ladder rungs (vertical travel).
+      const climbing = player.state === 'alive' && player.mastClimb !== null;
+      const speed = climbing ? Math.abs(player.velocity.y ?? 0) : Math.hypot(player.velocity.x, player.velocity.z);
+      const vy = player.velocity.y ?? 0;
+      if (!grounded && !climbing && player.state === 'alive' && vy < 0) {
+        this.footFallSpeed.set(player.id, Math.max(this.footFallSpeed.get(player.id) ?? 0, -vy));
+      } else if (grounded) {
+        const fall = this.footFallSpeed.get(player.id) ?? 0;
+        this.footFallSpeed.delete(player.id);
+        if (fall > 3) this.audio.playFootLanding(this.getFootstepSurface(player), fall, distance, isLocal ? undefined : player.position);
+      }
+      if ((!grounded && !climbing) || speed < 0.55) {
         this.footstepDistance.set(player.id, 0);
         continue;
       }
@@ -7442,7 +7454,7 @@ export class Game {
       // (0.55 ×) and to anything the terrain is slowing down.
       const running = speed > PLAYER.MOVE_SPEED * 0.8 && !player.crouching;
       this.audio.playFootstep(
-        this.getFootstepSurface(player),
+        climbing ? 'ladder' : this.getFootstepSurface(player),
         running,
         distance,
         isLocal ? undefined : player.position,
@@ -7450,6 +7462,9 @@ export class Game {
     }
     for (const id of [...this.footstepDistance.keys()]) {
       if (!seen.has(id)) this.footstepDistance.delete(id);
+    }
+    for (const id of [...this.footFallSpeed.keys()]) {
+      if (!seen.has(id)) this.footFallSpeed.delete(id);
     }
   }
 
@@ -7460,14 +7475,17 @@ export class Game {
     if (!island) return 'deck';
     const x = player.position.x;
     const z = player.position.z;
-    // Dock planking reads as a deck, not as the beach it is moored off.
+    // Dock planking over water: its own hollow plank voice (b2-ask-04).
     const dock = island.dock;
     if (dock) {
       const local = toDockLocalPoint(dock, x, z);
       if (Math.abs(local.x) <= dock.width * 0.5 + 0.6 && Math.abs(local.z) <= dock.length * 0.5 + 0.6) {
-        return 'deck';
+        return 'dock';
       }
     }
+    // Wading: feet under 0.05..0.9 m of sea splash, whatever the bed is.
+    const seaOverFeet = gerstnerHeight(x, z, this.ocean.getTime(), WAVE_PARAMS) - player.position.y;
+    if (seaOverFeet > 0.05 && seaOverFeet < 0.9) return 'water_shallow';
     // Inside a cave the floor is cut stone.
     if (isInsideCaveInterior(island, x, player.position.y, z)) return 'stone';
     const { angle, distRatio } = getIslandDistRatio(island, x, z);
