@@ -12,7 +12,7 @@ import { geyserEruptionLevel, getIslandSurfaceY } from '../../../shared/utils/in
 import { refreshFrozenChild } from '../../rendering/three-util.js';
 import { ensureMeshGround } from './GroundTruth.js';
 import type { IslandBuildCtx } from './context.js';
-import { setZoneSourceProvider, type IslandSoundZone } from '../../audio/Ambience.js';
+import { setZoneSourceProvider, type IslandSoundZone, type ZonePoint } from '../../audio/Ambience.js';
 import type { IslandGeyser } from '../../../shared/types/index.js';
 
 // ── Island sound zones (b2.4h, audio-07) ─────────────────────────────────────
@@ -30,21 +30,42 @@ type SoundZoneRecord = {
 const soundZones = new Map<string, SoundZoneRecord>();
 let soundWorldTime: number | null = null;
 
+// The audio reads the zones every render frame, so each record carries one reused output zone
+// (its geyser entries rewritten in place) and the accessor fills one reused array: no object,
+// spread or .map per frame (b2 gate, frame-allocation budget). The returned array and zones are
+// valid until the next call; the audio never keeps them.
+type ZoneOut = IslandSoundZone & { geysers: (ZonePoint & { level: number })[] };
+const zoneOut = new WeakMap<SoundZoneRecord, ZoneOut>();
+const zonesScratch: IslandSoundZone[] = [];
+
 /** Read-only accessor for the audio (installed as Ambience's zone provider). */
 export function readVolcanicSoundZones(): IslandSoundZone[] {
-  const out: IslandSoundZone[] = [];
-  for (const [id, rec] of soundZones) {
+  zonesScratch.length = 0;
+  soundZones.forEach(visitSoundZone);
+  return zonesScratch;
+}
+
+/** One registered island into zonesScratch (module-level so the per-frame walk allocates no
+ *  iterator, entry tuple or closure). Map.forEach tolerates deleting the current key. */
+function visitSoundZone(rec: SoundZoneRecord, id: string): void {
+  const out = zonesScratch;
+  {
     const live = rec.meshes.get(id);
-    if (live !== undefined && live !== rec.group) { soundZones.delete(id); continue; }
+    if (live !== undefined && live !== rec.group) { soundZones.delete(id); return; }
     // Not (yet / any more) the live mesh: mid-build, or the match rebuild cleared the map.
-    if (live === undefined) continue;
+    if (live === undefined) return;
     const t = soundWorldTime;
-    out.push({
-      ...rec.zone,
-      geysers: rec.vents.map((v) => ({ x: v.x, y: v.y, z: v.z, level: t === null ? 0 : geyserEruptionLevel(v.geyser, t) })),
-    });
+    let z = zoneOut.get(rec);
+    // Rebuilt only if the record changed after it went live (a vent or caldera registered late).
+    if (!z || z.geysers.length !== rec.vents.length || z.caldera !== rec.zone.caldera) {
+      z = { ...rec.zone, geysers: rec.vents.map((v) => ({ x: v.x, y: v.y, z: v.z, level: 0 })) };
+      zoneOut.set(rec, z);
+    }
+    for (let i = 0; i < rec.vents.length; i++) {
+      z.geysers[i].level = t === null ? 0 : geyserEruptionLevel(rec.vents[i].geyser, t);
+    }
+    out.push(z);
   }
-  return out;
 }
 setZoneSourceProvider(readVolcanicSoundZones);
 

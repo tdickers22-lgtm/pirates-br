@@ -79,13 +79,16 @@ export interface GeyserVoice { hiss: number; roar: number; cutoffHz: number; gai
  * The geyser: a steam hiss that builds as the vent starts to spit, a low roar once the jet is
  * up, and a brightening cutoff. Every output is non-decreasing in `level` at a fixed distance.
  */
-export function geyserVoice(level: number, distM: number): GeyserVoice {
+export function geyserVoice(level: number, distM: number, out?: GeyserVoice): GeyserVoice {
   const lv = clamp01(level);
   const gain = zoneFalloff(distM, 24, GEYSER_AUDIBLE_M);
   const hiss = (0.22 * smooth(0, 0.12, lv) + 0.78 * lv) * gain;
   const roar = Math.pow(lv, 1.6) * gain;
   const cutoffHz = 1400 + 5200 * lv;
-  return { hiss, roar, cutoffHz, gain };
+  // `out` lets the per-frame planner reuse one record (b2 gate: frame-allocation budget).
+  if (!out) return { hiss, roar, cutoffHz, gain };
+  out.hiss = hiss; out.roar = roar; out.cutoffHz = cutoffHz; out.gain = gain;
+  return out;
 }
 
 /** Caldera rumble 0..1: full within 30 m of the crater, gone past CALDERA_AUDIBLE_M. */
@@ -119,19 +122,22 @@ export interface JungleLevels { dayBirds: number; insects: number; frogs: number
  * deep inside the island, 0 from 1.15 radii out (so the canopy thins toward the beach and the
  * sea takes over).
  */
-export function jungleLevels(s: { biome: IslandBiome | string; distToCentreM: number; radiusM: number; night01: number; storm01: number }): JungleLevels {
+export function jungleLevels(
+  s: { biome: IslandBiome | string; distToCentreM: number; radiusM: number; night01: number; storm01: number },
+  out?: JungleLevels,
+): JungleLevels {
   const w = JUNGLE_WEIGHT[s.biome as IslandBiome] ?? 0.5;
   const r = Math.max(1, fin(s.radiusM, 1));
   const inland = 1 - smooth(0.55, 1.15, fin(s.distToCentreM, Infinity) / r);
   const night = clamp01(s.night01);
   const storm = clamp01(s.storm01);
   const base = w * inland;
-  return {
-    inland,
-    dayBirds: base * (1 - night) * (1 - storm * 0.85),
-    insects: base * night * (1 - storm * 0.7),
-    frogs: base * smooth(0.3, 0.8, night) * (1 - storm * 0.6) * (s.biome === 'lush' ? 1 : 0.55),
-  };
+  const dayBirds = base * (1 - night) * (1 - storm * 0.85);
+  const insects = base * night * (1 - storm * 0.7);
+  const frogs = base * smooth(0.3, 0.8, night) * (1 - storm * 0.6) * (s.biome === 'lush' ? 1 : 0.55);
+  if (!out) return { inland, dayBirds, insects, frogs };
+  out.inland = inland; out.dayBirds = dayBirds; out.insects = insects; out.frogs = frogs;
+  return out;
 }
 
 export interface ZoneCall { key: string; pos: ZonePoint; volume: number; rate: number; fallback: 'bird' | 'frog' | 'bubble' | 'steam' }
@@ -156,17 +162,31 @@ export class Ambience {
   private nextBirdAt = 0;
   private nextFrogAt = 0;
   private nextBubbleAt = 0;
-  private prevGeyserLevel = new Map<string, number>();
+  /** Last geyser level per island, by vent index (onset detection). */
+  private prevGeyserLevel = new Map<string, number[]>();
+  // Per-frame scratch (b2 gate, frame-allocation): update() runs every render frame, so the frame,
+  // its geyser record, the jungle read and the voice read are reused, never rebuilt. The returned
+  // frame is valid until the next update() on this planner.
+  private readonly frame: ZoneFrame = {
+    caldera: 0, lava: 0, insects: 0, nearIsland: false, calls: [],
+    geyser: { hiss: 0, roar: 0, cutoffHz: 1400, gain: 0, pos: null, level: 0 },
+  };
+  private readonly geyserPos: ZonePoint = { x: 0, y: 0, z: 0 };
+  private readonly jungle: JungleLevels = { dayBirds: 0, insects: 0, frogs: 0, inland: 0 };
+  private readonly voice: GeyserVoice = { hiss: 0, roar: 0, cutoffHz: 1400, gain: 0 };
+  private readonly jungleIn = { biome: 'lush' as IslandBiome | string, distToCentreM: 0, radiusM: 0, night01: 0, storm01: 0 };
   last: ZoneFrame | null = null;
 
   constructor(private readonly rand: () => number = Math.random) {}
 
   update(now: number, ear: ZonePoint, night01: number, storm01: number, zones: readonly IslandSoundZone[]): ZoneFrame {
     const t = fin(now);
-    const out: ZoneFrame = {
-      caldera: 0, lava: 0, insects: 0, nearIsland: false, calls: [],
-      geyser: { hiss: 0, roar: 0, cutoffHz: 1400, gain: 0, pos: null, level: 0 },
-    };
+    const out = this.frame;
+    out.caldera = 0; out.lava = 0; out.insects = 0; out.nearIsland = false; out.calls.length = 0;
+    const og = out.geyser;
+    og.hiss = 0; og.roar = 0; og.cutoffHz = 1400; og.gain = 0; og.pos = null; og.level = 0;
+    const jin = this.jungleIn;
+    jin.night01 = night01; jin.storm01 = storm01;
     let birds = 0;
     let frogs = 0;
     let lavaPos: ZonePoint | null = null;
@@ -175,7 +195,8 @@ export class Ambience {
       if (!z || !Number.isFinite(z.x) || !Number.isFinite(z.z)) continue;
       const dc = Math.hypot(ear.x - z.x, ear.z - z.z);
       if (dc < fin(z.radius, 0) + 220) out.nearIsland = true;
-      const j = jungleLevels({ biome: z.biome, distToCentreM: dc, radiusM: z.radius, night01, storm01 });
+      jin.biome = z.biome; jin.distToCentreM = dc; jin.radiusM = z.radius;
+      const j = jungleLevels(jin, this.jungle);
       birds = Math.max(birds, j.dayBirds);
       out.insects = Math.max(out.insects, j.insects);
       frogs = Math.max(frogs, j.frogs);
@@ -185,15 +206,22 @@ export class Ambience {
         const lb = lavaBubble(d);
         if (lb.level > out.lava) { out.lava = lb.level; lavaPos = z.caldera; lavaPerSec = lb.perSec; }
       }
+      let prevLevels = z.geysers.length > 0 ? this.prevGeyserLevel.get(z.islandId) : undefined;
+      if (z.geysers.length > 0 && !prevLevels) { prevLevels = []; this.prevGeyserLevel.set(z.islandId, prevLevels); }
       for (let i = 0; i < z.geysers.length; i++) {
         const g = z.geysers[i];
         const lv = clamp01(g.level);
-        const v = geyserVoice(lv, dist(ear, g));
-        if (v.hiss + v.roar > out.geyser.hiss + out.geyser.roar) out.geyser = { ...v, pos: { x: g.x, y: g.y, z: g.z }, level: lv };
+        const v = geyserVoice(lv, dist(ear, g), this.voice);
+        if (v.hiss + v.roar > og.hiss + og.roar) {
+          og.hiss = v.hiss; og.roar = v.roar; og.cutoffHz = v.cutoffHz; og.gain = v.gain; og.level = lv;
+          const gp = this.geyserPos;
+          gp.x = g.x; gp.y = g.y; gp.z = g.z;
+          og.pos = gp;
+        }
         // Onset: the vent crosses 0.15 on the way up -> one steam burst at the vent.
-        const id = `${z.islandId}:${i}`;
-        const prev = this.prevGeyserLevel.get(id) ?? lv;
-        this.prevGeyserLevel.set(id, lv);
+        const pl = prevLevels as number[];
+        const prev = i < pl.length && Number.isFinite(pl[i]) ? pl[i] : lv;
+        pl[i] = lv;
         if (prev < 0.15 && lv >= 0.15 && v.gain > 0.02) {
           out.calls.push({ key: 'steam.hiss', pos: { x: g.x, y: g.y + 1.5, z: g.z }, volume: Math.min(1, 0.4 + v.gain), rate: 0.9 + this.rand() * 0.15, fallback: 'steam' });
         }
@@ -201,22 +229,17 @@ export class Ambience {
     }
     // Scheduled one-shots: a bird every ~2.5-7 s at full canopy, a frog chorus by night,
     // lava bubbles at the crater. Positions scatter around the ear (birds up in the canopy).
-    const around = (rMin: number, rMax: number, up: number): ZonePoint => {
-      const a = this.rand() * Math.PI * 2;
-      const r = rMin + this.rand() * (rMax - rMin);
-      return { x: ear.x + Math.cos(a) * r, y: ear.y + up * this.rand(), z: ear.z + Math.sin(a) * r };
-    };
     if (birds > 0.05) {
       if (this.nextBirdAt === 0 || this.nextBirdAt > t + 30) this.nextBirdAt = t + 1 + this.rand() * 3;
       else if (t >= this.nextBirdAt) {
-        out.calls.push({ key: 'bird.day', pos: around(12, 40, 14), volume: 0.35 + 0.5 * birds, rate: 0.92 + this.rand() * 0.18, fallback: 'bird' });
+        out.calls.push({ key: 'bird.day', pos: this.around(ear, 12, 40, 14), volume: 0.35 + 0.5 * birds, rate: 0.92 + this.rand() * 0.18, fallback: 'bird' });
         this.nextBirdAt = t + (2.5 + this.rand() * 4.5) / Math.max(0.35, birds);
       }
     } else this.nextBirdAt = 0;
     if (frogs > 0.05) {
       if (this.nextFrogAt === 0 || this.nextFrogAt > t + 30) this.nextFrogAt = t + 0.5 + this.rand() * 2;
       else if (t >= this.nextFrogAt) {
-        out.calls.push({ key: 'creature.frog', pos: around(8, 30, 0.5), volume: 0.3 + 0.45 * frogs, rate: 0.85 + this.rand() * 0.3, fallback: 'frog' });
+        out.calls.push({ key: 'creature.frog', pos: this.around(ear, 8, 30, 0.5), volume: 0.3 + 0.45 * frogs, rate: 0.85 + this.rand() * 0.3, fallback: 'frog' });
         this.nextFrogAt = t + (1.8 + this.rand() * 3.5) / Math.max(0.35, frogs);
       }
     } else this.nextFrogAt = 0;
@@ -230,5 +253,12 @@ export class Ambience {
     } else this.nextBubbleAt = 0;
     this.last = out;
     return out;
+  }
+
+  /** A point scattered around the ear (a method, not a per-frame closure: frame-allocation). */
+  private around(ear: ZonePoint, rMin: number, rMax: number, up: number): ZonePoint {
+    const a = this.rand() * Math.PI * 2;
+    const r = rMin + this.rand() * (rMax - rMin);
+    return { x: ear.x + Math.cos(a) * r, y: ear.y + up * this.rand(), z: ear.z + Math.sin(a) * r };
   }
 }

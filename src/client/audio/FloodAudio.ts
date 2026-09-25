@@ -92,6 +92,9 @@ function finite(n: number | undefined, d = 0): number {
   return typeof n === 'number' && Number.isFinite(n) ? n : d;
 }
 
+const byDistance = (a: { d: number }, b: { d: number }): number => a.d - b.d;
+const holePos = (h: ShipHole): FloodVec => ({ x: h.x, y: h.y, z: h.z });
+
 export class FloodAudio {
   /** The listener's space applied to its OWN hull (b2.4g): +4 dB below deck, 1.2 kHz / -6 dB heard
    *  from the weather deck. Other hulls keep FLOOD_HULL_OCCLUSION (never both). SoundEngine sets it. */
@@ -101,6 +104,13 @@ export class FloodAudio {
   private prevRepair = 0;
   /** Loop gains written last update, per ship (gates and probes). */
   readonly lastGains = new Map<string, { gush: number[]; slosh: number; gurgle: number }>();
+
+  // Per-frame scratch (b2 gate, frame-allocation): the candidate list, its records, the kept-id
+  // set and the hole-size map are reused every update, never rebuilt.
+  private readonly candPool: Array<{ ship: FloodAudioShip; d: number; own: boolean }> = [];
+  private readonly cands: Array<{ ship: FloodAudioShip; d: number; own: boolean }> = [];
+  private readonly keep = new Set<string>();
+  private readonly holeSize = new Map<number, number | undefined>();
 
   constructor(private readonly host: FloodAudioHost) {}
 
@@ -115,17 +125,23 @@ export class FloodAudio {
     const dt = Math.max(0, Math.min(0.25, finite(frame.dt)));
     const L = frame.listener;
     // Which hulls to voice: the one underfoot, then the nearest others within earshot.
-    const cands: Array<{ ship: FloodAudioShip; d: number; own: boolean }> = [];
+    const cands = this.cands;
+    cands.length = 0;
     for (const ship of frame.ships) {
       if (!ship || typeof ship.id !== 'string' || ship.alive === false) continue;
       const own = ship.id === frame.aboardShipId;
       const d = dist(L, ship.position);
       if (!own && !(d <= FLOOD_AUDIBLE_M)) continue;
-      cands.push({ ship, d: own ? -1 : d, own });
+      let c = this.candPool[cands.length];
+      if (!c) { c = { ship, d: 0, own: false }; this.candPool.push(c); }
+      c.ship = ship; c.d = own ? -1 : d; c.own = own;
+      cands.push(c);
     }
-    cands.sort((a, b) => a.d - b.d);
-    const keep = new Set<string>();
-    for (const c of cands.slice(0, FLOOD_MAX_SHIPS)) {
+    cands.sort(byDistance);
+    const keep = this.keep;
+    keep.clear();
+    for (let i = 0; i < cands.length && i < FLOOD_MAX_SHIPS; i++) {
+      const c = cands[i];
       keep.add(c.ship.id);
       this.updateShip(c.ship, c.own, dt, L, frame.emitters(c.ship.id) ?? []);
     }
@@ -164,8 +180,8 @@ export class FloodAudio {
       this.tracks.set(ship.id, tr);
     }
     const occl = own ? this.ownSpace.gain : FLOOD_HULL_OCCLUSION;
-    const holeSize = new Map<number, number | undefined>();
-    const holePos = (h: ShipHole): FloodVec => ({ x: h.x, y: h.y, z: h.z });
+    const holeSize = this.holeSize;
+    holeSize.clear();
     // ── edges on the hole list: punched, patched, plank knocked off ──
     for (const h of ship.holes ?? []) {
       if (!h || typeof h.id !== 'number') continue;
