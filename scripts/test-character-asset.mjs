@@ -559,5 +559,45 @@ if (argv.includes('--glb')) {
   }
 }
 
+// ── CLIPS (b3.2b, animations-01/02, characters-05) ────────────────────────
+// Every clip id the player state machine (PlayerRigFactory: lowerClip / upperClip / setLayer / the death
+// clip per cause) can request exists in public/assets/models/pirate_clips.glb, is non-empty (>= 2 keys,
+// >= 50 animated bones) and sits on an exact 30 fps grid, and every animated node is a bone of the body
+// the clips drive. The id list is READ FROM THE SOURCE, so a new state that asks for a missing clip fails
+// here. Anatomy of each clip (knees, elbows, head look) is test-anim-rig-anatomy.mjs.
+// Red: --clips public/assets/models/pirate_base.glb (the legacy 24-bone rig).
+if (!argv.includes('--glb')) {
+  const CLIPS = argv.includes('--clips') ? argv[argv.indexOf('--clips') + 1] : `${ROOT}public/assets/models/pirate_clips.glb`;
+  console.log(`\nclips (${CLIPS.replace(ROOT, '')})`);
+  const src = readFileSync(`${ROOT}src/client/rendering/factories/PlayerRigFactory.ts`, 'utf8');
+  const wanted = new Set();
+  for (const line of src.split('\n')) {
+    if (/\breturn\b|const clip = /.test(line)) for (const m of line.matchAll(/(?:return|\?|:)\s*'([a-z][a-z0-9_]*)'/g)) wanted.add(m[1]);
+    for (const m of line.matchAll(/setLayer\(rig, '(?:lower|upper)', '([a-z][a-z0-9_]*)'\)/g)) wanted.add(m[1]);
+  }
+  const ids = [...wanted].sort();
+  expect(`state-machine clip ids read from PlayerRigFactory.ts (${ids.length}: incl. idle, hit_front, death_shot, death_drown)`,
+    ids.length >= 20 && ['idle', 'hit_front', 'death_shot', 'death_drown', 'cutlass_swing_b'].every((x) => wanted.has(x)), ids.join(', '));
+  const L = existsSync(CLIPS) ? readGlb(CLIPS) : null;
+  expect('clip library present', !!L);
+  const anims = new Map((L?.gltf.animations ?? []).map((a) => [a.name, a]));
+  const absent = ids.filter((id) => !anims.has(id));
+  expect(`every requested clip id exists (${ids.length - absent.length}/${ids.length})`, !absent.length, absent.join(', '));
+  const thin = []; const off = []; const foreign = new Set();
+  const male = existsSync(`${OUT}/pirate_base_male.glb`) ? readGlb(`${OUT}/pirate_base_male.glb`).gltf : null;
+  const bones = new Set((male?.skins?.[0]?.joints ?? []).map((j) => male.nodes[j].name));
+  for (const id of ids.filter((x) => anims.has(x))) {
+    const a = anims.get(id);
+    const t = accessor(L, a.samplers[a.channels[0].sampler].input).map((x) => x[0]);
+    const rot = new Set(a.channels.filter((c) => c.target.path === 'rotation').map((c) => c.target.node));
+    if (t.length < 2 || rot.size < 50) thin.push(`${id} (${t.length} keys, ${rot.size} bones)`);
+    if (t.some((x, i) => Math.abs(x - i / 30) > 1e-4)) off.push(id);
+    for (const c of a.channels) { const nm = L.gltf.nodes[c.target.node].name; if (!bones.has(nm)) foreign.add(nm); }
+  }
+  expect('every requested clip is non-empty: >= 2 keys and >= 50 animated bones', !thin.length, thin.join(', '));
+  expect('every requested clip on an exact 30 fps grid', !off.length, off.join(', '));
+  expect(`every animated node is a bone of pirate_base_male (${bones.size} joints)`, bones.size >= 57 && !foreign.size, [...foreign].join(', '));
+}
+
 console.log(`\n${checks} checks, ${failures} failed`);
 process.exit(failures ? 1 : 0);

@@ -161,6 +161,11 @@ export const LOGIC = [
   // skinned vertices, pure GLB parse, ~0.3 s. Red: --glb public/assets/models/pirate_base.glb (23 bones,
   // 0 UVs, no eyes) and --glb on a build_pirates.py --raw export (head 1:7.79, centre 1.69).
   quick(tsx('test-character-asset.mjs')),
+  // test-anim-rig-anatomy (b3.2b): every pirate_clips.glb clip at 21 phases, FK on the GLB nodes: knees
+  // about the thigh hinge, elbows about the shoulder-frame clinical hinge (humeral rotation ext <= 145,
+  // int <= 90, bend <= 150 deg; negative controls prove a backward fold fails), head pitch raises the gaze,
+  // ids / 30 fps / root motion only on roll-vault-slide. ~0.3 s. Red: --glb public/assets/models/pirate_base.glb (3/33).
+  quick(plain('test-anim-rig-anatomy.mjs')),
   quick(tsx('test-ship-dynamics.mjs')),
   quick(tsx('test-ship-ladder.mjs')),
   quick(tsx('test-server-fixes.mjs')),

@@ -238,7 +238,7 @@ def gap_layers(gid, sk, local, pel, t, T):
     elif gid == "spyglass":  # right hand brings the glass to the right eye, left hand steadies the barrel
         layer(sk, local, "upperarm_r", qaxis(X, -1.15))
         layer(sk, local, "upperarm_r", qaxis(Y, 0.55))
-        flex(sk, local, "lowerarm_r", 2.0)
+        flex(sk, local, "lowerarm_r", 1.75)   # 2.0 on top of the idle base folded 156 deg (> 150, anatomy gate)
         layer(sk, local, "upperarm_l", qaxis(X, -1.0))
         layer(sk, local, "upperarm_l", qaxis(Y, -0.35))
         flex(sk, local, "lowerarm_l", 1.35)

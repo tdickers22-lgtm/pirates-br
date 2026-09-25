@@ -1,10 +1,19 @@
 #!/usr/bin/env node
 // Clip anatomy gate (b3.2b, findings animations-01/02, characters-05): every clip of the pirate clip library,
 // sampled at 21 phases with forward kinematics on its own node hierarchy (pure node, no three.js, < 2 s):
-//   knees and elbows never hyperextend or bend backward: signed flexion about the anatomical hinge >= -0.05 rad
-//   (margin = -flexion <= +0.05). The hinge is fixed to the PARENT bone and taken from the rest pose:
-//   knee  = cross(thigh dir, back -Z)    (the calf folds behind the thigh)
-//   elbow = cross(upper-arm dir, front +Z) (the forearm folds in front of the upper arm)
+//   knees never hyperextend or bend backward: signed flexion about the anatomical hinge >= -0.05 rad
+//   (margin = -flexion <= +0.05). The knee hinge is fixed to the thigh bone, from the rest pose:
+//   knee = cross(thigh dir, back -Z) (the calf folds behind the thigh).
+//   elbows: the UAL rig's upper-arm bone does NOT carry the humeral axial rotation (the retarget copies world
+//   deltas; in static idles the bend plane already sits 60 deg off the upper-arm bone's rest hinge, and the ten
+//   frames a bone-fixed hinge flagged render as natural poses: /tmp/pbr-b32b-sheet, b3.2.json). So the elbow
+//   hinge is taken the clinical way, relative to the SHOULDER (clavicle) frame: the rest hinge
+//   cross(upper-arm dir, front +Z) carried to the current upper-arm direction by the swing-only rotation
+//   from the two clinical references (arm at 90 deg abduction = the rest T, and arm at the side), keeping the
+//   one that needs less humeral rotation psi. Anatomy bounds: external rotation <= 145 deg (thrower's layback),
+//   internal <= 90 deg, bend <= 150 deg. margin = the excess in rad (0.05 like the knees) whenever the elbow is
+//   bent >= 0.2 rad (below that the bend plane is undefined). A backward fold (psi ~ 180) always fails, and the
+//   gate proves it on synthetic poses before grading the clips (negative controls).
 //   head look pitch +0.4 about the head's rest right axis (-X, the pirate faces +Z) raises the gaze in every clip.
 //   every clip id the state machine plays exists, is non-empty and sits on an exact 30 fps grid.
 // Red: node scripts/test-anim-rig-anatomy.mjs --glb public/assets/models/pirate_base.glb (the legacy 24-bone rig).
@@ -76,8 +85,37 @@ for (const [id, a, b, , fwd] of LIMBS) {
   const dir = unit(sub(REST.wp.get(B[b]), REST.wp.get(B[a])));
   hinge[id] = qrot(qinv(REST.wr.get(B[a])), unit(cross(dir, fwd)));
 }
+const swingQ = (a, b) => { const c = cross(a, b); const d = dot(a, b); if (d < -0.9999) return [1, 0, 0, 0]; return unit([c[0], c[1], c[2], 1 + d]); };
+const ELBOW = { extMax: 145 * Math.PI / 180, intMax: 90 * Math.PI / 180, bendMax: 150 * Math.PI / 180, bendMin: 0.2 };
+const ARM = {}; // per side, in the clavicle (shoulder) frame
+for (const side of ['l', 'r']) {
+  const ja = B['upperarm_' + side]; const jb = B['lowerarm_' + side]; const js = parent.get(ja);
+  const dRest = unit(qrot(qinv(REST.wr.get(js)), sub(REST.wp.get(jb), REST.wp.get(ja))));
+  const hRest = unit(qrot(qinv(REST.wr.get(js)), qrot(REST.wr.get(ja), hinge['elbow_' + side])));
+  const down = unit(qrot(qinv(REST.wr.get(js)), [0, -1, 0]));
+  ARM[side] = { ja, jb, jc: B['hand_' + side], js, dRest, hRest, down, hDown: unit(qrot(swingQ(dRest, down), hRest)), sg: side === 'l' ? 1 : -1 };
+}
+function elbowMargin(P, side) { // -> [margin rad, what]
+  const A = ARM[side]; const toS = (v) => qrot(qinv(P.wr.get(A.js)), v);
+  const u = unit(toS(sub(P.wp.get(A.jb), P.wp.get(A.ja)))); const f = unit(toS(sub(P.wp.get(A.jc), P.wp.get(A.jb))));
+  const bend = Math.acos(Math.max(-1, Math.min(1, dot(u, f))));
+  if (bend < ELBOW.bendMin) return [-1, ''];
+  const n = unit(cross(u, f));
+  const psiOf = (h) => A.sg * Math.atan2(dot(cross(h, n), u), dot(h, n)); // < 0 = external rotation
+  const p1 = psiOf(unit(qrot(swingQ(A.dRest, u), A.hRest))); const p2 = psiOf(unit(qrot(swingQ(A.down, u), A.hDown)));
+  const psi = Math.abs(p1) < Math.abs(p2) ? p1 : p2;
+  const ex = [[bend - ELBOW.bendMax, `folds ${(bend * 57.3).toFixed(0)} deg`], [-psi - ELBOW.extMax, `humeral external rotation ${(-psi * 57.3).toFixed(0)} deg`], [psi - ELBOW.intMax, `humeral internal rotation ${(psi * 57.3).toFixed(0)} deg`]];
+  return ex.reduce((m, e) => (e[0] > m[0] ? e : m));
+}
 const headRight = qrot(qinv(REST.wr.get(B.head)), [-1, 0, 0]); const headGaze = qrot(qinv(REST.wr.get(B.head)), [0, 0, 1]); const headUp = qrot(qinv(REST.wr.get(B.head)), [0, 1, 0]);
 
+{ // negative controls: the elbow metric must fail a backward fold and an over-fold, and pass a natural bend
+  const pose = (side, ang) => { const l = new Map([...restLocal].map(([i, v]) => [i, { ...v }])); const jb = B['lowerarm_' + side];
+    l.get(jb).r = qmul(qaxis(hinge['elbow_' + side], ang), restLocal.get(jb).r); return fk(l); };
+  const ctl = ['l', 'r'].map((sd) => [elbowMargin(pose(sd, -0.5), sd)[0], elbowMargin(pose(sd, 2.8), sd)[0], elbowMargin(pose(sd, 1.2), sd)[0]]);
+  expect('elbow metric negative controls: a 29 deg backward fold and a 160 deg over-fold fail, a 69 deg bend passes (both arms)',
+    ctl.every(([back, over, ok]) => back > 0.05 && over > 0.05 && ok <= 0.05), JSON.stringify(ctl.map((c) => c.map((x) => +x.toFixed(3)))));
+}
 const REQUIRED_GAPS = ['strafe_l', 'strafe_r', 'walk_back', 'run_back', 'climb', 'bail', 'hammer', 'spyglass', 'downed', 'revive', 'drown'];
 const legacyIds = existsSync(LEGACY) ? readGlb(LEGACY).gltf.animations.map((a) => a.name) : [];
 const isLibrary = !argv.includes('--glb');
@@ -92,6 +130,11 @@ for (const a of gltf.animations) {
     for (const c of ch) { const v = sample(c.s, t); if (c.path === 'rotation') local.get(c.node).r = v; else if (c.path === 'translation') local.get(c.node).t = v; }
     const P = fk(local);
     for (const [id, ja, jb, jc] of LIMBS) {
+      if (id.startsWith('elbow')) {
+        const [m, what] = elbowMargin(P, id.slice(-1));
+        if (m > clipWorst) { clipWorst = m; where = `${id} at phase ${k}/20: ${what}`; }
+        continue;
+      }
       const u = sub(P.wp.get(B[jb]), P.wp.get(B[ja])); const f = sub(P.wp.get(B[jc]), P.wp.get(B[jb]));
       const h = unit(qrot(P.wr.get(B[ja]), hinge[id]));
       const flexion = Math.atan2(dot(cross(unit(u), unit(f)), h), dot(unit(u), unit(f)));
