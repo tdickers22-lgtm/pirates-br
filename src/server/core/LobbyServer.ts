@@ -2242,6 +2242,14 @@ export class LobbyServer {
       // close() waits for keep-alive sockets; a drained host must not hang on one.
       setTimeout(resolve, 2_000).unref();
     });
+    // b2.0b: match worker threads keep the event loop alive; end them last, after
+    // the sockets above had their 2 s to drain the final boards. Never create the
+    // host here (the private field, not the lazy matchWorkerHost()).
+    if (LobbyServer.workerHost) {
+      const host = LobbyServer.workerHost;
+      LobbyServer.workerHost = undefined;
+      await host.close().catch(() => {});
+    }
   }
 
   emergencyStop(reason: string): void {

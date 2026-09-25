@@ -19,7 +19,10 @@
 //     match_ended{server_fault}), the neighbour in the SAME worker keeps
 //     ticking; a worker thread that dies faults only the matches it hosts.
 //
-// No port, no browser. Worker threads only (one Match each, a few seconds).
+//  5. SHUTDOWN: a drained LobbyServer.shutdown() terminates its worker threads.
+//
+// No browser. Worker threads (one Match each, a few seconds); section 5 binds
+// an ephemeral port (init(0)) for a real LobbyServer.
 import { readFileSync } from 'node:fs';
 
 const SEED = '20260801';
@@ -164,6 +167,42 @@ const LOBBY = readFileSync(new URL('../src/server/core/LobbyServer.ts', import.m
 expect('LobbyServer.matchFactory builds through MatchWorkerHost when PIRATES_BR_MATCH_WORKERS is set',
   /matchFactory[\s\S]{0,400}matchWorkerHost\(\)[\s\S]{0,120}createMatch\(opts\)/.test(LOBBY));
 expect('LobbyServer holds matches as MatchHandle (proxy or Match), not Match', /Map<string, MatchHandle>/.test(LOBBY) && !/:\s*Match\b(?!Handle)/.test(LOBBY));
+
+// ── 5. shutdown ends the worker threads ───────────────────────────────────
+// A live worker keeps the event loop alive: a drained LobbyServer.shutdown()
+// must terminate them, or the deploy's SIGTERM path (and any test that shuts
+// a worker lobby down without process.exit) hangs on the threads.
+console.log('\n5  LobbyServer.shutdown() terminates its match workers');
+{
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+  const { LobbyServer } = await import('../src/server/core/LobbyServer.ts');
+  const { StatsStore } = await import('../src/server/core/StatsStore.ts');
+  const TMP = mkdtempSync(path.join(tmpdir(), 'pbr-mw-'));
+  const prev = process.env.PIRATES_BR_MATCH_WORKERS;
+  process.env.PIRATES_BR_MATCH_WORKERS = '1';
+  const server = new LobbyServer();
+  server.stats = new StatsStore(path.join(TMP, 'stats.json'));
+  server.init(0);
+  let exited = 0;
+  try {
+    const lh = LobbyServer.matchWorkerHost();
+    expect('PIRATES_BR_MATCH_WORKERS=1 gives the lobby a host with one worker', lh?.workerCount === 1);
+    for (const w of lh?.workers ?? []) w.worker.once('exit', () => { exited += 1; });
+    await Promise.race([server.shutdown('test-match-worker', 0), wait(8000)]);
+    // performance.now(): the section-1 preload froze Date.now to a stepped clock.
+    const d = performance.now() + 3000;
+    while (performance.now() < d && exited === 0) await wait(20);
+    expect('shutdown() terminated the worker thread', exited === 1, `${exited} exits`);
+    expect('the lobby dropped its host (a later matchWorkerHost() starts fresh)', LobbyServer.workerHost === undefined);
+  } finally {
+    if (prev === undefined) delete process.env.PIRATES_BR_MATCH_WORKERS; else process.env.PIRATES_BR_MATCH_WORKERS = prev;
+    if (exited === 0) { try { await LobbyServer.workerHost?.close(); } catch {} }
+    LobbyServer.workerHost = undefined;
+    rmSync(TMP, { recursive: true, force: true });
+  }
+}
 
 console.log(failures === 0 ? '\nPASS match worker host' : `\nFAIL match worker host (${failures})`);
 process.exit(failures === 0 ? 0 : 1);
