@@ -9,6 +9,7 @@ import { SHIP, SHIP_STATS, PLAYER, PHYSICS } from '../src/shared/constants/index
 import { getSwimHullHalfWidth, getSwimHullVerticalT } from '../src/shared/utils/index.ts';
 import { getHullContactChain, getHullProfile, hullSurfacePointAt } from '../src/shared/hull.ts';
 import { intersectRayShipHull } from '../src/shared/raycast.ts';
+import { BALLISTIC_G } from '../src/shared/ballistics.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -167,7 +168,7 @@ console.log('\n4. A plunging ball from 40 m lands on the DECK: no hole, impact=d
   for (let tick = 0; tick < 120; tick += 1) physics.update(DT, tick * DT, [ship], [near, far], [], [], [], null);
   const target = { x: 0, y: ship.position.y + stats.height + SHIP.DECK_STAND_OFFSET + 0.15, z: 0 };
   const start = { x: 40, y: ship.position.y + 1.5, z: 0 };
-  const g = PHYSICS.GRAVITY * SHIP.CANNON_GRAVITY_MULT;
+  const g = -BALLISTIC_G; // D17 (b2.1f): the shared ballistic gravity the server steps
   const flight = 40 / 22; // slow lob so it comes down steeply
   const vel = { x: -40 / flight, y: (target.y - start.y) / flight - 0.5 * g * flight, z: 0 };
   const ball = makeBall(start, vel);

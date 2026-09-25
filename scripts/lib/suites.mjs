@@ -559,6 +559,7 @@ export const LOGIC = [
   quick(tsx('test-beacon-store.mjs')),
   quick(tsx('test-sailing-handling.mjs')),
   quick(tsx('test-anchor-turn.mjs')),
+  quick(tsx('test-ballistics.mjs')),
   tsx('test-seakeeping.mjs'), // b2.1e: 21-station buoyancy, roll periods, heel moment balance, berth heave, point loads, slams (~5 s)
   //   triage-beacons --self-test  — b2.0a (D35, rule 14): the bN.0 triage gate's red cases stay red (missing report,
   //                                 other batch, never pulled = VACUOUS, a >= 3-session signature with neither a

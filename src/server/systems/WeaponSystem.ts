@@ -1,9 +1,10 @@
 import { v4 as uuid } from 'uuid';
 import type { Player, Ship, Projectile, ProjectileType, Vec3, WeaponId } from '../../shared/types/index.js';
-import { WEAPONS, SHIP, SHIP_STATS, PLAYER, SHIP_UPGRADES } from '../../shared/constants/index.js';
+import { WEAPONS, SHIP, PLAYER, SHIP_UPGRADES } from '../../shared/constants/index.js';
 import { angleWrap, degreesToRad } from '../../shared/utils/index.js';
-import { getCannonDeckLocalPosition, getConstrainedCannonAim } from '../../shared/interactions.js';
+import { getConstrainedCannonAim } from '../../shared/interactions.js';
 import { truceRefusesCannon } from '../../shared/truce.js';
+import { cannonLaunchVelocity, cannonMuzzlePosition, hullRatesOf } from '../../shared/ballistics.js';
 
 /** Why a fire or reload press did nothing (b1.6e): Match turns it into an
  *  interact_refused nudge so a dead trigger or a dead R is never silent. */
@@ -292,13 +293,12 @@ export class WeaponSystem {
     yaw = constrained.yaw;
     pitch = constrained.pitch;
 
-    // Cannon position on ship side
-    const speed = SHIP.CANNON_SPEED;
-    const vx = Math.sin(yaw) * Math.cos(pitch) * speed;
-    const vy = Math.sin(pitch) * speed + 5; // slight upward arc
-    const vz = Math.cos(yaw) * Math.cos(pitch) * speed;
-
+    // D17 (b2.1f): the ball leaves along the barrel at the muzzle speed PLUS
+    // everything the gun is doing: her way, omega x r and the heave / roll /
+    // pitch rates the physics step measured. No invented upward kick.
     const muzzle = this.getCannonMuzzlePosition(ship, cannonIndex, yaw, pitch);
+    const launch = cannonLaunchVelocity(ship, muzzle, yaw, pitch, hullRatesOf(ship));
+    const vx = launch.x, vy = launch.y, vz = launch.z;
     const proj: Projectile = {
       id: uuid(),
       type: projType,
@@ -451,21 +451,7 @@ export class WeaponSystem {
 
   /** Single source of truth for cannon muzzle placement — Match delegates here. */
   getCannonMuzzlePosition(ship: Ship, cannonIndex: number, yaw: number, pitch: number): Vec3 {
-    const stats = SHIP_STATS[ship.type];
-    const cannonsPerSide = Math.max(1, stats.cannonCount / 2);
-    const plusXSide = cannonIndex < cannonsPerSide; // +x = port (sideOfLocalX)
-    // Muzzle x pokes outboard of the bulwark; the row z comes from the SHARED
-    // stand-point math so the visual gun, prompt zone, mount snap and muzzle
-    // always agree (the sloop's single gun per side sits amidships now).
-    const localX = (plusXSide ? 1 : -1) * (stats.width * 0.5 + 0.08);
-    const localZ = getCannonDeckLocalPosition(stats, cannonIndex).z;
-    const baseX = ship.position.x + localX * Math.cos(ship.rotation) + localZ * Math.sin(ship.rotation);
-    const baseY = ship.position.y + stats.height + 0.18;
-    const baseZ = ship.position.z + localZ * Math.cos(ship.rotation) - localX * Math.sin(ship.rotation);
-    return {
-      x: baseX + Math.sin(yaw) * Math.cos(pitch) * 0.82,
-      y: baseY + Math.sin(pitch) * 0.4,
-      z: baseZ + Math.cos(yaw) * Math.cos(pitch) * 0.82,
-    };
+    return cannonMuzzlePosition(ship, cannonIndex, yaw, pitch);
   }
+
 }

@@ -11,7 +11,8 @@ import type { WeaponSystem } from '../WeaponSystem.js';
 import type { Blackboard } from './Blackboard.js';
 import type { BotState, CrewState } from './Blackboard.js';
 import { BOT_TIERS, BOT_GUNNERY_HOLD } from './personalities.js';
-import { hullTotal, BOT_ANCHOR_RAISE_FACTOR, BOT_SAIL_RAISE_RATE, BOT_SAIL_LOWER_RATE, CANNON_GRAVITY, CANNON_VY_BOOST, FIREARM_RANGE, FIREARM_AIM_HEIGHT, BOT_RETALIATE_SECONDS, BOT_FIREARM_TURN_RATE, BOT_FIREARM_AIM_TOLERANCE, BOT_AMMO_LULL_SECONDS, BOT_AMMO_TOPUP_SECONDS, botMayFireCannons, isMooredAtBerth } from './Blackboard.js';
+import { cannonMuzzlePosition, hullPointVelocity, hullRatesOf, solveCannonAim } from '../../../shared/ballistics.js';
+import { hullTotal, BOT_ANCHOR_RAISE_FACTOR, BOT_SAIL_RAISE_RATE, BOT_SAIL_LOWER_RATE, FIREARM_RANGE, FIREARM_AIM_HEIGHT, BOT_RETALIATE_SECONDS, BOT_FIREARM_TURN_RATE, BOT_FIREARM_AIM_TOLERANCE, BOT_AMMO_LULL_SECONDS, BOT_AMMO_TOPUP_SECONDS, botMayFireCannons, isMooredAtBerth } from './Blackboard.js';
 import type { BotCrew } from './BotCrew.js';
 
 /**
@@ -864,43 +865,39 @@ export class BotPirate {
 }
 
 /**
- * Compute a yaw + pitch that lands a cannonball on `target` at its predicted position.
- * Accounts for cannon launch speed, gravity multiplier, and the +5 vy boost the cannon adds.
- * Difficulty mostly controls aim noise (lead is always applied — the original "no lead for
- * easy/medium" felt random and bad).
+ * Compute a yaw + pitch that lands a cannonball on `target` (just above her
+ * waterline, where a hole floods) with the SHARED ballistic model (b2.1f, D17):
+ * the solver works in relative velocity (target minus what the gun inherits:
+ * our way, omega x r, heave) and the true flight time, so the lead is exact at
+ * any range. Difficulty only controls aim noise.
  */
-function computeCannonAim(
+export function computeCannonAim(
   rng: () => number,
   ship: Ship,
   target: Ship,
   difficulty: 'easy' | 'medium' | 'hard',
   jitterScale = 1,
 ): { yaw: number; pitch: number } {
-  const v = SHIP.CANNON_SPEED;
-  const g = CANNON_GRAVITY;
+  // Lay the gun on the side that faces the target (+x local = port = index 0).
+  const stats = SHIP_STATS[ship.type];
+  const offX = target.position.x - ship.position.x;
+  const offZ = target.position.z - ship.position.z;
+  const localX = offX * Math.cos(ship.rotation) - offZ * Math.sin(ship.rotation);
+  const cannonIndex = localX >= 0 ? 0 : Math.max(1, stats.cannonCount / 2);
+  let yaw = Math.atan2(offX, offZ);
+  let pitch = 0.1;
+  const aimPoint = { x: target.position.x, y: target.position.y + 0.5, z: target.position.z };
+  // Two passes: the muzzle point moves a little with the barrel's lay.
+  for (let pass = 0; pass < 2; pass += 1) {
+    const muzzle = cannonMuzzlePosition(ship, cannonIndex, yaw, pitch);
+    const carrier = hullPointVelocity(ship, muzzle, hullRatesOf(ship));
+    const sol = solveCannonAim(muzzle, carrier, aimPoint, target.velocity);
+    if (!sol) { pitch = SHIP.CANNON_PITCH_MAX; break; }
+    yaw = sol.yaw;
+    pitch = sol.pitch;
+  }
 
-  // ── 1. Predict target position by lead time ─────────────────
-  // Use a 1-step iteration: estimate t with current distance, recompute predicted point.
-  const dxNow = target.position.x - ship.position.x;
-  const dzNow = target.position.z - ship.position.z;
-  const distNow = Math.sqrt(dxNow * dxNow + dzNow * dzNow);
-  const tFlight = distNow / v;
-  const leadX = target.position.x + target.velocity.x * tFlight;
-  const leadZ = target.position.z + target.velocity.z * tFlight;
-
-  let yaw = Math.atan2(leadX - ship.position.x, leadZ - ship.position.z);
-
-  // Refine once with the predicted distance (better lead at long range).
-  const dxLead = leadX - ship.position.x;
-  const dzLead = leadZ - ship.position.z;
-  const dist = Math.sqrt(dxLead * dxLead + dzLead * dzLead);
-
-  // ── 2. Solve ballistic pitch ────────────────────────────────
-  // Same height assumption: target deck ≈ ship deck. Includes vy0 boost via iteration.
-  const targetYDelta = (target.position.y - ship.position.y) || 0;
-  let pitch = ballisticPitch(dist, v, g, CANNON_VY_BOOST, targetYDelta);
-
-  // ── 3. Inject difficulty-tuned noise ────────────────────────
+  // ── Difficulty-tuned noise ────────────────────────────────────
   const scale = Math.max(0.1, jitterScale);
   const yawJitter = (difficulty === 'hard' ? 0.005
     : difficulty === 'medium' ? 0.022
@@ -911,45 +908,6 @@ function computeCannonAim(
   yaw += (rng() - 0.5) * yawJitter * 2;
   pitch += (rng() - 0.5) * pitchJitter * 2;
 
-  return { yaw, pitch: Math.max(0.02, Math.min(0.6, pitch)) };
-}
-
-/**
- * Numerically solve for launch pitch given:
- *   v       — initial speed
- *   g       — gravity magnitude (positive)
- *   d       — horizontal distance to target
- *   vyBoost — extra vy applied at muzzle (cannon adds +5)
- *   yDelta  — target_y - launcher_y (≈ 0 for ship-to-ship)
- *
- * Iterates a few Newton-style refinements; converges within 3 iterations
- * for ranges ≤ 280m and physically valid pitches.
- */
-function ballisticPitch(
-  d: number,
-  v: number,
-  g: number,
-  vyBoost: number,
-  yDelta: number,
-): number {
-  if (d < 1) return 0.05;
-  // Initial guess from no-vy0-boost closed form.
-  const ratio = Math.min(0.95, (g * d) / (v * v));
-  let theta = 0.5 * Math.asin(ratio);
-
-  for (let i = 0; i < 4; i++) {
-    const vh = v * Math.cos(theta);
-    if (vh < 0.1) break;
-    const vy0 = v * Math.sin(theta) + vyBoost;
-    const t = d / vh;
-    const yLanding = vy0 * t - 0.5 * g * t * t;
-    const error = yLanding - yDelta;
-    // Adjust: if landing too high, reduce theta; too low, raise it.
-    // Sensitivity ≈ d (rough).
-    const adjust = -error / Math.max(20, d);
-    theta += Math.max(-0.06, Math.min(0.06, adjust));
-    theta = Math.max(0.01, Math.min(0.7, theta));
-  }
-  return theta;
+  return { yaw, pitch: Math.max(SHIP.CANNON_PITCH_MIN, Math.min(SHIP.CANNON_PITCH_MAX, pitch)) };
 }
 

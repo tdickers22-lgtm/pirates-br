@@ -111,6 +111,7 @@ type HullSweepHit =
 import { intersectRayIslandProps, resolvePropCollision } from '../../shared/props.js';
 import { resolveWalkerAgainstWildlife, swimFloatVelocity } from '../../shared/locomotion.js';
 import { raymarchIslandSurface } from '../../shared/raycast.js';
+import { projectileGravity, recordHullRates, stepBallistic, trySkip } from '../../shared/ballistics.js';
 import { CLASS_TOP_SPEED, HULL_PARAMS, polarSpeed, sailPolarFraction, trimEfficiency as sailTrimEfficiency } from '../../shared/sailing.js';
 import {
   ANCHOR_HELD_DAMP, ANCHOR_TURN_SLEW, anchorHolds, anchorPivotLateral, anchorTurnOmega, rodeForwardStep, rodeSpeedFloorScale, stepAnchorPhase,
@@ -756,6 +757,8 @@ export class PhysicsSystem {
   }
   /** Rotation applied to each ship this update — deck passengers must be carried by the actual delta. */
   private shipRotationDeltas = new Map<string, number>();
+  /** Sea skips each round shot has made (physics-07); dies with the projectile. */
+  private projectileSkips = new WeakMap<object, number>();
   /** Per-ship spring-damper velocities for heave/pitch/roll wave riding. */
   /** `agroundFor` is the remaining seconds of the aground hold — see
    *  FIRST_SAIL_ASSIST.AGROUND_HOLD_SECONDS. Server-side only; the wire carries
@@ -1284,7 +1287,16 @@ export class PhysicsSystem {
         : sailHeelAngle(ship.type, fSail, offWind, signedRelative);
       const moored = !!ship.anchored
         && islands.some((isl) => !!isl.dock && berthFrameSideOf(isl.dock, ship.position.x, ship.position.z) !== 0);
+      const preY = ship.position.y, preRoll = ship.roll ?? 0, prePitch = ship.pitch ?? 0;
       this.updateShipSeakeeping(ship, stats, t, dt, windHeel, seaState, moored);
+      // The gun inherits these (b2.1f, D17): heave / roll / pitch rates this tick.
+      if (dt > 0) {
+        recordHullRates(ship, {
+          heaveRate: (ship.position.y - preY) / dt,
+          rollRate: ((ship.roll ?? 0) - preRoll) / dt,
+          pitchRate: ((ship.pitch ?? 0) - prePitch) / dt,
+        });
+      }
 
       if (ship.onFire) {
         ship.fireTimer = Math.max(0, ship.fireTimer - dt);
@@ -2182,12 +2194,10 @@ export class PhysicsSystem {
 
       const previousPosition = { ...proj.position };
 
-      // Gravity
-      proj.velocity.y += PHYSICS.GRAVITY * dt * (proj.type === 'bullet' ? 0.3 : SHIP.CANNON_GRAVITY_MULT);
-
-      proj.position.x += proj.velocity.x * dt;
-      proj.position.y += proj.velocity.y * dt;
-      proj.position.z += proj.velocity.z * dt;
+      // Gravity is the only acceleration (D17), stepped in closed form so the
+      // client's extrapolation (shared/ballistics.ballisticPositionAt) agrees
+      // to rounding error at any dt.
+      stepBallistic(proj.position, proj.velocity, projectileGravity(proj.type), dt);
 
       if (this.didProjectileHitSeaRock(previousPosition, proj, seaRocks)) {
         proj.alive = false;
@@ -2254,7 +2264,16 @@ export class PhysicsSystem {
 
       // Water hit — real wave surface incl. local storm swell, not the y=0 plane
       const projSea = stormSeaState(storm, proj.position.x, proj.position.z);
-      if (proj.position.y < gerstnerHeight(proj.position.x, proj.position.z, t, WAVE_PARAMS, projSea)) {
+      const seaY = gerstnerHeight(proj.position.x, proj.position.z, t, WAVE_PARAMS, projSea);
+      if (proj.position.y < seaY) {
+        // Grazing round shot skips off the sea (physics-07): flatter than 8 deg,
+        // faster than 25 m/s, at most twice. Anything else goes in.
+        const skips = this.projectileSkips.get(proj) ?? 0;
+        if (proj.type !== 'bullet' && trySkip(proj.velocity, skips)) {
+          this.projectileSkips.set(proj, skips + 1);
+          proj.position.y = seaY;
+          continue;
+        }
         proj.alive = false;
         continue;
       }
