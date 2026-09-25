@@ -27,6 +27,7 @@ import {
   REPAIR_BLOW_S, repairBlowsFor, repairBlowPhase, hammerSwingAngle, HAMMER_IMPACT_PHASE,
   REPAIR_HAMMER_PIVOT, bucketWaterShown, bucketThrowDroplet,
 } from './viewmodel/poses.js';
+import { repairBlowPosition } from './viewmodel/repairBlows.js';
 
 /** A held mesh built from the primitive while its tool GLB was in flight. */
 function toolGlbArrived(mesh: THREE.Object3D | null | undefined): boolean {
@@ -270,6 +271,18 @@ export class ViewmodelController {
   private repairProgPrev = 0;
   private repairProgAt = 0;
   private repairTimeEst = 2.4;
+  private repairBlowX = 0;
+  private repairBlowXAt = -Infinity;
+  /** The live blow position (0..blows, extrapolated like the swing) while the
+   *  first-person hammer is up, else null. FloodAudio fires the mallet on its
+   *  HAMMER_IMPACT_PHASE crossings so sound and swing line up. */
+  getRepairBlowPosition(): number | null {
+    return this.view.ocean.getTime() - this.repairBlowXAt <= 0.1 ? this.repairBlowX : null;
+  }
+  /** The repair time the swing is paced on (s), for the fallback blow clock. */
+  getRepairTimeEstimate(): number {
+    return this.repairTimeEst;
+  }
   /** Water leaving the bucket on a throw: one instanced draw, hidden when idle. */
   private bucketSpray: THREE.InstancedMesh | null = null;
   /** Swim-stroke clock for the first-person crawl arms. */
@@ -1144,6 +1157,9 @@ export class ViewmodelController {
       const lead = Math.min(REPAIR_BLOW_S, t - this.repairProgAt) / this.repairTimeEst;
       const blows = repairBlowsFor(this.repairTimeEst);
       const phase = repairBlowPhase(Math.min(1, repairProgress + lead), blows);
+      // FloodAudio plays the mallet on the impacts of THIS swing (b2-ask-03).
+      this.repairBlowX = repairBlowPosition(Math.min(1, repairProgress + lead), blows);
+      this.repairBlowXAt = t;
       const swing = hammerSwingAngle(phase);
       const pivot = mesh.getObjectByName('repair-hammer-pivot');
       if (pivot) pivot.rotation.set(swing, 0, 0);

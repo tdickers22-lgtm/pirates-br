@@ -24,8 +24,6 @@ export const FLOOD_HULL_OCCLUSION_CUTOFF = 1200;
 export const GUSH_REF_HEAD_M = 2;
 const V_REF = Math.sqrt(2 * GRAVITY * GUSH_REF_HEAD_M);
 const AREA_MAX = FLOODING.HOLE_SIZE_AREA[FLOODING.HOLE_SIZE_AREA.length - 1];
-/** Seconds between mallet blows while a plank is being nailed over a hole. */
-export const HAMMER_BLOW_S = 0.4;
 /** Founder stages (fraction of the sink): groan at 0, frame cracks, air bursting, suction. */
 export const FOUNDER_CUES: ReadonlyArray<{ at: number; kind: 'groan' | 'frameCrack' | 'airRelease' | 'suction' }> = [
   { at: 0, kind: 'groan' },

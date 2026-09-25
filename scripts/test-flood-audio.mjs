@@ -132,10 +132,44 @@ function hullWith(id, x, holes, extra = {}) {
   const { host, log } = fakeHost();
   const fa = new FloodAudio(host);
   const pos = { x: 0, y: 0, z: 0 };
-  for (let t = 0; t < 1.6; t += 0.05) fa.update({ dt: 0.05, listener: pos, aboardShipId: null, ships: [], emitters: () => [], repair: { progress: t / 1.6, pos } });
+  // b2-ask-03: one hit per VISIBLE hammer blow (2/3/4 by hole size), each on
+  // the swing's impact frame, none as the plank goes up.
+  const RB = await import('../src/client/rendering/viewmodel/repairBlows.ts');
+  const { FLOODING: FL } = await import('../src/shared/constants/index.ts');
+  const counts = [];
+  let firstEarly = false;
+  let offImpact = 0;
+  for (const rt of FL.HOLE_REPAIR_TIME) {
+    const h = fakeHost();
+    const f2 = new FloodAudio(h.host);
+    const want = RB.repairBlowsFor(rt);
+    for (let t = 0.05; t < rt; t += 0.05) {
+      const before = h.log.shots.length;
+      f2.update({ dt: 0.05, listener: pos, aboardShipId: null, ships: [], emitters: () => [], repair: { progress: t / rt, pos, repairTime: rt } });
+      if (h.log.shots.slice(before).some((s) => s.kind === 'hammer')) {
+        if ((t / rt) * want < RB.HAMMER_IMPACT_PHASE) firstEarly = true;
+        const ph = RB.repairBlowPhase(t / rt, want);
+        if (!(ph >= RB.HAMMER_IMPACT_PHASE && ph < RB.HAMMER_IMPACT_PHASE + (0.05 / rt) * want + 1e-9)) offImpact += 1;
+      }
+    }
+    counts.push([h.log.shots.filter((s) => s.kind === 'hammer').length, want]);
+  }
+  check('FloodAudio: mallet hits == visible hammer blows per hole size (2/3/4)', counts.every(([n, w]) => n === w) && counts.map((c) => c[1]).join() === '2,3,4', JSON.stringify(counts));
+  check('FloodAudio: no mallet hit before the first swing lands', !firstEarly);
+  check('FloodAudio: every mallet hit is on the frame the head meets the plank', offImpact === 0, `${offImpact} off-impact`);
+  {
+    // Driven by the viewmodel's live blow position: fires exactly on its crossings.
+    const h = fakeHost();
+    const f3 = new FloodAudio(h.host);
+    const fired = [];
+    for (let x = 0.02; x < 3; x += 0.05) {
+      const before = h.log.shots.length;
+      f3.update({ dt: 0.016, listener: pos, aboardShipId: null, ships: [], emitters: () => [], repair: { progress: x / 3, pos, blowX: x } });
+      if (h.log.shots.length > before) fired.push(Number(x.toFixed(2)));
+    }
+    check('FloodAudio: follows the swing blow clock (hits at x = 0.72, 1.72, 2.72)', fired.length === 3 && fired.every((x, i) => x >= i + 0.72 && x < i + 0.72 + 0.05 + 1e-9), JSON.stringify(fired));
+  }
   fa.update({ dt: 0.05, listener: pos, aboardShipId: null, ships: [], emitters: () => [], repair: { progress: 0, pos } });
-  const blows = log.shots.filter((s) => s.kind === 'hammer').length;
-  check('FloodAudio: one mallet blow per 0.4 s of plank progress (1.6 s -> 4 or 5)', blows === 4 || blows === 5, `${blows}`);
   const ship = hullWith('s', 5, [], { waterLevel: 0.9 });
   fa.update({ dt: 0.05, listener: pos, aboardShipId: null, ships: [ship], emitters: () => [] });
   const cues = [];

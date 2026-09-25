@@ -7636,7 +7636,12 @@ export class Game {
       ships: this.state.ships,
       emitters: (id) => this.getFloodEmitters(id),
       repair: floodMe && (floodMe.hullRepairProgress ?? 0) > 0
-        ? { progress: floodMe.hullRepairProgress, pos: floodMe.position }
+        ? {
+          progress: floodMe.hullRepairProgress,
+          pos: floodMe.position,
+          blowX: this.viewmodel.getRepairBlowPosition(),
+          repairTime: this.viewmodel.getRepairTimeEstimate(),
+        }
         : null,
     });
 

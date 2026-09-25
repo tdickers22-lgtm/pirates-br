@@ -4,14 +4,15 @@
 //    level from speed and tear size, the deepest kept when there are more;
 //  - a slosh bed at the hull by hold fill and roll/pitch RATE, a gurgle above half full;
 //  - one-shots on edges: hole punched (wood crack by size), plank knocked on (patch knock,
-//    the gush then releases over 300 ms with the jet), mallet blow every 0.4 s of repair,
+//    the gush then releases over 300 ms with the jet), mallet blow on every visible hammer impact of repair,
 //    founder stages (groan, frame cracks, air bursting out, suction).
 // Another hull is attenuated by distance AND by its planking. The Web Audio side lives behind
 // FloodAudioHost (SoundEngine implements it) so the gate drives this class on a fake host.
 import type { ShipHole } from '../../shared/types/index.js';
+import { repairBlowPosition, repairBlowsFor, repairImpactsCrossed } from '../rendering/viewmodel/repairBlows.js';
 import {
   FLOOD_AUDIBLE_M, FLOOD_GUSH_RELEASE_S, FLOOD_GUSH_VOICES, FLOOD_HULL_OCCLUSION, FLOOD_HULL_OCCLUSION_CUTOFF, FLOOD_MAX_SHIPS,
-  HAMMER_BLOW_S, floodDistanceGain, founderCuesCrossed, gurgleLevel, gushFromSpeed, holePunchParams,
+  floodDistanceGain, founderCuesCrossed, gurgleLevel, gushFromSpeed, holePunchParams,
   pickGushVoices, sloshLevel,
 } from './floodAudioModel.js';
 
@@ -62,7 +63,10 @@ export interface FloodAudioFrame {
   ships: Iterable<FloodAudioShip>;
   emitters(shipId: string): readonly FloodAudioEmitter[];
   /** Local player's plank progress 0..1 (hullRepairProgress) and where the mallet is. */
-  repair?: { progress: number; pos: FloodVec } | null;
+  /** The local plank repair. `blowX` is the first-person swing's live blow
+   *  position (ViewmodelController.getRepairBlowPosition); without it the blow
+   *  clock is derived from progress and `repairTime` (s). */
+  repair?: { progress: number; pos: FloodVec; blowX?: number | null; repairTime?: number } | null;
 }
 
 interface ShipTrack {
@@ -88,7 +92,7 @@ export class FloodAudio {
    *  from the weather deck. Other hulls keep FLOOD_HULL_OCCLUSION (never both). SoundEngine sets it. */
   ownSpace: { gain: number; cutoff: number } = { gain: 1, cutoff: Infinity };
   private readonly tracks = new Map<string, ShipTrack>();
-  private repairT = -1;
+  private repairX = -1;
   private prevRepair = 0;
   /** Loop gains written last update, per ship (gates and probes). */
   readonly lastGains = new Map<string, { gush: number[]; slosh: number; gurgle: number }>();
@@ -123,13 +127,13 @@ export class FloodAudio {
     for (const [id, tr] of this.tracks) {
       if (!keep.has(id)) this.dropTrack(id, tr);
     }
-    this.updateRepair(dt, frame.repair ?? null);
+    this.updateRepair(frame.repair ?? null);
   }
 
   /** Silence everything (match end, respawn). */
   reset(): void {
     for (const [id, tr] of this.tracks) this.dropTrack(id, tr);
-    this.repairT = -1;
+    this.repairX = -1;
     this.prevRepair = 0;
   }
 
@@ -231,22 +235,23 @@ export class FloodAudio {
     return v;
   }
 
-  private updateRepair(dt: number, repair: { progress: number; pos: FloodVec } | null): void {
+  private updateRepair(repair: FloodAudioFrame['repair']): void {
     const p = repair ? finite(repair.progress) : 0;
     if (repair && p > 0 && p >= this.prevRepair) {
-      // First blow as the plank goes up, then one every HAMMER_BLOW_S while it advances.
-      if (this.repairT < 0) {
-        this.repairT = 0;
-        this.host.oneShot('hammer', repair.pos, 1, 1);
-      } else {
-        this.repairT += dt;
-        if (this.repairT >= HAMMER_BLOW_S) {
-          this.repairT -= HAMMER_BLOW_S;
-          this.host.oneShot('hammer', repair.pos, 1, 0.94 + (Math.floor(p * 97) % 3) * 0.04);
-        }
+      // b2-ask-03: one mallet hit per VISIBLE blow, on the frame the hammer
+      // face meets the plank (HAMMER_IMPACT_PHASE of the shared blow clock),
+      // so a 1.6/2.4/3.2 s repair sounds 2/3/4 hits, never on a raise.
+      const x = repair.blowX != null && Number.isFinite(repair.blowX)
+        ? repair.blowX
+        : repairBlowPosition(p, repairBlowsFor(repair.repairTime ?? 2.4));
+      const from = this.repairX < 0 ? 0 : this.repairX;
+      // A snapshot jump never machine-guns: at most one hit per frame.
+      if (repairImpactsCrossed(from, x) > 0) {
+        this.host.oneShot('hammer', repair.pos, 1, 0.94 + (Math.floor(x) % 3) * 0.04);
       }
+      this.repairX = Math.max(from, x);
     } else {
-      this.repairT = -1;
+      this.repairX = -1;
     }
     this.prevRepair = p;
   }

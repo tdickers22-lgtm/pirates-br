@@ -496,20 +496,10 @@ export function slashRibbonPose(side: 1 | -1, p: number): RibbonPose {
 
 // ── b2.3h: the flood loop in first person (hammer blows, bucket throw) ──────
 
-/** One hammer blow lasts 0.8 s: the server's HOLE_REPAIR_TIME 1.6/2.4/3.2 s is
- *  2/3/4 blows by hole size, so blows = round(repairTime / 0.8). */
-export const REPAIR_BLOW_S = 0.8;
-export function repairBlowsFor(repairTime: number): number {
-  return THREE.MathUtils.clamp(Math.round(repairTime / REPAIR_BLOW_S), 1, 6);
-}
-/** Blow phase 0..1 from the replicated hullRepairProgress (0..1). The head
- *  meets the plank at HAMMER_IMPACT_PHASE of every blow, so the last impact
- *  lands before the server closes the hole at progress 1. */
-export function repairBlowPhase(progress: number, blows: number): number {
-  const x = THREE.MathUtils.clamp(progress, 0, 1) * blows;
-  return x - Math.floor(x);
-}
-export const HAMMER_IMPACT_PHASE = 0.72;
+// The blow clock lives in repairBlows.ts so FloodAudio's mallet one-shot and
+// this swing share it (b2-ask-03).
+import { HAMMER_IMPACT_PHASE } from './repairBlows.js';
+export { REPAIR_BLOW_S, repairBlowsFor, repairBlowPhase, HAMMER_IMPACT_PHASE } from './repairBlows.js';
 const HAMMER_RAISED = 1.25;   // rad about the wrist X axis: head cocked back toward the eye
 const HAMMER_STRUCK = -0.12;  // at impact: haft near upright, face square to the plank
 const HAMMER_REST = 0.2;      // rebound settles here, and the next raise starts here
