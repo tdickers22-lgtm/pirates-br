@@ -158,7 +158,7 @@ def targets(spec, n0):
 FLOOR = {'LOD1': (12, 6), 'LOD2': (8, 4), 'far': (4, 2)}
 
 
-def reduce_parts(obj, ratio, floor):
+def reduce_parts(obj, ratio, floor, cards=False):
     """Collapse each LOOSE PART on its own toward `ratio` (never under `floor` triangles), then scale
     it about its centre back to its own source area (capped, build_far_lods.rescale_to_area): Collapse
     shrinks convex parts and pulls sheet boundaries inward, and the rescale is what keeps a 40% barrel
@@ -174,17 +174,33 @@ def reduce_parts(obj, ratio, floor):
     parts = [obj] + [o for o in bpy.data.objects if o not in existing and o.type == 'MESH']
     for part in parts:
         tris = sum(max(0, len(p.vertices) - 2) for p in part.data.polygons)
-        fl = floor[1] if F.has_boundary(part.data) else floor[0]
+        sheet = F.has_boundary(part.data)
+        fl = floor[1] if sheet else floor[0]
         r = max(ratio, min(1.0, fl / max(1, tris)))
         if r >= 0.999:
             continue
-        a0 = F.surface_stats(part.data)['area']
+        s0 = F.surface_stats(part.data)
+        keep_me = part.data.copy()
         mod = part.modifiers.new('lod', 'DECIMATE')
         mod.decimate_type = 'COLLAPSE'
         mod.ratio = r
         mod.use_collapse_triangulate = True
         F.apply_modifier(part, mod)
-        F.rescale_to_area(part, a0)
+        F.rescale_to_area(part, s0['area'])
+        # PER-PART SURFACE CONTRACT (b3.4d finisher): a part that Collapse+rescale cannot keep
+        # (a keg hoop or a wheel spoke folded to a line, a curled leaf pulled to 61% of its area)
+        # becomes, at the far level, ONE equal-area card when it is an open sheet
+        # (build_far_lods.card_from_part), else it keeps its source mesh. The level may then sit
+        # over its tier ceiling (an honest ratchet row), never see-through or shrunken.
+        st = F.surface_stats(part.data)
+        if st['loops'] > s0['loops'] or not (MIN_AREA <= st['area'] / max(s0['area'], 1e-12) <= MAX_AREA):
+            old = part.data
+            part.data = keep_me
+            bpy.data.meshes.remove(old)
+            if cards and sheet:
+                F.card_from_part(part)
+        else:
+            bpy.data.meshes.remove(keep_me)
     bpy.ops.object.select_all(action='DESELECT')
     for part in parts:
         part.select_set(True)
@@ -227,8 +243,13 @@ def build_key(key, spec):
         if c is None:
             r = min(aim, top)
             for attempt in range(TRIES):
-                c = dup(base, f'{key}_{label}')
-                reduce_parts(c, r, FLOOR[label])
+                # Each level decimates the level ABOVE it (LOD0 for LOD1): a part the per-part
+                # contract refuses to reduce keeps its coarser parent mesh, so a level is never
+                # heavier than the one above (the first run's keg/palm/arch far levels were).
+                parent = levels[-1] if levels else base
+                pr = min(1.0, r * n0 / max(1, F.surface_stats(parent.data)['tris']))
+                c = dup(parent, f'{key}_{label}')
+                reduce_parts(c, pr, FLOOR[label], cards=label == 'far')
                 st = F.surface_stats(c.data)
                 good, _ = ok_surface(src, st)
                 if (good and st['tris'] < cap) or r >= top or attempt == TRIES - 1:
