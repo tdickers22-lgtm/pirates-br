@@ -2,7 +2,7 @@ import type { CannonAmmoType, PlayerInput, WeaponSlot } from '../../shared/types
 import { WHEEL_SLOTS } from '../../shared/wheel.js';
 import { sliceForDigit } from '../ui/RadialMenu.js';
 import { BINDINGS, BINDING_ACTIONS, type BindingAction, mouseButtonsFor, onBindingsChanged, setLiveBindings, tokensFor } from '../../shared/bindings.js';
-import { clampSetting, DEFAULT_CONTROL_SETTINGS, loadBindingTable, loadControlSettings, sanitizeControlSettings, type ControlSettings } from './rebinding.js';
+import { autoLoadsCannonsOn, clampSetting, DEFAULT_CONTROL_SETTINGS, loadBindingTable, loadControlSettings, sanitizeControlSettings, type ControlSettings } from './rebinding.js';
 import { InputSchemeTracker, initialScheme } from './InputScheme.js';
 import { resolveInputAuthority } from './inputAuthority.js';
 import { LookDeltaFilter, requestLockSafe } from './pointerLock.js';
@@ -471,6 +471,9 @@ export class InputManager {
       specialAttack: !this.vHeld && this.specialAttackPressed,
       slot:     this.vHeld ? null : this.slotPressed,
       cannonAmmo: this.vHeld ? null : this.cannonAmmoPressed,
+      // D20: the server's auto-loader reads this every input (default ON for
+      // touch and gamepad, OFF for mouse + keyboard; Settings > Gunnery).
+      autoLoadCannons: autoLoadsCannonsOn(this.controls.autoLoadCannons, this.scheme.current),
       yaw:      this.yaw,
       pitch:    this.pitch,
       wheelIndex: wheelUse,

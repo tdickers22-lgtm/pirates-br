@@ -287,10 +287,29 @@ if (TC && V && IM) {
   for (let i = 0; i < 30; i++) c.send();
   const isBall = (p) => p.ownerId === c.player.id && /cannon|chain|fire/i.test(String(p.type ?? p.kind ?? p.ammo ?? ''));
   const balls0 = c.match.state.projectiles.filter(isBall).length;
-  c.src.press('fire');
+  // D20 (b3-bugs-01): touch auto-loads by default, so the input says so and the
+  // first Fire tap on the empty gun rams a shot (no ball yet, no dead click);
+  // once the 1.6 s load is home the next tap fires.
+  expect('touch input carries autoLoadCannons: true (D20 default ON for touch)', c.im.buildInput().autoLoadCannons === true);
+  {
+    const mouse = new IM.InputManager();
+    mouse.scheme.note('mouse');
+    const pad = new IM.InputManager();
+    pad.scheme.note('gamepad');
+    expect('mouse + keyboard input carries autoLoadCannons: false (D20 default OFF, load with R)', mouse.buildInput().autoLoadCannons === false);
+    expect('gamepad input carries autoLoadCannons: true (D20 default ON)', pad.buildInput().autoLoadCannons === true);
+  }
+  const seen = new Set();
+  const note = () => { for (const p of c.match.state.projectiles) if (isBall(p)) seen.add(p.id ?? p); };
+  c.src.press('fire'); c.send(); note();
+  const loading = c.ship.cannonLoaded?.[0] ?? null;
   c.src.release('fire');
+  expect(`the first Fire tap on the empty gun starts the load, no ball yet (loaded=${loading}, left=${(c.ship.cannonLoadLeft?.[0] ?? 0).toFixed(2)})`,
+    !!loading && (c.ship.cannonLoadLeft?.[0] ?? 0) > 0 && c.match.state.projectiles.filter(isBall).length === balls0);
+  // The trigger stays down through the tap's minimum hold; once the shot is
+  // rammed home the held trigger fires it (and auto-load rams the next).
   let fired = 0;
-  for (let i = 0; i < 12; i++) { c.send(); fired = Math.max(fired, c.match.state.projectiles.filter(isBall).length - balls0); }
+  for (let i = 0; i < 600 && fired === 0; i++) { c.send(); note(); fired = seen.size; }
   const sample = c.match.state.projectiles.at(-1);
   expect(`a touch Fire tap at the manned cannon spawns a cannonball (${fired}; last ${sample ? JSON.stringify({ type: sample.type, kind: sample.kind, ammo: sample.ammo, owner: sample.ownerId === c.player.id }) : 'none'})`,
     fired >= 1 && c.player.atCannon === true);

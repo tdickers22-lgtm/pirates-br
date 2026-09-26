@@ -418,8 +418,26 @@ function shopRefusalLine(noun: string, reason?: string, price?: number): string 
   }
 }
 
-function interactRefusalLine(intent?: string, reason?: string): string {
+/** D20 cannon shot names for the fallback prompt. */
+const CANNON_SHOT_NOUN: Record<string, string> = {
+  cannonball: 'round shot', firebomb: 'firebombs', chainshot: 'chain shot', super_cannonball: 'super shot',
+};
+
+/** D20: the fallback line ("No chain shot: loaded round shot"), null when the selected shot went in. */
+function cannonLoadedLine(payload: unknown): string | null {
+  const p = payload as { shot?: string; selected?: string; fallback?: boolean } | null;
+  if (!p?.fallback) return null;
+  const sel = CANNON_SHOT_NOUN[p.selected ?? ''] ?? 'that shot';
+  const shot = CANNON_SHOT_NOUN[p.shot ?? ''] ?? 'what was left';
+  return `No ${sel}: loaded ${shot}.`;
+}
+
+function interactRefusalLine(intent?: string, reason?: string, atCannon = false): string {
   const noun = INTERACT_INTENT_NOUN[intent ?? ''] ?? 'that';
+  // D20: at a gun the trigger on an empty bore names the load key, and "no
+  // ammo" is the ship's shot stores (the crate refills firearms, not cannons).
+  if (reason === 'unloaded') return `Empty gun. ${glyph('reload')} to load it.`;
+  if (reason === 'no_ammo' && atCannon) return 'No shot in the stores.';
   switch (reason) {
     case 'out_of_reach': return `Too far from ${noun}.`;
     case 'not_aboard': return `Get aboard first — ${noun} is out of reach.`;
@@ -2843,13 +2861,22 @@ export class Game {
       this.audio.playRepairSequence();
     };
 
+    // D20: the ram itself is heard from the snapshot (AudioDirector cannonLoadLeft);
+    // this answers the loader when the selected shot was out and a cheaper one went in.
+    this.network.onCannonLoaded = (payload) => {
+      const line = cannonLoadedLine(payload);
+      if (!line) return;
+      this.hud.showInteractRefusal(line);
+      this.audio.playBodyThud(0.2);
+    };
+
     // A dead [X] used to be pure silence: right prompt, nothing happens, and the
     // player mashes the key. The server now answers a refused press — one amber
     // line and a dull thud, so the failure is at least legible.
     this.network.onInteractRefused = (payload) => {
       const refusal = payload as { intent?: string; reason?: string };
       // AT the prompt, not 400 px away in the tactical column (hud-25).
-      this.hud.showInteractRefusal(interactRefusalLine(refusal.intent, refusal.reason));
+      this.hud.showInteractRefusal(interactRefusalLine(refusal.intent, refusal.reason, !!this.getLocalPlayer()?.atCannon));
       this.audio.playBodyThud(0.35);
     };
   }

@@ -1784,7 +1784,10 @@ export class HudController {
       const superShot = player.superCannonballs > 0 && player.selectedCannonAmmo === 'cannonball'
         ? ` · SUPER x5 ready (${player.superCannonballs})`
         : '';
-      this.view.ui.contextLabel.textContent = `Cannon ${player.cannonIndex + 1} · ${player.selectedCannonAmmo.replace('_', ' ')}${superShot} · ${glyphSet(['ammoRound', 'ammoFire', 'ammoChain'])} shot type`;
+      // D20: the gun's own state from the snapshot (ship.cannonLoaded / cannonLoadLeft).
+      const gun = ship ? cannonLoadLabel(ship.cannonLoaded?.[player.cannonIndex], ship.cannonLoadLeft?.[player.cannonIndex] ?? 0) : null;
+      const gunState = gun === 'empty' ? `EMPTY, ${glyph('reload')} load · ` : gun === 'loading' ? 'LOADING · ' : gun === 'loaded' ? 'LOADED · ' : '';
+      this.view.ui.contextLabel.textContent = `Cannon ${player.cannonIndex + 1} · ${gunState}${player.selectedCannonAmmo.replace('_', ' ')}${superShot} · ${glyphSet(['ammoRound', 'ammoFire', 'ammoChain'])} shot type`;
     } else if (player.atHelm) {
       this.view.ui.interactPrompt.style.display = 'block';
       this.view.ui.interactPrompt.textContent = `${glyph('interact')} Leave Helm`;
@@ -3153,4 +3156,11 @@ function escapeCrewName(name: string): string {
   return name.replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[c]!));
+}
+
+/** D20: a gun's load state for the cannon HUD; null when the snapshot does not carry it. */
+export function cannonLoadLabel(loaded: string | null | undefined, left: number | undefined): 'empty' | 'loading' | 'loaded' | null {
+  if (loaded === undefined) return null;
+  if (!loaded) return 'empty';
+  return (left ?? 0) > 0 ? 'loading' : 'loaded';
 }

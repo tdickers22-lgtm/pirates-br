@@ -64,6 +64,9 @@ export type ControlSettings = {
   leftHanded: boolean;
   /** auto = on the touch scheme; on = always in a match; off = never. */
   touchButtons: TouchButtonsMode;
+  /** D20 auto-load cannons: auto = ON on touch and gamepad, OFF on mouse + keyboard
+   *  (trackpad included, they load with R); on / off = every scheme. */
+  autoLoadCannons: TouchButtonsMode;
 };
 
 export const DEFAULT_CONTROL_SETTINGS: Readonly<ControlSettings> = Object.freeze({
@@ -78,6 +81,7 @@ export const DEFAULT_CONTROL_SETTINGS: Readonly<ControlSettings> = Object.freeze
   rawMouse: false,
   leftHanded: false,
   touchButtons: 'auto',
+  autoLoadCannons: 'auto',
 }) as Readonly<ControlSettings>;
 
 export const CONTROLS_STORAGE_KEY = 'piratesBR.controls';
@@ -114,6 +118,8 @@ export function sanitizeControlSettings(raw: unknown): ControlSettings {
     rawMouse: bool(o.rawMouse, d.rawMouse),
     leftHanded: bool(o.leftHanded, d.leftHanded),
     touchButtons: mode === 'on' || mode === 'off' || mode === 'auto' ? mode : d.touchButtons,
+    autoLoadCannons: o.autoLoadCannons === 'on' || o.autoLoadCannons === 'off' || o.autoLoadCannons === 'auto'
+      ? o.autoLoadCannons : d.autoLoadCannons,
   };
 }
 
@@ -275,4 +281,9 @@ export function padTokenForIndex(index: number): string | null {
     return name === 'LS' || name === 'RS' ? `Pad:${name}.click` : `Pad:${name}`;
   }
   return null;
+}
+
+/** D20: does this scheme auto-load cannons under the given setting? */
+export function autoLoadsCannonsOn(mode: TouchButtonsMode, scheme: 'mouse' | 'gamepad' | 'touch'): boolean {
+  return mode === 'on' || (mode === 'auto' && scheme !== 'mouse');
 }

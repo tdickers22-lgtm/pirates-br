@@ -50,6 +50,8 @@ export class NetworkClient {
   /** CAPTURE-01 (w6.1): a crewless hull changed hands at her own wheel. */
   public onShipCaptured: ((payload: unknown) => void) | null = null;
   public onAmmoRefilled: ((payload: unknown) => void) | null = null;
+  /** D20: what went into the gun (fallback = the selected shot was out). */
+  public onCannonLoaded: ((payload: unknown) => void) | null = null;
   /** The server heard your [X] and refused it — never leave a press unanswered. */
   public onInteractRefused: ((payload: unknown) => void) | null = null;
   public onTreasureMap: ((payload: unknown) => void) | null = null;
@@ -627,6 +629,7 @@ export class NetworkClient {
       case 'shop_bought': this.emit('shop_bought', () => this.onShopBought?.(msg.payload)); break;
       case 'ship_captured': this.emit('ship_captured', () => this.onShipCaptured?.(msg.payload)); break;
       case 'ammo_refilled': this.emit('ammo_refilled', () => this.onAmmoRefilled?.(msg.payload)); break;
+      case 'cannon_loaded': this.emit('cannon_loaded', () => this.onCannonLoaded?.(msg.payload)); break;
       case 'interact_refused': this.emit('interact_refused', () => this.onInteractRefused?.(msg.payload)); break;
       case 'treasure_map': this.emit('treasure_map', () => this.onTreasureMap?.(msg.payload)); break;
       case 'trade_request': this.emit('trade_request', () => this.onTradeRequest?.(msg.payload)); break;

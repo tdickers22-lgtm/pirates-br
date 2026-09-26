@@ -147,6 +147,21 @@ export class ControlsSettings {
     mode.addEventListener('change', () => this.update({ touchButtons: mode.value as ControlSettings['touchButtons'] }));
     modeRow.appendChild(mode);
 
+    this.heading('Gunnery');
+    const loadRow = this.row('Auto-load cannons');
+    const load = document.createElement('select');
+    load.id = 'controls-auto-load-cannons';
+    load.style.cssText = KEYBTN;
+    for (const [v, t] of [['auto', 'Auto (controller and touch)'], ['on', 'Always'], ['off', 'Never (load with Reload)']] as const) {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = t;
+      load.appendChild(o);
+    }
+    load.value = s().autoLoadCannons;
+    load.addEventListener('change', () => this.update({ autoLoadCannons: load.value as ControlSettings['autoLoadCannons'] }));
+    loadRow.appendChild(load);
+
     this.heading('Bindings (keyboard / controller)');
     for (const action of rebindRows()) {
       const r = this.row(BINDINGS[action].label);
