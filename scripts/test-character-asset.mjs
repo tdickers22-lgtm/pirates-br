@@ -787,6 +787,73 @@ if (!argv.includes('--glb')) {
   expect(`weight QA render sheets committed (${QA.length - missing.length}/${QA.length} posed sheets)`, !missing.length, missing.join(', '));
 }
 
+// ── R2 re-review fixes (b3.2d-R2fix) ─────────────────────────────────────────────────────────
+// F9 tri budget AT SOURCE: the dressed LOD0 band is 16-22k tris (<= 3 draws); the R2 captain was 62.1k (a pair of
+// tall boots 18.3k = 83% of the whole budget). Per-slot caps (tris, both sides): boots_tall 2400, boots_shoes 1800,
+// coat_frock 6000, coat_jacket 5000, vest_waistcoat 3000, breeches 4300 (unchanged, not an R2 line), sash 2500, belt 900.
+// F1 garment rims: every opening (coat and jacket fronts, waistcoat V and armholes, hems, cuffs) is the boundary of
+// the garment's OUTER cloth primitive (the rim and lining are the second material). Welded by position, each
+// boundary loop is resampled at 1 cm stations; the turning angle between successive 1 cm chords may exceed 35 deg
+// only at the authored corners, by name: the coat/jacket opening loop (front + collar + hem) has six (hem x front
+// l/r, collar foot x front l/r, collar top x front l/r); every other loop (cuffs, armholes, the waistcoat V + hem
+// with its V point and two front points) at most four. A rim that follows the body's face grid is a staircase with a spike every 1-2 cm (R2: torn paper).
+// Red: 3e017cda (boots_tall 18264, coat_frock 8876; coat fronts and vest V/armholes with dozens of spikes).
+if (!argv.includes('--glb')) {
+  const CAP = { boots_tall: 2400, boots_shoes: 1800, coat_frock: 6000, coat_jacket: 5000, vest_waistcoat: 3000,
+    breeches_knee: 4300, breeches_slops: 4300, sash: 2500, belt: 900 };
+  const RIMS = ['coat_frock', 'coat_jacket', 'vest_waistcoat'];
+  const rimLoops = (v, outer) => { // outer = the material of the garment's first slot (the cloth face)
+    const key = (p) => p.map((x) => Math.round(x * 5000)).join();
+    const id = new Map(); const pos = []; const w = (i) => { const k = key(v[i].p); if (!id.has(k)) { id.set(k, pos.length); pos.push(v[i].p); } return id.get(k); };
+    const cnt = new Map();
+    for (const t of v.tris ?? []) {
+      if (v[t[0]].mat !== outer) continue;
+      const q = t.map(w); if (new Set(q).size < 3) continue;
+      for (let a = 0; a < 3; a++) { const e = [q[a], q[(a + 1) % 3]].sort((x, y) => x - y).join(); cnt.set(e, (cnt.get(e) ?? 0) + 1); }
+    }
+    const adj = new Map();
+    for (const [e, c] of cnt) if (c === 1) { const [a, b] = e.split(',').map(Number); for (const [x, y] of [[a, b], [b, a]]) { if (!adj.has(x)) adj.set(x, []); adj.get(x).push(y); } }
+    const used = new Set(); const loops = [];
+    for (const s0 of adj.keys()) {
+      if (used.has(s0)) continue;
+      const L = [s0]; used.add(s0); let prev = -1; let cur = s0;
+      for (;;) { const nx = (adj.get(cur) ?? []).find((n) => n !== prev && !used.has(n)); if (nx === undefined) break; used.add(nx); L.push(nx); prev = cur; cur = nx; }
+      if (L.length >= 8) loops.push(L.map((i) => pos[i]));
+    }
+    return loops.map((L) => { // resample at 1 cm and count turning spikes > 35 deg
+      const P = [...L, L[0]]; const st = [P[0]]; let carry = 0;
+      for (let i = 1; i < P.length; i++) { const d = sub(P[i], P[i - 1]); const l = len(d); let s = 0.01 - carry;
+        while (s <= l) { st.push(P[i - 1].map((x, k) => x + d[k] * s / l)); s += 0.01; } carry = l - (s - 0.01); }
+      let spikes = 0; const n = st.length;
+      for (let i = 0; i < n; i++) { const a = sub(st[i], st[(i - 1 + n) % n]); const b = sub(st[(i + 1) % n], st[i]);
+        if (len(a) < 1e-4 || len(b) < 1e-4) continue;
+        if (Math.acos(Math.max(-1, Math.min(1, (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (len(a) * len(b))))) > 35 * Math.PI / 180) spikes += 1; }
+      return { n, spikes };
+    });
+  };
+  for (const b of BODIES) {
+    console.log(`\nR2 fixes (b3.2d-R2fix): ${b}`);
+    const L = loadGlb(`${OUT}/pirate_base_${b}.glb`);
+    if (!L) { expect(`${b}: body GLB present`, false); continue; }
+    const { g, W } = L; const { gltf } = g;
+    const nodeOf = (name) => gltf.nodes.findIndex((n) => n.mesh !== undefined && n.name === name);
+    const over = []; let total = 0;
+    for (const [slot, cap] of Object.entries(CAP)) {
+      const i = nodeOf(slot); if (i < 0) { over.push(`${slot} missing`); continue; }
+      const t = gltf.meshes[gltf.nodes[i].mesh].primitives.reduce((s, p) => s + gltf.accessors[p.indices].count / 3, 0);
+      total += t; if (t > cap) over.push(`${slot} ${t} > ${cap}`);
+    }
+    expect(`${b}: wardrobe II per-slot tri caps (all nine slots ${total} tris)`, !over.length, over.join(', '));
+    for (const slot of RIMS) {
+      const i = nodeOf(slot); if (i < 0) { expect(`${b}: ${slot} present`, false); continue; }
+      const loops = rimLoops(skinned(g, W, i), gltf.meshes[gltf.nodes[i].mesh].primitives[0].material);
+      const bad = loops.filter((l, k) => l.spikes > (k === 0 && slot.startsWith('coat') ? 6 : 4));
+      expect(`${b}: ${slot} rims are clean curves (${loops.length} loops, spikes per loop ${loops.map((l) => l.spikes).join('/')}; <= 6 on a coat opening, <= 4 elsewhere)`,
+        loops.length > 0 && !bad.length);
+    }
+  }
+}
+
 // ── CLIPS (b3.2b, animations-01/02, characters-05) ────────────────────────
 // Every clip id the player state machine (PlayerRigFactory: lowerClip / upperClip / setLayer / the death
 // clip per cause) can request exists in public/assets/models/pirate_clips.glb, is non-empty (>= 2 keys,

@@ -213,7 +213,7 @@
        "foot_l",
        "foot_r"
       ],
-      "tris": 7576
+      "tris": 1588
      },
      "boots_tall": {
       "groups": [
@@ -226,7 +226,7 @@
        "thigh_l",
        "thigh_r"
       ],
-      "tris": 17880
+      "tris": 2208
      },
      "breeches_knee": {
       "groups": [
@@ -238,7 +238,7 @@
        "thigh_l",
        "thigh_r"
       ],
-      "tris": 3620
+      "tris": 3556
      },
      "breeches_slops": {
       "groups": [
@@ -262,8 +262,6 @@
        "lowerarm_r",
        "neck_01",
        "pelvis",
-       "pinky_01_l",
-       "pinky_01_r",
        "spine_01",
        "spine_02",
        "spine_03",
@@ -274,7 +272,7 @@
        "upperarm_l",
        "upperarm_r"
       ],
-      "tris": 9536
+      "tris": 5716
      },
      "coat_jacket": {
       "groups": [
@@ -286,8 +284,6 @@
        "lowerarm_r",
        "neck_01",
        "pelvis",
-       "pinky_01_l",
-       "pinky_01_r",
        "spine_01",
        "spine_02",
        "spine_03",
@@ -298,7 +294,7 @@
        "upperarm_l",
        "upperarm_r"
       ],
-      "tris": 6608
+      "tris": 4112
      },
      "sash": {
       "groups": [
@@ -324,7 +320,7 @@
        "upperarm_l",
        "upperarm_r"
       ],
-      "tris": 3612
+      "tris": 2924
      }
     }
    }
@@ -548,7 +544,7 @@
        "foot_l",
        "foot_r"
       ],
-      "tris": 8344
+      "tris": 1676
      },
      "boots_tall": {
       "groups": [
@@ -561,7 +557,7 @@
        "thigh_l",
        "thigh_r"
       ],
-      "tris": 18264
+      "tris": 2272
      },
      "breeches_knee": {
       "groups": [
@@ -573,7 +569,7 @@
        "thigh_l",
        "thigh_r"
       ],
-      "tris": 3720
+      "tris": 3656
      },
      "breeches_slops": {
       "groups": [
@@ -607,7 +603,7 @@
        "upperarm_l",
        "upperarm_r"
       ],
-      "tris": 8876
+      "tris": 5308
      },
      "coat_jacket": {
       "groups": [
@@ -629,7 +625,7 @@
        "upperarm_l",
        "upperarm_r"
       ],
-      "tris": 6180
+      "tris": 3840
      },
      "sash": {
       "groups": [
@@ -656,7 +652,7 @@
        "upperarm_l",
        "upperarm_r"
       ],
-      "tris": 3220
+      "tris": 2580
      }
     }
    }
@@ -878,7 +874,7 @@
        "foot_l",
        "foot_r"
       ],
-      "tris": 8344
+      "tris": 1676
      },
      "boots_tall": {
       "groups": [
@@ -891,7 +887,7 @@
        "thigh_l",
        "thigh_r"
       ],
-      "tris": 18264
+      "tris": 2272
      },
      "breeches_knee": {
       "groups": [
@@ -903,7 +899,7 @@
        "thigh_l",
        "thigh_r"
       ],
-      "tris": 3668
+      "tris": 3604
      },
      "breeches_slops": {
       "groups": [
@@ -937,7 +933,7 @@
        "upperarm_l",
        "upperarm_r"
       ],
-      "tris": 8688
+      "tris": 5200
      },
      "coat_jacket": {
       "groups": [
@@ -959,7 +955,7 @@
        "upperarm_l",
        "upperarm_r"
       ],
-      "tris": 6032
+      "tris": 3760
      },
      "sash": {
       "groups": [
@@ -986,7 +982,7 @@
        "upperarm_l",
        "upperarm_r"
       ],
-      "tris": 2984
+      "tris": 2388
      }
     }
    }

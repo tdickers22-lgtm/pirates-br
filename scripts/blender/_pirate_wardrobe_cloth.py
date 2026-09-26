@@ -211,6 +211,122 @@ def relax(B, bm, src, off, passes, pin=None):
             v.co += n * (k - s)
 
 
+def boundary_loops(bm):
+    """the shell's open boundaries as ordered vertex loops"""
+    seen, loops = set(), []
+    for v0 in bm.verts:
+        if v0 in seen or not v0.is_boundary:
+            continue
+        loop, prev, cur = [v0], None, v0
+        seen.add(v0)
+        while True:
+            nxt = None
+            for e in cur.link_edges:
+                if e.is_boundary:
+                    o = e.other_vert(cur)
+                    if o is not prev and o not in seen:
+                        nxt = o
+                        break
+            if nxt is None:
+                break
+            seen.add(nxt)
+            loop.append(nxt)
+            prev, cur = cur, nxt
+        if len(loop) >= 6:
+            loops.append(loop)
+    return loops
+
+
+def fair_rims(B, bm, src, off, span=0.04, corner_deg=60.0, passes=60):
+    """R2 F1: an opening cut on the body's face grid is a staircase (torn paper at 1.5 m). Every boundary loop becomes a
+    smooth curve: corners are found at the 3 cm scale (the staircase averages out there, a hem x front corner does
+    not) and pinned; between them the loop is Taubin-smoothed (no shrink), re-spaced evenly by arc length, then held
+    off the skin again; the two rings of faces behind the rim are relaxed so no face folds over the new edge."""
+    for loop in boundary_loops(bm):
+        n = len(loop)
+        P = [v.co.copy() for v in loop]
+        seg = [(P[(i + 1) % n] - P[i]).length for i in range(n)]
+        per = sum(seg) or 1.0
+        k = max(3, int(round(span / (per / n))))
+
+        def turn(i):
+            a, b = P[i] - P[(i - k) % n], P[(i + k) % n] - P[i]
+            return 0.0 if a.length < 1e-6 or b.length < 1e-6 else math.degrees(a.angle(b))
+        ang = [turn(i) for i in range(n)]
+        pinned = {i for i in range(n) if corner_deg < ang[i] < 140 and all(ang[i] >= ang[(i + d) % n] for d in range(-k, k + 1))}
+        pinned = set(sorted(pinned, key=lambda i: -ang[i])[:4])   # authored corners: hem x front, collar x front
+        # (a turn >= 140 deg is not a corner, it is the staircase folding back on itself: smoothed away, never pinned)
+        print(f"fair_rims: loop {n} verts, {per:.2f} m, k {k}, corners {sorted(round(ang[i]) for i in pinned)}")
+        for _ in range(passes):
+            for lam in (0.5, -0.53):
+                Q = [P[i] if i in pinned else P[i] + ((P[(i - 1) % n] + P[(i + 1) % n]) * 0.5 - P[i]) * lam for i in range(n)]
+                P = Q
+        # even arc-length spacing between consecutive corners (a closed loop without corners: from vertex 0)
+        cs = sorted(pinned) or [0]
+        newP = list(P)
+        for ci, c0 in enumerate(cs):
+            c1 = cs[(ci + 1) % len(cs)]
+            idx = [(c0 + j) % n for j in range(((c1 - c0) % n) or n)] + [c1]
+            pts = [P[i] for i in idx]
+            acc = [0.0]
+            for a, b in zip(pts, pts[1:]):
+                acc.append(acc[-1] + (b - a).length)
+            tot = acc[-1] or 1.0
+            m = len(idx) - 1
+            q = 0
+            for j in range(1, m):
+                target = tot * j / m
+                while q < m - 1 and acc[q + 1] < target:
+                    q += 1
+                u = (target - acc[q]) / max(1e-9, acc[q + 1] - acc[q])
+                newP[idx[j]] = pts[q].lerp(pts[q + 1], min(1.0, max(0.0, u)))
+        for v, co in zip(loop, newP):
+            v.co = co
+            loc, nn, fi, _ = B.bvh.find_nearest(v.co)
+            if loc is not None:
+                sd = (v.co - loc).dot(nn)
+                kk = 0.8 * off(v[src])
+                if sd < kk:
+                    v.co += nn * (kk - sd)
+    ring = {e.other_vert(v) for v in bm.verts if v.is_boundary for e in v.link_edges} - {v for v in bm.verts if v.is_boundary}
+    ring2 = ring | {e.other_vert(v) for v in ring for e in v.link_edges if not e.other_vert(v).is_boundary}
+    for _ in range(4):
+        bmesh.ops.smooth_vert(bm, verts=list(ring2), factor=0.5, use_axis_x=True, use_axis_y=True, use_axis_z=True)
+    for v in ring2:   # smoothing pulls the band into the skin: hold it off again (the relax() clearance rule)
+        loc, nn, fi, _ = B.bvh.find_nearest(v.co)
+        if loc is None:
+            continue
+        if B.part(B.F[fi][0]) != B.part(v[src]):
+            loc, nn = B.P[v[src]], B.N[v[src]]
+        sd, kk = (v.co - loc).dot(nn), 0.8 * off(v[src])
+        if sd < kk:
+            v.co += nn * (kk - sd)
+
+
+def decimate(o, ratio):
+    """R2 F9: the shell carries the body's full face density; collapse its interior (the rim loops are held by a zero
+    weight so the faired openings keep their line) before the lining doubles it"""
+    g = o.vertex_groups.new(name="_dec")
+    bnd = set()
+    for e in o.data.edges:
+        pass
+    me = o.data
+    cnt = {}
+    for poly in me.polygons:
+        for ek in poly.edge_keys:
+            cnt[ek] = cnt.get(ek, 0) + 1
+    for ek, c in cnt.items():
+        if c == 1:
+            bnd.update(ek)
+    g.add([i for i in range(len(me.vertices)) if i not in bnd], 1.0, "REPLACE")
+    g.add(list(bnd), 0.0, "REPLACE")
+    m = o.modifiers.new("dec", "DECIMATE")
+    m.decimate_type, m.ratio, m.vertex_group, m.vertex_group_factor = "COLLAPSE", ratio, g.name, 1000.0
+    with ctx(o):
+        bpy.ops.object.modifier_apply(modifier=m.name)
+    o.vertex_groups.remove(o.vertex_groups["_dec"])
+
+
 def extrude(bm, verts, move, mat=None):
     vs = set(verts)
     edges = [e for e in bm.edges if e.is_boundary and e.verts[0] in vs and e.verts[1] in vs]
@@ -310,7 +426,7 @@ def part(name, verts, faces, mat=0, uvs=None):
 
 def button(c, n, r=0.0075, depth=0.0035, mat=3, name="btn"):
     bm = bmesh.new()
-    bmesh.ops.create_cone(bm, cap_ends=True, cap_tris=False, segments=12, radius1=r, radius2=r * 0.78, depth=depth)
+    bmesh.ops.create_cone(bm, cap_ends=True, cap_tris=False, segments=8, radius1=r, radius2=r * 0.78, depth=depth)
     M = Matrix.Translation(c + n * depth * 0.5) @ n.to_track_quat("Z", "Y").to_matrix().to_4x4()
     bmesh.ops.transform(bm, matrix=M, verts=bm.verts)
     me = bpy.data.meshes.new(name)
@@ -423,7 +539,7 @@ def skirt_weights(B, top, hem, share=0.6):
 
 
 # ── upper garments ─────────────────────────────────────────────────────────────────────────────
-def upper(B, name, hem, torso_off, arm_off, gap, mats, out_dir, cuff, lapels, collar):
+def upper(B, name, hem, torso_off, arm_off, gap, mats, out_dir, cuff, lapels, collar, dec=0.6):
     def armw(i):
         return min(1.0, 1.5 * B.w(i, "upperarm", "lowerarm"))
 
@@ -456,6 +572,7 @@ def upper(B, name, hem, torso_off, arm_off, gap, mats, out_dir, cuff, lapels, co
         v.co.x = B.cx + math.copysign(gap, v.co.x - B.cx)
     for v in hemv:
         v.co.z = hem
+    fair_rims(B, bm, src, off)
     if cuff:
         lip, back, flare, mat = cuff
         nv = extrude(bm, wrist, lambda v: v.co + B.arm_radial(v.co, B.side(v.co))[0] * lip, mat)
@@ -479,6 +596,7 @@ def upper(B, name, hem, torso_off, arm_off, gap, mats, out_dir, cuff, lapels, co
         extrude(bm, front, lap, 1)
     orient(B, bm)
     o = to_obj(name, bm, mats, out_dir)
+    decimate(o, dec)
     solidify(o, 0.0032)
     bridge_folds(o, B, ["spine_02", "spine_03", "upperarm_l", "upperarm_r", "lowerarm_l", "lowerarm_r"])
     return o
@@ -576,7 +694,7 @@ def coat_frock(B, out_dir):
     parts = []
     # skirt: two panels (left through +X, right through -X) from the waist to below the knee
     top, hem = B.waist + 0.03, B.knee - 0.03
-    rows, cols = 16, 22
+    rows, cols = 12, 16
     for side in (0, 1):
         verts, faces = [], []
         for r in range(rows):
@@ -651,8 +769,10 @@ def vest_waistcoat(B, out_dir):
     for v in bm.verts:
         if v.is_boundary and v.co.z < B.waist:
             v.co.z = hem - (0.03 * max(0.0, 1 - abs(v.co.x - B.cx) / 0.09) if v.co.y < B.cy else 0.0)   # front points
+    fair_rims(B, bm, src, lambda i: 0.013)
     orient(B, bm)
     o = to_obj("vest_waistcoat", bm, ["brocade", "crew", "crew", "gold"], out_dir)
+    decimate(o, 0.8)
     o.data.materials[1] = W.material("breeches", out_dir)   # plain wool back lining, not the crew colour
     o.data.materials[2] = W.material("breeches", out_dir)
     solidify(o, 0.0025)
@@ -846,9 +966,9 @@ def boots(B, kind, out_dir):
     extra room over the toes. Below it a welted sole (outset, dark) and a stacked heel block at the back."""
     tall = kind == "tall"
     top = B.knee + 0.04 if tall else B.ankle + 0.035
-    N = 48
+    N = 20 if tall else 26   # shoes: a 20-gon toe box chord cut the stout and female toes (R2 budget pass)
     bm = bmesh.new()
-    heels = []
+    heels, tops = [], []
     for s in "lr":
         idx = [i for i in range(len(B.P)) if B.P[i].z < top + 0.03 and B.side(B.P[i]) == s
                and B.w(i, "upperarm", "lowerarm", *HAND) < 0.2 and B.w(i, "thigh", "calf", "foot", "ball") > 0.3]
@@ -872,7 +992,7 @@ def boots(B, kind, out_dir):
         zs, z = [], zmin + 0.016
         while z < top - 1e-4:
             zs.append(z)
-            z += 0.007 if z < B.ankle + 0.06 else 0.02
+            z += 0.014 if z < B.ankle + 0.06 else 0.045
         zs.append(top)
         rings = []   # (z, pts, material of the band BELOW this ring)
         sole_pts = slab(zmin + 0.006, 0.012)
@@ -883,7 +1003,9 @@ def boots(B, kind, out_dir):
         rings.append((zmin + 0.009, up0, 0))
         for z in zs:
             # the slab is dilated vertically by the offset too, so a ring above the toes still clears them
-            ring, _ = _outline(slab(z, off(z) + 0.004), off(z), back, N)
+            # the slab reaches half way to the next ring, so the straight band between two sparse rings still clears
+            # the calf bulge between them (the R2 budget pass spaced shaft rings 4.5 cm)
+            ring, _ = _outline(slab(z, max(off(z) + 0.004, 0.6 * (0.014 if z < B.ankle + 0.06 else 0.045))), off(z), back, N)
             rings.append((z, ring, 0))
         zt, rt, _ = rings[-1]
         cx, cy = sum(q[0] for q in rt) / N, sum(q[1] for q in rt) / N
@@ -896,6 +1018,7 @@ def boots(B, kind, out_dir):
         else:      # shoe collar lip
             rings.append(flare(0.002, 0.006))
         vs = [[bm.verts.new((x, y, z)) for (x, y) in r] for (z, r, _) in rings]
+        tops.append(vs[-1])
         for k in range(len(rings) - 1):
             for j in range(N):
                 f = bm.faces.new((vs[k][j], vs[k][(j + 1) % N], vs[k + 1][(j + 1) % N], vs[k + 1][j]))
@@ -916,8 +1039,16 @@ def boots(B, kind, out_dir):
         heels.append((poly, inner, zmin - 0.008, zmin + 0.030))
     bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=1e-5)
     orient(B, bm)
+    for top_ring in tops:   # the lining lip: 4 mm in, 25 mm down (the leather reads thick at the opening, no solidify)
+        cx_ = sum(v.co.x for v in top_ring) / N
+        cy_ = sum(v.co.y for v in top_ring) / N
+
+        def lip(v, d, dz):
+            r = Vector((v.co.x - cx_, v.co.y - cy_, 0))
+            return v.co - r.normalized() * d + UP * dz
+        nv = extrude(bm, top_ring, lambda v: lip(v, 0.004, -0.002), 1)
+        extrude(bm, nv, lambda v: lip(v, 0.0, -0.025), 1)
     o = to_obj(f"boots_{kind}", bm, ["leather", "leather", "band", "gold"], out_dir)
-    solidify(o, 0.003, 0)
     parts = []
     for n_, (poly, inner, z0, z1) in enumerate(heels):
         # a C-section solid round the back of the sole: outer wall, top lift, inner wall buried in the upper, and
