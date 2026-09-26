@@ -8,7 +8,7 @@ import type {
 } from '../../shared/types/index.js';
 import { wheelPocketForSlot, wheelSlotForTool } from '../../shared/wheel.js';
 import { foliageWindInto } from '../rendering/signConventions.js';
-import { sampleLocalWind, WALK_FOOTPRINT_MARGIN, dist2D, finiteClamp, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, isOnDockDeck, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getShipCompanionwayConfig, getSwimHullVerticalBand, getSwimHullVerticalT, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
+import { sampleLocalWind, WALK_FOOTPRINT_MARGIN, dist2D, finiteClamp, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, isOnDockDeck, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getShipCompanionwayConfig, getSwimHullVerticalBand, getSwimHullVerticalT, getShipQuarterdeckConfig, getShipDeckY, getShipDeckRaiseAt } from '../../shared/utils/index.js';
 import { getPropGroundY, getSeatSurfaceY } from '../../shared/props.js';
 import { seatedEntityY } from '../world/island/EntityMeshes.js';
 import {
@@ -23,6 +23,7 @@ import {
   toShipLocalPoint,
   toShipLocal3,
   toShipWorld3,
+  getHelmControlLocal,
   countOpenHoles,
   findRepairableHole as sharedFindRepairableHole,
 } from '../../shared/interactions.js';
@@ -519,6 +520,9 @@ type StoryBeacon = {
   halo: THREE.Sprite;
   worldPos: THREE.Vector3;
 };
+
+/** b3.3c: the hull-origin frame for undoing a snapshot hull's attitude. */
+const ORIGIN3 = { x: 0, y: 0, z: 0 } as const;
 
 export class Game {
   /** Server world snapshot + id indexes (see core/ClientState.ts). Declared
@@ -4543,12 +4547,26 @@ export class Game {
           // drawn hull's own smoothing does, it does to the men standing on it.
           const ship = this.shipsById.get(player.onShipId) ?? null;
           if (ship) {
+            // b3.3c: the buffer holds the offset with only the hull YAW undone
+            // (ClientState), so the SERVER's pitch and roll are still baked into
+            // it. Composing that onto the drawn hull's yaw alone left a body on a
+            // pitching sloop 0.6-0.9 m from its own wheel (rig-contacts probe):
+            // the wheel rides the drawn attitude, the helmsman the server's.
+            // Undo the snapshot hull's attitude, then re-apply the drawn one,
+            // exactly as the dead-reckoned branch below does.
+            const seat = toShipLocal3(pose, {
+              position: ORIGIN3, rotation: 0, pitch: ship.pitch ?? 0, roll: ship.roll ?? 0,
+            });
             const hull = this.readShipRenderPose(ship);
-            const hullCos = Math.cos(hull.yaw);
-            const hullSin = Math.sin(hull.yaw);
-            predictedX = hull.x + pose.x * hullCos + pose.z * hullSin;
-            predictedZ = hull.z + pose.z * hullCos - pose.x * hullSin;
-            visualY = hull.y + pose.y;
+            const drawn = toShipWorld3(seat, {
+              position: { x: hull.x, y: hull.y, z: hull.z },
+              rotation: hull.yaw,
+              pitch: hull.pitch,
+              roll: hull.roll,
+            });
+            predictedX = drawn.x;
+            predictedZ = drawn.z;
+            visualY = drawn.y;
           } else {
             placedFromBuffer = false;
           }
@@ -4773,6 +4791,29 @@ export class Game {
         }
       }
     }
+    // b3.3c (animations-02): A HELMSMAN STANDS ON THE HELM MARK OF THE DRAWN HULL.
+    // The server stands him at getHelmControlLocal on its own flat, yaw-only
+    // hull (Match.snapPlayerToHelm, BotPirate.standStation), while the wheel he
+    // grips rides the drawn hull's pitch, roll and heave. Composing the server
+    // point back through either placement branch above left the wheel 0.49 to
+    // 0.93 m ahead and 0.76 to 1.21 m up across eight live sloops (rig-contacts
+    // probe), past what the IK lean can close. The mark is a fixed ship-local
+    // point, so place it on the hull as drawn, like the wheel itself.
+    if (player.atHelm && player.onShipId && player.state === 'alive') {
+      const helmShip = this.shipsById.get(player.onShipId) ?? null;
+      if (helmShip) {
+        const stats = SHIP_STATS[helmShip.type];
+        const mark = getHelmControlLocal(stats);
+        const hull = this.readShipRenderPose(helmShip);
+        const drawn = toShipWorld3(
+          { x: mark.x, y: getShipDeckY(0, stats) + getShipDeckRaiseAt(mark, stats), z: mark.z },
+          { position: { x: hull.x, y: hull.y, z: hull.z }, rotation: hull.yaw, pitch: hull.pitch, roll: hull.roll },
+        );
+        predictedX = drawn.x;
+        predictedZ = drawn.z;
+        visualY = drawn.y;
+      }
+    }
     this.tempRenderPos.set(predictedX, visualY, predictedZ);
     return this.tempRenderPos;
   }
@@ -4860,9 +4901,12 @@ export class Game {
     }
     ud.deckX = localX;
     ud.deckZ = localZ;
+    // b3.3c: a body at a station does not walk, so there is no step to smooth;
+    // the eased height trailed the heaving hull by 0.2 m under the wheel.
+    const stationBound = player.atHelm || player.atCannon;
     mesh.position.set(
       hull.x + localX * cos + localZ * sin,
-      mesh.position.y + (targetPos.y - mesh.position.y) * positionAlpha,
+      stationBound ? targetPos.y : mesh.position.y + (targetPos.y - mesh.position.y) * positionAlpha,
       hull.z + localZ * cos - localX * sin,
     );
   }
@@ -5031,7 +5075,8 @@ export class Game {
       const lookYaw = isLocal ? this.input.getYaw() : remotePose?.yaw ?? player.rotation.x;
       let targetYaw: number;
       if (player.atHelm && ship) {
-        targetYaw = ship.rotation;
+        // the DRAWN hull's heading (the wheel's), not the snapshot's
+        targetYaw = this.readShipRenderPose(ship).yaw;
       } else if (isLocal) {
         targetYaw = lookYaw;
       } else {
@@ -5144,7 +5189,11 @@ export class Game {
           targetPos.z -= Math.cos(targetYaw) * 0.62;
         }
         this.easePlayerToward(mesh, player, targetPos, positionAlpha, isLocal ? 20 * 20 : 34 * 34);
-        mesh.rotation.y += angleWrap(targetYaw - mesh.rotation.y) * (isLocal ? 1 : rotationAlpha);
+        // b3.3c: a helmsman is welded to the wheel he holds; eased yaw lagged a
+        // turning hull and swung his hands off the pegs. Only the step onto the
+        // helm (a large offset) still eases.
+        const yawErr = angleWrap(targetYaw - mesh.rotation.y);
+        mesh.rotation.y += yawErr * (isLocal || (player.atHelm && ship && Math.abs(yawErr) < 0.35) ? 1 : rotationAlpha);
       }
 
       // Downed pirates read prone at a glance: face-DOWN on the deck (not

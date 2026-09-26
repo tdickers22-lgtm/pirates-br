@@ -193,7 +193,10 @@ async function installInPage() {
         const d = h.getWorldPosition(new V()).distanceTo(mesh.position);
         if (d < bd) { bd = d; holder = h; }
       }
-      st.last = holder ? { ...measure(mesh, holder), atHelm: player.atHelm, ship: shp?.type ?? null, clip: mesh.userData.rig.upper?.name ?? null } : { noHolder: true };
+      // A distant hull drawn at far LOD carries no tagged wheel (and Game drops the
+      // body's rig tier there too): that helmsman is not at full detail, so it is
+      // reported as skipped, not graded.
+      st.last = holder ? { ...measure(mesh, holder), atHelm: player.atHelm, ship: shp?.type ?? null, clip: mesh.userData.rig.upper?.name ?? null } : { noWheel: true, ship: shp?.type ?? null };
       return;
     }
     const { stand, holder } = stage(st.mode);
@@ -304,9 +307,12 @@ try {
       ['cannon', 'cannon', bodyId],
       ['ladder', 'ladder', bodyId],
     ];
+    let liveHelmGraded = 0;
     for (const [kind, mode, id] of stations) {
       const m = await run(page, mode, id);
       report.stations[kind] = { mode, id, ...m };
+      if (m?.noWheel) { console.log(`  ${kind} [LIVE bot at the wheel of a ${m.ship}]: skipped, the hull is not drawn at full detail (no tagged wheel)`); continue; }
+      if (mode === 'live-helm' && m && !m.noHolder && !m.noBody && !m.error) liveHelmGraded += 1;
       if (!m || m.noHolder || m.noBody || m.error) { expect(`${kind}: holder found`, false, JSON.stringify(m)); continue; }
       if (m.ship) report.stations[kind].shipType = m.ship;
       const fmt = (v) => (v === null ? 'no hand' : v.toFixed(3));
@@ -314,6 +320,7 @@ try {
       expect(`${kind}: left palm <= ${TOL} m from a grip`, m.l !== null && m.l <= TOL, fmt(m.l));
       expect(`${kind}: right palm <= ${TOL} m from a grip`, m.r !== null && m.r <= TOL, fmt(m.r));
     }
+    if (helmsmen.length) expect('at least one live helmsman graded at full detail (non-vacuous)', liveHelmGraded > 0, `${liveHelmGraded}`);
   }
 } catch (e) {
   failures += 1;
