@@ -1,3 +1,4 @@
+import { IK_GRIPS_KEY } from './character/ikSolvers.js';
 import * as THREE from 'three';
 import { braceCatch } from '../../shared/sailing.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
@@ -1462,6 +1463,8 @@ export class ShipRenderer {
       peg.position.set(Math.cos(ang) * (rimR + 0.02), Math.sin(ang) * (rimR + 0.02), 0.06);
       wheelGroup.add(peg);
     }
+    // b3.3c: peg grips for the helmsman's hand IK, local to the spinning wheel.
+    wheelGroup.userData[IK_GRIPS_KEY] = { kind: 'helm', points: Array.from({ length: spokeCount }, (_, i) => new THREE.Vector3(Math.cos(i / spokeCount * Math.PI * 2) * (rimR + 0.02), Math.sin(i / spokeCount * Math.PI * 2) * (rimR + 0.02), 0.1)) };
 
     // Compass binnacle at the foot of the helm steps (on the main deck, just
     // forward of the raised dais so it doesn't sink into the platform).
@@ -1522,6 +1525,8 @@ export class ShipRenderer {
     capstanHub.castShadow = true;
     anchorCapstan.add(capstanHub);
     let capstanGrip: THREE.Mesh | undefined;
+    // b3.3c: bar-end knob grips for the capstan pusher's hand IK.
+    anchorCapstan.userData[IK_GRIPS_KEY] = { kind: 'capstan', points: Array.from({ length: 8 }, (_, i) => new THREE.Vector3(Math.cos(i / 8 * Math.PI * 2) * 0.66, 0.88, -Math.sin(i / 8 * Math.PI * 2) * 0.66)) };
     // Four bars, each spanning the full wheel, give the eight spoke ends. Eight
     // bars at 45 deg steps drew every bar twice (spoke k and k+4 are the same
     // box turned 180 deg), a coplanar pair that fought on every face and doubled
@@ -1908,6 +1913,11 @@ export class ShipRenderer {
         rung.castShadow = true;
         group.add(rung);
       }
+      // b3.3c: rung grips for the climber's hand IK (both ends of every rung).
+      const ladderGrips = new THREE.Object3D();
+      ladderGrips.name = 'mast-ladder-grips';
+      ladderGrips.userData[IK_GRIPS_KEY] = { kind: 'ladder', points: Array.from({ length: (rungCount + 1) * 2 }, (_, i) => new THREE.Vector3((i % 2 ? 1 : -1) * rungSpan * 0.3, ladderBottom + (Math.floor(i / 2) / rungCount) * ladderH, mainMastZ)) };
+      group.add(ladderGrips);
     }
 
     // Shared centerline sail ring, separated from side cannon click zones and anchor capstan.
@@ -2290,6 +2300,8 @@ export class ShipRenderer {
         cg.position.set(sideX, H + 0.18, cz);
         cg.rotation.y = side === 0 ? 0 : Math.PI;
         group.add(cg);
+        // b3.3c: breech handle grips for the gunner's hand IK (behind the cascabel).
+        pitchPivot.userData[IK_GRIPS_KEY] = { kind: 'cannon', points: [new THREE.Vector3(-0.28, 0.1, 0.2), new THREE.Vector3(-0.28, 0.1, -0.2)] };
         cannonGroups.push({ root: cg, yawPivot, pitchPivot });
       }
     }
