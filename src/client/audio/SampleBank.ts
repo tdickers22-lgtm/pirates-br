@@ -14,8 +14,9 @@
  *   (late) or evicted returns null and the caller plays its procedural voice instead.
  */
 
-export type SampleKind = 'oneshot' | 'bed' | 'ui';
-export type SampleTier = 'boot' | 'match' | 'zones';
+/** `note` = a sampled music instrument pitch or drum hit (b3.5g, music tier, -20 LUFS, <= 2.4 s). */
+export type SampleKind = 'oneshot' | 'bed' | 'ui' | 'note';
+export type SampleTier = 'boot' | 'match' | 'zones' | 'music';
 
 export interface SampleManifestFile {
   file: string;
@@ -49,10 +50,10 @@ export interface SampleBankDeps<B extends DecodedLike> {
 
 export const MB = 1024 * 1024;
 export const DECODED_CAP_BYTES = { desktop: 64 * MB, phone: 40 * MB } as const;
-export const DURATION_CAP_S: Readonly<Record<SampleKind, number>> = { oneshot: 3, ui: 3, bed: 12 };
+export const DURATION_CAP_S: Readonly<Record<SampleKind, number>> = { oneshot: 3, ui: 3, bed: 12, note: 3 };
 const DURATION_SLACK_S = 0.05;
 export const MAX_CONCURRENT_DECODES = 3;
-const TIER_RANK: Record<SampleTier, number> = { boot: 1, match: 2, zones: 3 };
+const TIER_RANK: Record<SampleTier, number> = { boot: 1, match: 2, zones: 3, music: 3 };
 /** An event asked for this key right now: ahead of every preload. */
 const URGENT_RANK = 0;
 const RETRY_AFTER_MS = 30_000;

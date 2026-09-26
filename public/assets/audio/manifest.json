@@ -6,12 +6,14 @@
   "targetsLufs": {
     "oneshot": -18,
     "ui": -24,
-    "bed": -26
+    "bed": -26,
+    "note": -20
   },
   "tierBytes": {
     "boot": 215546,
     "match": 1472364,
-    "zones": 461841
+    "zones": 461841,
+    "music": 538461
   },
   "keys": {
     "ui.click": {
@@ -2015,6 +2017,600 @@
           "channels": 1,
           "lufs": -18.3,
           "peakDb": -1.8
+        }
+      ]
+    },
+    "music.fiddle.C4": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.fiddle.C4.1.mp3",
+          "source": "mus_fiddle_C4",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.5,
+          "peakDb": -9.6
+        }
+      ]
+    },
+    "music.fiddle.E4": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.fiddle.E4.1.mp3",
+          "source": "mus_fiddle_E4",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.5,
+          "peakDb": -8.2
+        }
+      ]
+    },
+    "music.fiddle.G4": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.fiddle.G4.1.mp3",
+          "source": "mus_fiddle_G4",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.5,
+          "peakDb": -10.6
+        }
+      ]
+    },
+    "music.fiddle.A4": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.fiddle.A4.1.mp3",
+          "source": "mus_fiddle_A4",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.5,
+          "peakDb": -8
+        }
+      ]
+    },
+    "music.fiddle.C5": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.fiddle.C5.1.mp3",
+          "source": "mus_fiddle_C5",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.4,
+          "peakDb": -10.9
+        }
+      ]
+    },
+    "music.fiddle.E5": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.fiddle.E5.1.mp3",
+          "source": "mus_fiddle_E5",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.4,
+          "peakDb": -10.5
+        }
+      ]
+    },
+    "music.fiddle.G5": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.fiddle.G5.1.mp3",
+          "source": "mus_fiddle_G5",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.4,
+          "peakDb": -10.6
+        }
+      ]
+    },
+    "music.fiddle.A5": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.fiddle.A5.1.mp3",
+          "source": "mus_fiddle_A5",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.4,
+          "peakDb": -10.3
+        }
+      ]
+    },
+    "music.fiddle.C6": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.fiddle.C6.1.mp3",
+          "source": "mus_fiddle_C6",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.4,
+          "peakDb": -9.5
+        }
+      ]
+    },
+    "music.fiddle.E6": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.fiddle.E6.1.mp3",
+          "source": "mus_fiddle_E6",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.4,
+          "peakDb": -9.6
+        }
+      ]
+    },
+    "music.concertina.C3": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.concertina.C3.1.mp3",
+          "source": "mus_concertina_C3",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.4,
+          "peakDb": -11.8
+        }
+      ]
+    },
+    "music.concertina.E3": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.concertina.E3.1.mp3",
+          "source": "mus_concertina_E3",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.4,
+          "peakDb": -11.5
+        }
+      ]
+    },
+    "music.concertina.G3": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.concertina.G3.1.mp3",
+          "source": "mus_concertina_G3",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.5,
+          "peakDb": -8.5
+        }
+      ]
+    },
+    "music.concertina.C4": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.concertina.C4.1.mp3",
+          "source": "mus_concertina_C4",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.3,
+          "peakDb": -8.6
+        }
+      ]
+    },
+    "music.concertina.E4": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.concertina.E4.1.mp3",
+          "source": "mus_concertina_E4",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.5,
+          "peakDb": -11.5
+        }
+      ]
+    },
+    "music.concertina.G4": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.concertina.G4.1.mp3",
+          "source": "mus_concertina_G4",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.4,
+          "peakDb": -10.9
+        }
+      ]
+    },
+    "music.concertina.C5": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.concertina.C5.1.mp3",
+          "source": "mus_concertina_C5",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.4,
+          "peakDb": -12.7
+        }
+      ]
+    },
+    "music.concertina.E5": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.concertina.E5.1.mp3",
+          "source": "mus_concertina_E5",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.4,
+          "peakDb": -10.6
+        }
+      ]
+    },
+    "music.concertina.G5": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.concertina.G5.1.mp3",
+          "source": "mus_concertina_G5",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.4,
+          "peakDb": -14.4
+        }
+      ]
+    },
+    "music.whistle.C5": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.whistle.C5.1.mp3",
+          "source": "mus_whistle_C5",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.4,
+          "peakDb": -15.5
+        }
+      ]
+    },
+    "music.whistle.D5": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.whistle.D5.1.mp3",
+          "source": "mus_whistle_D5",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.4,
+          "peakDb": -9.5
+        }
+      ]
+    },
+    "music.whistle.E5": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.whistle.E5.1.mp3",
+          "source": "mus_whistle_E5",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.5,
+          "peakDb": -13.9
+        }
+      ]
+    },
+    "music.whistle.Fs5": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.whistle.Fs5.1.mp3",
+          "source": "mus_whistle_Fs5",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.4,
+          "peakDb": -14
+        }
+      ]
+    },
+    "music.whistle.Gs5": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.whistle.Gs5.1.mp3",
+          "source": "mus_whistle_Gs5",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.5,
+          "peakDb": -13.5
+        }
+      ]
+    },
+    "music.whistle.As5": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.whistle.As5.1.mp3",
+          "source": "mus_whistle_As5",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.4,
+          "peakDb": -14.2
+        }
+      ]
+    },
+    "music.whistle.C6": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.whistle.C6.1.mp3",
+          "source": "mus_whistle_C6",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.4,
+          "peakDb": -15.9
+        }
+      ]
+    },
+    "music.whistle.D6": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.whistle.D6.1.mp3",
+          "source": "mus_whistle_D6",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.4,
+          "peakDb": -14.4
+        }
+      ]
+    },
+    "music.whistle.E6": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.whistle.E6.1.mp3",
+          "source": "mus_whistle_E6",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.5,
+          "peakDb": -10.2
+        }
+      ]
+    },
+    "music.whistle.G6": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.whistle.G6.1.mp3",
+          "source": "mus_whistle_G6",
+          "bytes": 17187,
+          "duration": 2.4,
+          "channels": 1,
+          "lufs": -20.4,
+          "peakDb": -16
+        }
+      ]
+    },
+    "music.bodhran": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.bodhran.1.mp3",
+          "source": "mus_bodhran_HDrumL_Hit_v3_rr1_Sum",
+          "bytes": 8776,
+          "duration": 1.2,
+          "channels": 1,
+          "lufs": -20.7,
+          "peakDb": -2
+        },
+        {
+          "file": "music/music.bodhran.2.mp3",
+          "source": "mus_bodhran_HDrumL_Hit_v3_rr2_Sum",
+          "bytes": 8776,
+          "duration": 1.2,
+          "channels": 1,
+          "lufs": -20.7,
+          "peakDb": -1.9
+        },
+        {
+          "file": "music/music.bodhran.3.mp3",
+          "source": "mus_bodhran_HDrumL_Hit_v2_rr1_Sum",
+          "bytes": 8776,
+          "duration": 1.2,
+          "channels": 1,
+          "lufs": -20.3,
+          "peakDb": -1.6
+        }
+      ]
+    },
+    "music.framedrum": {
+      "tier": "music",
+      "kind": "note",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -20,
+      "files": [
+        {
+          "file": "music/music.framedrum.1.mp3",
+          "source": "mus_framedrum_HDrumS_HitMuted_v2_rr1_Sum",
+          "bytes": 4570,
+          "duration": 0.6,
+          "channels": 1,
+          "lufs": -20.6,
+          "peakDb": -1.8
+        },
+        {
+          "file": "music/music.framedrum.2.mp3",
+          "source": "mus_framedrum_HDrumS_HitMuted_v3_rr1_Sum",
+          "bytes": 4570,
+          "duration": 0.6,
+          "channels": 1,
+          "lufs": -20.2,
+          "peakDb": -2
+        },
+        {
+          "file": "music/music.framedrum.3.mp3",
+          "source": "mus_framedrum_HDrumS_HitMuted_v3_rr2_Sum",
+          "bytes": 4570,
+          "duration": 0.6,
+          "channels": 1,
+          "lufs": -20.4,
+          "peakDb": -1.5
         }
       ]
     }

@@ -1,5 +1,5 @@
 {
-  "$comment": "The ONLY way audio enters public/assets/audio (D31). Edit this file, run `node scripts/audio/build-audio.mjs`, commit the outputs. Every source needs a licence from allowedLicenses; CC-BY-* also needs a shipped credit (credits.json). Kinds set loudness: oneshot -18, bed -26, ui -24 LUFS (+-1 LU). Tiers: boot <= 1.5 MB, match <= 3.5 MB, music <= 1.0 MB (reserved for b3.5g), zones <= 2.0 MB, total <= 8 MB. frequent:true keys need >= 3 variants. Variants: src + member (archive path) | start/dur (s) | split (index of the n-th non-silent segment) | semitones (derived pitch variant) ; beds are cut as seamless loops of loopLen s with a crossfade of xfade s.",
+  "$comment": "The ONLY way audio enters public/assets/audio (D31). Edit this file, run `node scripts/audio/build-audio.mjs`, commit the outputs. Every source needs a licence from allowedLicenses; CC-BY-* also needs a shipped credit (credits.json). Kinds set loudness: oneshot -18, bed -26, ui -24, note -20 LUFS (music instrument samples, b3.5g: one key per sampled pitch, music.<instrument>.<sounding note, s = sharp>, pitch measured, not taken from the source file name) (+-1 LU). Tiers: boot <= 1.5 MB, match <= 3.5 MB, music <= 1.0 MB (reserved for b3.5g), zones <= 2.0 MB, total <= 8 MB. frequent:true keys need >= 3 variants. Variants: src + member (archive path) | start/dur (s) | split (index of the n-th non-silent segment) | semitones (derived pitch variant) ; beds are cut as seamless loops of loopLen s with a crossfade of xfade s.",
   "allowedLicenses": [
     "CC0-1.0",
     "PD",
@@ -14,12 +14,12 @@
     "oneshot": {
       "lufs": -18,
       "bitrate": 80,
-      "maxDur": 3.0
+      "maxDur": 3
     },
     "ui": {
       "lufs": -24,
       "bitrate": 64,
-      "maxDur": 3.0
+      "maxDur": 3
     },
     "bed": {
       "lufs": -26,
@@ -27,6 +27,11 @@
       "stereoBitrate": 96,
       "loopLen": 10,
       "xfade": 0.6
+    },
+    "note": {
+      "lufs": -20,
+      "bitrate": 56,
+      "maxDur": 2.4
     }
   },
   "sources": {
@@ -305,6 +310,216 @@
       "page": "https://bigsoundbank.com/big-branching-fire-1-s0987.html",
       "author": "Joseph Sardin (BigSoundBank.com)",
       "license": "CC0-1.0"
+    },
+    "mus_fiddle_C4": {
+      "url": "https://raw.githubusercontent.com/sgossner/VSCO-2-CE/440300901dfe9275fd84e0b7763af1f8443ae62e/Strings/Solo%20Violin/Arco%20Vib/LLVln_ArcoVib_C4_f.wav",
+      "page": "https://github.com/sgossner/VSCO-2-CE",
+      "author": "VSCO-2-CE Solo Violin (Arco Vib, f), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_fiddle_E4": {
+      "url": "https://raw.githubusercontent.com/sgossner/VSCO-2-CE/440300901dfe9275fd84e0b7763af1f8443ae62e/Strings/Solo%20Violin/Arco%20Vib/LLVln_ArcoVib_E4_f.wav",
+      "page": "https://github.com/sgossner/VSCO-2-CE",
+      "author": "VSCO-2-CE Solo Violin (Arco Vib, f), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_fiddle_G4": {
+      "url": "https://raw.githubusercontent.com/sgossner/VSCO-2-CE/440300901dfe9275fd84e0b7763af1f8443ae62e/Strings/Solo%20Violin/Arco%20Vib/LLVln_ArcoVib_G4_f.wav",
+      "page": "https://github.com/sgossner/VSCO-2-CE",
+      "author": "VSCO-2-CE Solo Violin (Arco Vib, f), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_fiddle_A4": {
+      "url": "https://raw.githubusercontent.com/sgossner/VSCO-2-CE/440300901dfe9275fd84e0b7763af1f8443ae62e/Strings/Solo%20Violin/Arco%20Vib/LLVln_ArcoVib_A4_f.wav",
+      "page": "https://github.com/sgossner/VSCO-2-CE",
+      "author": "VSCO-2-CE Solo Violin (Arco Vib, f), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_fiddle_C5": {
+      "url": "https://raw.githubusercontent.com/sgossner/VSCO-2-CE/440300901dfe9275fd84e0b7763af1f8443ae62e/Strings/Solo%20Violin/Arco%20Vib/LLVln_ArcoVib_C5_f.wav",
+      "page": "https://github.com/sgossner/VSCO-2-CE",
+      "author": "VSCO-2-CE Solo Violin (Arco Vib, f), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_fiddle_E5": {
+      "url": "https://raw.githubusercontent.com/sgossner/VSCO-2-CE/440300901dfe9275fd84e0b7763af1f8443ae62e/Strings/Solo%20Violin/Arco%20Vib/LLVln_ArcoVib_E5_f.wav",
+      "page": "https://github.com/sgossner/VSCO-2-CE",
+      "author": "VSCO-2-CE Solo Violin (Arco Vib, f), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_fiddle_G5": {
+      "url": "https://raw.githubusercontent.com/sgossner/VSCO-2-CE/440300901dfe9275fd84e0b7763af1f8443ae62e/Strings/Solo%20Violin/Arco%20Vib/LLVln_ArcoVib_G5_f.wav",
+      "page": "https://github.com/sgossner/VSCO-2-CE",
+      "author": "VSCO-2-CE Solo Violin (Arco Vib, f), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_fiddle_A5": {
+      "url": "https://raw.githubusercontent.com/sgossner/VSCO-2-CE/440300901dfe9275fd84e0b7763af1f8443ae62e/Strings/Solo%20Violin/Arco%20Vib/LLVln_ArcoVib_A5_f.wav",
+      "page": "https://github.com/sgossner/VSCO-2-CE",
+      "author": "VSCO-2-CE Solo Violin (Arco Vib, f), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_fiddle_C6": {
+      "url": "https://raw.githubusercontent.com/sgossner/VSCO-2-CE/440300901dfe9275fd84e0b7763af1f8443ae62e/Strings/Solo%20Violin/Arco%20Vib/LLVln_ArcoVib_C6_f.wav",
+      "page": "https://github.com/sgossner/VSCO-2-CE",
+      "author": "VSCO-2-CE Solo Violin (Arco Vib, f), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_fiddle_E6": {
+      "url": "https://raw.githubusercontent.com/sgossner/VSCO-2-CE/440300901dfe9275fd84e0b7763af1f8443ae62e/Strings/Solo%20Violin/Arco%20Vib/LLVln_ArcoVib_E6_f.wav",
+      "page": "https://github.com/sgossner/VSCO-2-CE",
+      "author": "VSCO-2-CE Solo Violin (Arco Vib, f), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_concertina_C3": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Free%20Aerophones/Harmonica-Hohner-Super64/Sustains/Normal/Hohner-Super64_Normal%20_C2.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Hohner Super64 harmonica (free reed), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_concertina_E3": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Free%20Aerophones/Harmonica-Hohner-Super64/Sustains/Normal/Hohner-Super64_Normal%20_E2.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Hohner Super64 harmonica (free reed), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_concertina_G3": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Free%20Aerophones/Harmonica-Hohner-Super64/Sustains/Normal/Hohner-Super64_Normal%20_G2.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Hohner Super64 harmonica (free reed), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_concertina_C4": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Free%20Aerophones/Harmonica-Hohner-Super64/Sustains/Normal/Hohner-Super64_Normal%20_C3.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Hohner Super64 harmonica (free reed), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_concertina_E4": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Free%20Aerophones/Harmonica-Hohner-Super64/Sustains/Normal/Hohner-Super64_Normal%20_E3.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Hohner Super64 harmonica (free reed), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_concertina_G4": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Free%20Aerophones/Harmonica-Hohner-Super64/Sustains/Normal/Hohner-Super64_Normal%20_G3.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Hohner Super64 harmonica (free reed), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_concertina_C5": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Free%20Aerophones/Harmonica-Hohner-Super64/Sustains/Normal/Hohner-Super64_Normal%20_C4.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Hohner Super64 harmonica (free reed), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_concertina_E5": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Free%20Aerophones/Harmonica-Hohner-Super64/Sustains/Normal/Hohner-Super64_Normal%20_E4.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Hohner Super64 harmonica (free reed), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_concertina_G5": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Free%20Aerophones/Harmonica-Hohner-Super64/Sustains/Normal/Hohner-Super64_Normal%20_G4.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Hohner Super64 harmonica (free reed), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_whistle_C5": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Edge-blown%20Aerophones/Baroque%20Soprano%20Recorder/Sustain/SopRecorder_Sus_C4_rr1_Main.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Baroque Soprano Recorder (sustain), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_whistle_D5": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Edge-blown%20Aerophones/Baroque%20Soprano%20Recorder/Sustain/SopRecorder_Sus_D4_rr1_Main.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Baroque Soprano Recorder (sustain), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_whistle_E5": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Edge-blown%20Aerophones/Baroque%20Soprano%20Recorder/Sustain/SopRecorder_Sus_E4_rr1_Main.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Baroque Soprano Recorder (sustain), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_whistle_Fs5": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Edge-blown%20Aerophones/Baroque%20Soprano%20Recorder/Sustain/SopRecorder_Sus_F%234_rr1_Main.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Baroque Soprano Recorder (sustain), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_whistle_Gs5": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Edge-blown%20Aerophones/Baroque%20Soprano%20Recorder/Sustain/SopRecorder_Sus_G%234_rr1_Main.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Baroque Soprano Recorder (sustain), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_whistle_As5": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Edge-blown%20Aerophones/Baroque%20Soprano%20Recorder/Sustain/SopRecorder_Sus_A%234_rr1_Main.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Baroque Soprano Recorder (sustain), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_whistle_C6": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Edge-blown%20Aerophones/Baroque%20Soprano%20Recorder/Sustain/SopRecorder_Sus_C5_rr1_Main.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Baroque Soprano Recorder (sustain), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_whistle_D6": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Edge-blown%20Aerophones/Baroque%20Soprano%20Recorder/Sustain/SopRecorder_Sus_D5_rr1_Main.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Baroque Soprano Recorder (sustain), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_whistle_E6": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Edge-blown%20Aerophones/Baroque%20Soprano%20Recorder/Sustain/SopRecorder_Sus_E5_rr1_Main.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Baroque Soprano Recorder (sustain), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_whistle_G6": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Edge-blown%20Aerophones/Baroque%20Soprano%20Recorder/Sustain/SopRecorder_Sus_G5_rr1_Main.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Baroque Soprano Recorder (sustain), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_bodhran_HDrumL_Hit_v3_rr1_Sum": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Membranophones/Struck%20Membranophones/Frame%20Drum/HDrumL_Hit_v3_rr1_Sum.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Frame Drum (large, open hit), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_bodhran_HDrumL_Hit_v3_rr2_Sum": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Membranophones/Struck%20Membranophones/Frame%20Drum/HDrumL_Hit_v3_rr2_Sum.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Frame Drum (large, open hit), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_bodhran_HDrumL_Hit_v2_rr1_Sum": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Membranophones/Struck%20Membranophones/Frame%20Drum/HDrumL_Hit_v2_rr1_Sum.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Frame Drum (large, open hit), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_framedrum_HDrumS_HitMuted_v2_rr1_Sum": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Membranophones/Struck%20Membranophones/Frame%20Drum/HDrumS_HitMuted_v2_rr1_Sum.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Frame Drum (small, muted hit), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_framedrum_HDrumS_HitMuted_v3_rr1_Sum": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Membranophones/Struck%20Membranophones/Frame%20Drum/HDrumS_HitMuted_v3_rr1_Sum.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Frame Drum (small, muted hit), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
+    },
+    "mus_framedrum_HDrumS_HitMuted_v3_rr2_Sum": {
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Membranophones/Struck%20Membranophones/Frame%20Drum/HDrumS_HitMuted_v3_rr2_Sum.wav",
+      "page": "https://github.com/sgossner/VCSL",
+      "author": "VCSL Frame Drum (small, muted hit), Sam Gossner / Versilian Studios",
+      "license": "CC0-1.0"
     }
   },
   "keys": {
@@ -398,7 +613,7 @@
         {
           "src": "cannonFire",
           "dur": 2.8,
-          "semitones": 1.0
+          "semitones": 1
         }
       ]
     },
@@ -635,7 +850,7 @@
       "variants": [
         {
           "src": "shipDestroyed",
-          "dur": 3.0
+          "dur": 3
         }
       ]
     },
@@ -980,7 +1195,7 @@
         {
           "src": "kenneyRpg",
           "member": "Audio/chop.ogg",
-          "semitones": 1.0
+          "semitones": 1
         }
       ]
     },
@@ -1042,22 +1257,22 @@
         {
           "src": "rdWater",
           "member": "splash_06.ogg",
-          "semitones": 2.0
+          "semitones": 2
         },
         {
           "src": "rdWater",
           "member": "splash_07.ogg",
-          "semitones": 2.0
+          "semitones": 2
         },
         {
           "src": "rdWater",
           "member": "splash_08.ogg",
-          "semitones": 2.0
+          "semitones": 2
         },
         {
           "src": "rdWater",
           "member": "splash_09.ogg",
-          "semitones": 2.0
+          "semitones": 2
         }
       ]
     },
@@ -1069,17 +1284,17 @@
         {
           "src": "rdWoodMetal",
           "member": "wood_hit_04.ogg",
-          "semitones": 2.0
+          "semitones": 2
         },
         {
           "src": "rdWoodMetal",
           "member": "wood_hit_05.ogg",
-          "semitones": 2.0
+          "semitones": 2
         },
         {
           "src": "rdWoodMetal",
           "member": "wood_hit_06.ogg",
-          "semitones": 2.0
+          "semitones": 2
         }
       ]
     },
@@ -1091,17 +1306,17 @@
         {
           "src": "kenneyRpg",
           "member": "Audio/creak1.ogg",
-          "semitones": 3.0
+          "semitones": 3
         },
         {
           "src": "kenneyRpg",
           "member": "Audio/creak2.ogg",
-          "semitones": 3.0
+          "semitones": 3
         },
         {
           "src": "kenneyRpg",
           "member": "Audio/creak3.ogg",
-          "semitones": 3.0
+          "semitones": 3
         }
       ]
     },
@@ -1112,17 +1327,17 @@
         {
           "src": "bsbThunder1",
           "start": 0.3,
-          "dur": 3.0
+          "dur": 3
         },
         {
           "src": "bsbThunder2",
           "start": 0.1,
-          "dur": 3.0
+          "dur": 3
         },
         {
           "src": "bsbThunder3",
           "start": 0.4,
-          "dur": 3.0
+          "dur": 3
         }
       ]
     },
@@ -1198,13 +1413,13 @@
         },
         {
           "src": "bsbWinch",
-          "start": 2.0,
-          "dur": 2.0
+          "start": 2,
+          "dur": 2
         },
         {
           "src": "bsbWinch",
-          "start": 5.0,
-          "dur": 2.0
+          "start": 5,
+          "dur": 2
         }
       ]
     },
@@ -1322,6 +1537,334 @@
         {
           "src": "kenneyImpact",
           "member": "Audio/impactSoft_heavy_002.ogg"
+        }
+      ]
+    },
+    "music.fiddle.C4": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_fiddle_C4",
+          "split": 0
+        }
+      ]
+    },
+    "music.fiddle.E4": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_fiddle_E4",
+          "split": 0
+        }
+      ]
+    },
+    "music.fiddle.G4": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_fiddle_G4",
+          "split": 0
+        }
+      ]
+    },
+    "music.fiddle.A4": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_fiddle_A4",
+          "split": 0
+        }
+      ]
+    },
+    "music.fiddle.C5": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_fiddle_C5",
+          "split": 0
+        }
+      ]
+    },
+    "music.fiddle.E5": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_fiddle_E5",
+          "split": 0
+        }
+      ]
+    },
+    "music.fiddle.G5": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_fiddle_G5",
+          "split": 0
+        }
+      ]
+    },
+    "music.fiddle.A5": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_fiddle_A5",
+          "split": 0
+        }
+      ]
+    },
+    "music.fiddle.C6": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_fiddle_C6",
+          "split": 0
+        }
+      ]
+    },
+    "music.fiddle.E6": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_fiddle_E6",
+          "split": 0
+        }
+      ]
+    },
+    "music.concertina.C3": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_concertina_C3",
+          "split": 0
+        }
+      ]
+    },
+    "music.concertina.E3": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_concertina_E3",
+          "split": 0
+        }
+      ]
+    },
+    "music.concertina.G3": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_concertina_G3",
+          "split": 0
+        }
+      ]
+    },
+    "music.concertina.C4": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_concertina_C4",
+          "split": 0
+        }
+      ]
+    },
+    "music.concertina.E4": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_concertina_E4",
+          "split": 0
+        }
+      ]
+    },
+    "music.concertina.G4": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_concertina_G4",
+          "split": 0
+        }
+      ]
+    },
+    "music.concertina.C5": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_concertina_C5",
+          "split": 0
+        }
+      ]
+    },
+    "music.concertina.E5": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_concertina_E5",
+          "split": 0
+        }
+      ]
+    },
+    "music.concertina.G5": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_concertina_G5",
+          "split": 0
+        }
+      ]
+    },
+    "music.whistle.C5": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_whistle_C5",
+          "split": 0
+        }
+      ]
+    },
+    "music.whistle.D5": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_whistle_D5",
+          "split": 0
+        }
+      ]
+    },
+    "music.whistle.E5": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_whistle_E5",
+          "split": 0
+        }
+      ]
+    },
+    "music.whistle.Fs5": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_whistle_Fs5",
+          "split": 0
+        }
+      ]
+    },
+    "music.whistle.Gs5": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_whistle_Gs5",
+          "split": 0
+        }
+      ]
+    },
+    "music.whistle.As5": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_whistle_As5",
+          "split": 0
+        }
+      ]
+    },
+    "music.whistle.C6": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_whistle_C6",
+          "split": 0
+        }
+      ]
+    },
+    "music.whistle.D6": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_whistle_D6",
+          "split": 0
+        }
+      ]
+    },
+    "music.whistle.E6": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_whistle_E6",
+          "split": 0
+        }
+      ]
+    },
+    "music.whistle.G6": {
+      "tier": "music",
+      "kind": "note",
+      "variants": [
+        {
+          "src": "mus_whistle_G6",
+          "split": 0
+        }
+      ]
+    },
+    "music.bodhran": {
+      "tier": "music",
+      "kind": "note",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "mus_bodhran_HDrumL_Hit_v3_rr1_Sum",
+          "dur": 1.2
+        },
+        {
+          "src": "mus_bodhran_HDrumL_Hit_v3_rr2_Sum",
+          "dur": 1.2
+        },
+        {
+          "src": "mus_bodhran_HDrumL_Hit_v2_rr1_Sum",
+          "dur": 1.2
+        }
+      ]
+    },
+    "music.framedrum": {
+      "tier": "music",
+      "kind": "note",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "mus_framedrum_HDrumS_HitMuted_v2_rr1_Sum",
+          "dur": 0.6
+        },
+        {
+          "src": "mus_framedrum_HDrumS_HitMuted_v3_rr1_Sum",
+          "dur": 0.6
+        },
+        {
+          "src": "mus_framedrum_HDrumS_HitMuted_v3_rr2_Sum",
+          "dur": 0.6
         }
       ]
     }

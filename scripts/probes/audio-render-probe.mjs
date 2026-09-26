@@ -133,6 +133,19 @@ try {
       out.zones.crater = measure(await off.startRendering());
       AMB.setZoneSourceProvider(null);
     }
+    {
+      // b3.5g music row: the menu air through the CC0 concertina samples (every pitch it needs
+      // decoded first), rendered through the shipped graph at the menu music level.
+      const man = await (await fetch('/assets/audio/manifest.json')).json();
+      const conc = Object.keys(man.keys).filter((k) => k.startsWith('music.concertina.'));
+      const { off, eng, missing } = await engineOn(16, conc);
+      const t0 = performance.now();
+      while (!eng.musicSet && performance.now() - t0 < 5000) await sleep(50);
+      if (eng.busMusic) eng.busMusic.gain.value = 0.52; // MUSIC_MENU_LEVEL (tickMusic needs a running clock)
+      eng.scheduleMenuAir(0.2);
+      const stats = { ...eng.musicStats };
+      out.music = { ...measure(await off.startRendering()), stats, missing, keys: conc.length };
+    }
     return out;
   }, KEYS);
 
@@ -148,6 +161,10 @@ try {
   check('zones: geyser at eruption level 1 renders >= 10 dB above level 0 at the same spot', g1.rmsDb - g0.rmsDb >= 10 && g1.nonFinite === 0,
     `level 0 rms ${g0.rmsDb.toFixed(1)}, level 1 rms ${g1.rmsDb.toFixed(1)} dBFS`);
   check('zones: caldera rumble + lava crater audible 8 m away, finite', cr.rmsDb > -60 && cr.nonFinite === 0, `rms ${cr.rmsDb.toFixed(1)} peak ${cr.peakDb.toFixed(1)} dBFS`);
+  const mu = res.music;
+  check('music: the menu air plays through the sampled concertina (no procedural melody/chord note), peak <= -1 dBFS, no NaN, audible',
+    mu.keys >= 6 && mu.missing.length === 0 && mu.stats.sampledNotes > 0 && mu.stats.proceduralNotes === 0 && mu.nonFinite === 0 && mu.peakDb <= PEAK_CEIL_DB && mu.rmsDb > -50,
+    `sampled ${mu.stats.sampledNotes} procedural ${mu.stats.proceduralNotes} notes, peak ${mu.peakDb.toFixed(2)} rms ${mu.rmsDb.toFixed(1)} dBFS, non-finite ${mu.nonFinite}${mu.missing.length ? `, undecoded ${mu.missing.join(',')}` : ''}`);
   writeFileSync('/tmp/pbr-audio-render.json', JSON.stringify({ rows, res }, null, 1));
 } catch (err) {
   failed += 1;

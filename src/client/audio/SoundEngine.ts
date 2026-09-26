@@ -8,6 +8,10 @@ import { AUDIO_BUSES, buildAudioCore, combatDuckGains, type AudioBusName, type A
 import { DECODED_CAP_BYTES, SampleBank, decodeAudioDataCompat } from './SampleBank.js';
 import { VOICE_PRIORITY, VoiceAllocator, type AudioTier } from './VoiceAllocator.js';
 import {
+  SAMPLE_ENVELOPE, airChordEvents, buildInstrumentSet, jigDrumEvents, melodyEvents, routeDrum, routePhrase, sampleGain,
+  type InstrumentSet,
+} from './MusicInstruments.js';
+import {
   airCutoffFor, applyListener, crackMix, delayFor, flybyDopplerCurve, gainFor, isSpatialCategory, listenerRelative,
   makeWorldPanner, panningModelFor, rearShade, type SpatialCategory,
 } from './Spatial.js';
@@ -497,6 +501,10 @@ export class SoundEngine {
   readonly voices = new VoiceAllocator(this.device.tier);
   /** Decoded CC0 samples (D31); null until the first gesture creates the context. */
   private bank: SampleBank<AudioBuffer> | null = null;
+  /** b3.5g: the CC0 instrument set the manifest offers (MusicInstruments.ts); null = procedural music only. */
+  private musicSet: InstrumentSet | null = null;
+  /** Notes and hits the music scheduler voiced from samples vs procedurally (audio-render-probe music row). */
+  readonly musicStats = { sampledNotes: 0, proceduralNotes: 0, sampledHits: 0, proceduralHits: 0 };
   private master: GainNode | null = null;
   private busDry: GainNode | null = null;
   private busReverb: GainNode | null = null;
@@ -902,6 +910,11 @@ export class SoundEngine {
       if (!ok) return;
       bank.preloadTier('boot');
       bank.preloadTier('match');
+      // The music tier is NOT preloaded: the router asks for exactly the pitches a phrase needs
+      // (a menu air decodes ~6 of 35 files) and plays that pass procedurally while they decode.
+      // SampleBank keeps its manifest private; the key names are all the router reads.
+      const keys = Object.keys((bank as unknown as { manifest?: { keys?: Record<string, unknown> } }).manifest?.keys ?? {});
+      this.musicSet = buildInstrumentSet(keys);
     });
   }
 
@@ -4234,31 +4247,40 @@ export class SoundEngine {
     level: number,
     skipPickup = false,
   ): void {
-    const floor = (this.ctx?.currentTime ?? 0) - 0.02;
-    for (const note of phrase.notes) {
-      if (skipPickup && note.beat < 0) continue;
-      const when = at + note.beat * beatSec;
-      if (when < floor) continue;                       // a pickup that fell before "now"
-      const freq = midiToFreq(degreeToMidi(phrase.rootMidi, note.degree, phrase.mode));
-      const duration = note.beats * beatSec * (voice === 'fiddle' ? 0.84 : 0.94);
-      const volume = level * (0.6 + 0.4 * note.accent);
-      if (voice === 'concertina') this.concertinaNote(when, freq, duration, volume, dest);
-      else if (voice === 'whistle') this.tinWhistleNote(when, freq, duration, volume, dest);
-      else this.fiddleNote(when, freq, duration, volume, dest);
-    }
+    // b3.5g: the same notes, voiced by the CC0 samples when the whole phrase routes and is decoded,
+    // else by the procedural voice (which also covers every note while the samples load).
+    const events = melodyEvents(phrase, at, beatSec, voice, level, (d) => degreeToMidi(phrase.rootMidi, d, phrase.mode), {
+      skipPickup, floor: (this.ctx?.currentTime ?? 0) - 0.02,
+    });
+    const plans = routePhrase(this.musicSet, voice, events.map((e) => e.midi), this.musicKeyReady);
+    events.forEach((e, i) => {
+      const plan = plans?.[i];
+      if (plan && this.playMusicSample(plan.key, plan.rate, e.when, e.duration, sampleGain(voice, e.volume), SAMPLE_ENVELOPE[voice], dest)) {
+        this.musicStats.sampledNotes += 1;
+        return;
+      }
+      this.musicStats.proceduralNotes += 1;
+      const freq = midiToFreq(e.midi);
+      if (voice === 'concertina') this.concertinaNote(e.when, freq, e.duration, e.volume, dest);
+      else if (voice === 'whistle') this.tinWhistleNote(e.when, freq, e.duration, e.volume, dest);
+      else this.fiddleNote(e.when, freq, e.duration, e.volume, dest);
+    });
   }
 
   /** Menu backing: a bellows chord every two bars over a tonic drone. */
   private scheduleAirBacking(phrase: ShantyPhrase, at: number, beatSec: number, dest: AudioNode, level: number): void {
     const barSec = phrase.beatsPerBar * beatSec;
-    for (let bar = 0; bar < phrase.bars; bar += 2) {
-      const root = phrase.chords[bar];
-      const when = at + bar * barSec;
-      for (const [step, weight] of [[0, 1], [2, 0.6], [4, 0.7]] as const) {
-        const freq = midiToFreq(degreeToMidi(phrase.rootMidi - 12, root + step, phrase.mode));
-        this.concertinaNote(when, freq, barSec * 2 * 0.92, level * weight, dest, true);
+    const chords = airChordEvents(phrase, at, beatSec, level, (d) => degreeToMidi(phrase.rootMidi - 12, d, phrase.mode));
+    const plans = routePhrase(this.musicSet, 'concertina', chords.map((e) => e.midi), this.musicKeyReady);
+    chords.forEach((e, i) => {
+      const plan = plans?.[i];
+      if (plan && this.playMusicSample(plan.key, plan.rate, e.when, e.duration, sampleGain('concertina', e.volume), SAMPLE_ENVELOPE.concertina, dest)) {
+        this.musicStats.sampledNotes += 1;
+        return;
       }
-    }
+      this.musicStats.proceduralNotes += 1;
+      this.concertinaNote(e.when, midiToFreq(e.midi), e.duration, e.volume, dest, true);
+    });
     // The bellows never fully close: one tonic drone under the whole pass.
     this.reedVoice({
       when: at,
@@ -4289,9 +4311,16 @@ export class SoundEngine {
       const bassB = midiToFreq(degreeToMidi(phrase.rootMidi - 24, root + 4, phrase.mode));
       this.pluckNote(barAt, bassA, beatSec * half * 0.9, level, dest);
       this.pluckNote(barAt + beatSec * half, bassB, beatSec * half * 0.9, level * 0.78, dest);
-      this.bodhranHit(barAt, level * 1.15, dest, true);
-      this.bodhranHit(barAt + beatSec * half, level * 0.7, dest, false);
-      if (bar % 2 === 1) this.bodhranHit(barAt + beatSec * (half + 1.5), level * 0.42, dest, false);
+    }
+    // b3.5g: the frame-drum samples (big drum on the pulse, muted lift between), else the procedural bodhran.
+    for (const h of jigDrumEvents(phrase, at, beatSec, level)) {
+      const key = routeDrum(this.musicSet, h.drum, this.musicKeyReady);
+      if (key && this.playMusicSample(key, 1, h.when, null, sampleGain(h.drum, h.volume), null, dest)) {
+        this.musicStats.sampledHits += 1;
+        continue;
+      }
+      this.musicStats.proceduralHits += 1;
+      this.bodhranHit(h.when, h.volume, dest, h.drum === 'bodhran');
     }
   }
 
@@ -4420,6 +4449,54 @@ export class SoundEngine {
   }
 
   /** Goatskin frame drum — deep on the pulse, lighter on the off. */
+  /** Decoded check for the music router; a miss asks the bank for the key (urgent), so the next
+   *  pass of the tune finds it. */
+  private readonly musicKeyReady = (key: string): boolean => {
+    try { return this.bank?.pick(key, () => 0) != null; } catch { return false; }
+  };
+
+  /**
+   * One sampled music note or drum hit (b3.5g): the decoded sample re-pitched by `rate`, a short
+   * fade-in, held to `duration`, released over `env.release` (drums: `duration` null, the sample
+   * rings out). Returns false when nothing is decoded (the caller plays the procedural voice);
+   * true when it played OR the voice allocator dropped it (a dropped note never builds a
+   * procedural voice on top of a saturated mix).
+   */
+  private playMusicSample(
+    key: string, rate: number, when: number, duration: number | null, gain: number,
+    env: { attack: number; release: number } | null, dest: AudioNode,
+  ): boolean {
+    const ctx = this.ctx;
+    const pick = this.bank?.pick(key);
+    if (!ctx || !pick || !(gain > 0.00001)) return false;
+    const r = finiteClamp(rate, 0.5, 2, 1);
+    const start = Math.max(ctx.currentTime, finiteClamp(when, 0, ctx.currentTime + 60, ctx.currentTime));
+    const natural = pick.buffer.duration / r;
+    const end = duration === null || !env ? start + natural : Math.min(start + natural, start + Math.max(0.02, duration) + env.release);
+    const src = ctx.createBufferSource();
+    const id = this.voices.acquire({
+      priority: VOICE_PRIORITY.ambient, gain, now: ctx.currentTime, duration: end - ctx.currentTime + 0.05,
+      stop: () => { try { src.stop(); } catch { /* never started or already ended */ } },
+    });
+    if (id === null) return true;
+    const amp = ctx.createGain();
+    if (env && duration !== null) {
+      const hold = start + Math.max(env.attack + 0.005, Math.max(0.02, duration));
+      safeSet(amp.gain, 'set', 0, start);
+      safeSet(amp.gain, 'linear', gain, start + env.attack);
+      safeSet(amp.gain, 'set', gain, Math.min(hold, end));
+      safeSet(amp.gain, 'linear', 0, Math.max(end, start + env.attack + 0.01));
+    } else safeSet(amp.gain, 'value', gain);
+    src.buffer = pick.buffer;
+    safeSet(src.playbackRate, 'value', r);
+    src.connect(amp);
+    amp.connect(dest);
+    src.onended = () => { this.voices.release(id); try { amp.disconnect(); } catch { /* gone */ } };
+    src.start(start);
+    src.stop(end + 0.02);
+    return true;
+  }
+
   private bodhranHit(when: number, volume: number, dest: AudioNode, deep: boolean): void {
     const f = deep ? 108 : 152;
     this.playTone(when, f, f * 0.52, deep ? 0.17 : 0.11, volume, 'sine', 0.003, dest);
