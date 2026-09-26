@@ -42,6 +42,7 @@ import _pirate_wardrobe as W
 UP = Vector((0, 0, 1))
 HAND = ("hand", "thumb", "index", "middle", "ring", "pinky")
 NON_DEFORM = ("eye_", "lid_")
+CUR_BODY = []   # the Body being dressed (solidify reads its skin to thin the lining where the shell is tight)
 SLOTS = ("coat_frock", "coat_jacket", "vest_waistcoat", "sash", "belt", "breeches_knee", "breeches_slops",
          "boots_tall", "boots_shoes")
 
@@ -70,6 +71,7 @@ class Body:
         names = {g.index: g.name for g in body.vertex_groups}
         self.Wt = [{names[g.group]: g.weight for g in v.groups if g.weight > 0} for v in body.data.vertices]
         self.bvh = BVHTree.FromPolygons(self.P, self.F)
+        self._part = {}
         self.A = np.array([tuple(p) for p in self.P])
         b = self.b
         self.hip = (b("thigh_l").z + b("thigh_r").z) / 2
@@ -86,6 +88,13 @@ class Body:
     def b(self, n, tail=False):
         bo = self.arm.data.bones[n]
         return self.arm.matrix_world @ (bo.tail_local if tail else bo.head_local)
+
+    def part(self, i):   # rigid region a skin vertex belongs to: an arm, a leg, or the trunk
+        if i not in self._part:
+            a, l = self.w(i, "upperarm", "lowerarm", *HAND), self.w(i, "thigh", "calf", "foot", "ball")
+            self._part[i] = ("arm" if a > 0.5 else "leg" if l > 0.5 else "trunk") + (
+                self.side(self.P[i]) if max(a, l) > 0.5 else "")
+        return self._part[i]
 
     def w(self, i, *pref):
         return sum(v for k, v in self.Wt[i].items() if k.startswith(pref))
@@ -128,7 +137,7 @@ class Body:
 
 
 # ── generic builders ───────────────────────────────────────────────────────────────────────────
-def shell(B, keep, off, smooth=2):
+def shell(B, keep, off, smooth=2, pin=None):
     bm = bmesh.new()
     src = bm.verts.layers.int.new("src")
     vmap = {}
@@ -139,13 +148,20 @@ def shell(B, keep, off, smooth=2):
             hit_, _, _, d = B.bvh.ray_cast(B.P[i] + B.N[i] * 0.002, B.N[i], 0.12)
             eff[i] = off(i) if hit_ is None else min(off(i), 0.45 * (d + 0.002))
         return eff[i]
+    # weld the body's split vertices first (UV seams: the glTF body is split along them). Without it a seam is an
+    # open boundary in the shell, and the boundary snap (hem/top) dragged the inner-leg seam of the breeches from
+    # the knee to the waist: 0.58 m sliver faces through both thighs (the b3.2d residual inner-thigh pokes)
+    canon, first = {}, {}
     for i, p in enumerate(B.P):
-        if keep(i):
+        canon[i] = first.setdefault((round(p.x, 5), round(p.y, 5), round(p.z, 5)), i)
+    for i, p in enumerate(B.P):
+        if canon[i] == i and keep(i):
             v = bm.verts.new(p + B.N[i] * off_eff(i))
             v[src] = i
             vmap[i] = v
     for f in B.F:
-        if all(i in vmap for i in f):
+        f = [canon[i] for i in f]
+        if all(i in vmap for i in f) and len(set(f)) == len(f):
             try:
                 bm.faces.new([vmap[i] for i in f])
             except ValueError:
@@ -171,19 +187,25 @@ def shell(B, keep, off, smooth=2):
     if small:
         bmesh.ops.delete(bm, geom=small, context="FACES")
         bmesh.ops.delete(bm, geom=[v for v in bm.verts if not v.link_faces], context="VERTS")
-    relax(B, bm, src, off_eff, smooth)
+    relax(B, bm, src, off_eff, smooth, pin)
     return bm, src
 
 
-def relax(B, bm, src, off, passes):
+def relax(B, bm, src, off, passes, pin=None):
+    free = [v for v in bm.verts if not v.is_boundary and not (pin and pin(v[src]))]
     for _ in range(passes):
-        bmesh.ops.smooth_vert(bm, verts=[v for v in bm.verts if not v.is_boundary], factor=0.5,
+        bmesh.ops.smooth_vert(bm, verts=free, factor=0.5,
                               use_axis_x=True, use_axis_y=True, use_axis_z=True)
     for v in bm.verts:   # clearance: never nearer the skin than 80% of the layer offset
-        loc, n, _, _ = B.bvh.find_nearest(v.co)
+        loc, n, fi, _ = B.bvh.find_nearest(v.co)
         if loc is None:
             continue
         k = 0.8 * off(v[src])
+        i = v[src]
+        if B.part(B.F[fi][0]) != B.part(i):
+            # the nearest skin is ANOTHER part (the arm over a stout's flank, the belly over the thigh): pushing
+            # off that surface drove the shell into its own skin. Hold it off its own vertex along its own normal
+            loc, n = B.P[i], B.N[i]
         s = (v.co - loc).dot(n)
         if s < k:
             v.co += n * (k - s)
@@ -245,10 +267,23 @@ def solidify(o, t, mat_offset=1):
     # and breeches vertices shot 1-6 m out of the model)
     m.thickness, m.offset, m.use_even_offset = t, -1.0, False
     m.use_quality_normals = True
+    if CUR_BODY:
+        # the lining goes INWARD by t: where the shell sits closer to the skin than t + 1.5 mm (the gap shared under a
+        # stout's arm, the belly over the thigh) the lining thins instead of sinking into the skin
+        Bd, g = CUR_BODY[0], o.vertex_groups.new(name="_thick")
+        mw = o.matrix_world
+        for v in o.data.vertices:
+            p = mw @ v.co
+            loc, n, _, _ = Bd.bvh.find_nearest(p)
+            s = (p - loc).dot(n) if loc is not None else 1.0
+            g.add([v.index], min(1.0, max(0.02, (s - 0.0015) / t)), "REPLACE")
+        m.vertex_group, m.thickness_vertex_group = g.name, 0.02
     m.material_offset = mat_offset
     m.material_offset_rim = mat_offset
     with ctx(o):
         bpy.ops.object.modifier_apply(modifier=m.name)
+    if o.vertex_groups.get("_thick"):
+        o.vertex_groups.remove(o.vertex_groups["_thick"])
 
 
 def append(o, parts):
@@ -683,7 +718,9 @@ def boots(B, kind, out_dir):
         if B.N[i].z < -0.5:
             return 0.006
         return 0.007 + (0.010 * smoothstep(B.ankle + 0.02, B.ankle + 0.08, B.P[i].z) if tall else 0.0)
-    bm, src = shell(B, keep, off, smooth=2)
+    # the sole and the heel corner stay unsmoothed: once the welded shell closed the kit's seam at the heel,
+    # smoothing cut that 90 deg corner and the heel skin poked through the chord (shoes, all three bodies)
+    bm, src = shell(B, keep, off, smooth=2, pin=lambda i: B.P[i].z < B.ankle * 0.45)
     # only the TOP rim: the kit foot has its own sole boundary, and snapping that to the knee made pillars
     top_v = [v for v in bm.verts if v.is_boundary and v.co.z > top - 0.04]
     for v in top_v:
@@ -712,6 +749,7 @@ def boots(B, kind, out_dir):
 def dress(arm, meshes, body_id, out_dir, report):
     body = next(m for m in meshes if m.name == "body")
     B = Body(arm, body)
+    CUR_BODY[:] = [B]
     new = [coat_frock(B, out_dir), coat_jacket(B, out_dir), vest_waistcoat(B, out_dir), sash(B, out_dir),
            belt(B, out_dir), breeches(B, "knee", out_dir), breeches(B, "slops", out_dir),
            boots(B, "tall", out_dir), boots(B, "shoes", out_dir)]

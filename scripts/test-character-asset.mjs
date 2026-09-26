@@ -697,7 +697,7 @@ if (!argv.includes('--glb')) {
       // rays start ON the bone, in 8 bins along it (a single midpoint sees the groin through the crotch gap:
       // a body that is not star-shaped from one point reads as a false poke); only the garment's height band
       const ys = v.map((x) => x.p[1]); const y0 = Math.min(...ys) + 0.01; const y1 = Math.max(...ys) - 0.02;
-      let poke = 0; let tested = 0; let neg = 0; const hits = [];
+      let poke = 0; let tested = 0; let neg = 0; const hits = []; let hidden = 0; let probes = 0;
       for (const bone of bones) {
         const h = jw(bone); const m = mid(bone); if (!h || !m) continue;
         const t = [2 * m[0] - h[0], 2 * m[1] - h[1], 2 * m[2] - h[2]]; const ax = sub(t, h); const l2 = dot(ax, ax) || 1;
@@ -706,9 +706,19 @@ if (!argv.includes('--glb')) {
         // there is concave from every point on either femur, so it is not a star-shaped test region (excluded)
         const seam = (q) => /^thigh_/.test(bone) && Math.abs(q[0]) < 0.03;
         for (const x of L.body) if (x.j === bone && x.p[1] > y0 && x.p[1] < y1 && !seam(x.p)) bins[Math.min(7, Math.max(0, Math.floor(8 * dot(sub(x.p, h), ax) / l2)))].push(x.p);
-        bins.forEach((pts, k) => {
-          if (!pts.length) return;
+        // a skin vertex hidden from the bone by the body's own skin (the stout's belly underside over the thigh,
+        // the stout's armpit crease under the arm) is not a star-shaped probe either: the ray leaves the skin and
+        // crosses the fold before it gets there, so any garment bridging the fold reads as a poke. Those probes
+        // are dropped and counted (only poking probes are checked), at most 3% of a slot's probes (row below)
+        bins.forEach((pts0, k) => {
+          if (!pts0.length) return;
           const c = [h[0] + ax[0] * (k + 0.5) / 8, h[1] + ax[1] * (k + 0.5) / 8, h[2] + ax[2] * (k + 0.5) / 8];
+          const pk = []; pokeCount(v, pts0, c, pk); const pks = new Set(pk.map((q) => q.join()));
+          const hid = []; pokeCount(L.body, pts0.filter((p) => pks.has(p.map((x) => +x.toFixed(3)).join())), c, hid);
+          const hk = new Set(hid.map((q) => q.join()));
+          const pts = pts0.filter((p) => !hk.has(p.map((x) => +x.toFixed(3)).join()));
+          hidden += pts0.length - pts.length; probes += pts0.length;
+          if (!pts.length) return;
           tested += pts.length;
           poke += pokeCount(v, pts, c, hits);
           neg += pokeCount(v, pts.map((p) => { const d = unit(sub(p, c)); return [p[0] + 0.04 * d[0], p[1] + 0.04 * d[1], p[2] + 0.04 * d[2]]; }), c);
@@ -716,6 +726,7 @@ if (!argv.includes('--glb')) {
       }
       expect(`${b}: ${slot} clears the skin at rest (${poke}/${tested} ${bones.join('/')} vertices poke through)`, tested > 0 && poke === 0, hits.slice(0, 4).map((q) => `(${q.join(',')})`).join(' '));
       expect(`${b}: negative control, the same vertices pushed 40 mm out cross ${slot} (${neg})`, neg > 0);
+      expect(`${b}: ${slot} clearance probes hidden by a skin fold <= 3% (${hidden}/${probes})`, hidden <= 0.03 * probes);
       const crew = gltf.meshes[node.mesh].primitives.some((p) => gltf.materials?.[p.material]?.extras?.crewTint === true);
       expect(`${b}: ${slot} ${CREW.has(slot) ? 'carries' : 'has no'} crew-mask material`, crew === CREW.has(slot));
     }
