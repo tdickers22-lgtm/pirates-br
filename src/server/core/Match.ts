@@ -97,6 +97,7 @@ import { stepPirate } from '../../shared/locomotion.js';
 import { hullPointVelocity, hullRatesOf } from '../../shared/ballistics.js';
 import { sanitizePlayerInput } from '../net/validate.js';
 import { TickProfiler, type TickCost } from './TickProfiler.js';
+import { EatingSystem, EATING, eatRequestFor } from '../systems/EatingSystem.js';
 
 // Weathered banner dyes — team identity without the LED-strip look.
 const TEAM_COLORS = [
@@ -689,6 +690,8 @@ export class Match {
   /** Grace window per player so a tool equip can't be instantly undone by the
    *  wheel's double-fire or the shared wheel/weapon digit keys. */
   private readonly lastToolEquip = new Map<string, { tool: EquippableTool; at: number }>();
+  /** D21 eating: the 0.9 s bite and the heal-over-time queue (b3.5a). */
+  private readonly eating = new EatingSystem();
   /** Ship waterLevel at tick start — floodingRate is published NET of bailing. */
   private waterLevelAtTickStart = new Map<string, number>();
   /** performance-13: per-phase ms of every playing tick (p50/p99 on /health). */
@@ -2496,12 +2499,23 @@ export class Match {
       player.atCapstan = false;
       if (player.kegCooldown > 0) player.kegCooldown = Math.max(0, player.kegCooldown - dt);
       if (player.pocketUseCooldown > 0) player.pocketUseCooldown = Math.max(0, player.pocketUseCooldown - dt);
+      this.eating.tick(player, dt);
     }
 
     // Apply player inputs
     for (const [, client] of this.clients) {
       if (client.lastInput) {
         this.applyInput(client, client.lastInput, dt);
+        // D21: the trigger (a shot or a swing) or TAKING a station ends a bite
+        // in progress and keeps the food; damage never cancels it. Checked out
+        // here, not at the tail of applyInput, because the station branches
+        // return early from it.
+        if (this.eating.isEating(client.playerId)) {
+          const eater = this.state.players.find((p) => p.id === client.playerId);
+          if (eater && this.eating.interrupt(eater, !!client.lastInput.fire && !eater.carryingChestId)) {
+            eater.pocketUseCooldown = 0;
+          }
+        }
       }
     }
 
@@ -3402,11 +3416,26 @@ export class Match {
       // keeps the lookout on the disc), so a lookout can hop like anywhere else.
       // The helm still blocks — it pins the body to a station.
       const onOwnShip = ship && player.onShipId === ship.id ? ship : null;
+      const preX = player.position.x;
+      const preZ = player.position.z;
       stepPirate(player, input, dt, {
         ship: onOwnShip,
         islands: this.state.islands,
         jumpBlocked: !!ship && player.atHelm,
       });
+      // D21: a pirate mid-bite walks at 70 %. Capped after the shared step so
+      // stepPirate stays the one copy of the arithmetic; the step's own
+      // position update is replaced by the capped velocity's.
+      if (this.eating.isEating(player.id) && player.state !== 'swimming') {
+        const cap = PLAYER.MOVE_SPEED * (player.crouching ? 0.55 : 1) * EATING.MOVE_SCALE;
+        const v = Math.hypot(player.velocity.x, player.velocity.z);
+        if (v > cap) {
+          player.velocity.x *= cap / v;
+          player.velocity.z *= cap / v;
+          player.position.x = preX + player.velocity.x * dt;
+          player.position.z = preZ + player.velocity.z * dt;
+        }
+      }
     }
 
     const cutlassHandled = this.updateCutlassAttack(player, input, dt);
@@ -3823,49 +3852,64 @@ export class Match {
       player.pocketWood -= 1;
       this.islands.addItemToShipInventory(crewShip, 'wood_plank', 1);
       consumed = true;
-    } else if (ix === 4) {
-      // Eat from your pocket first, then the ship's larder (shared crew food).
-      if (player.pocketBanana > 0) player.pocketBanana -= 1;
-      else if (!crewShip || !this.consumeShipItem(crewShip, 'banana', 1)) return;
-      player.health = Math.min(PLAYER.MAX_HEALTH, player.health + PLAYER.BANANA_HEAL);
-      consumed = true;
-    } else if (ix === 5) {
-      if (player.pocketCoconut > 0) player.pocketCoconut -= 1;
-      else if (!crewShip || !this.consumeShipItem(crewShip, 'coconut', 1)) return;
-      player.health = Math.min(PLAYER.MAX_HEALTH, player.health + POCKET.FRUIT_HEAL);
-      consumed = true;
-    } else if (ix === 6) {
-      if (player.pocketMeat > 0) {
-        player.pocketMeat -= 1;
-        // Eat the BEST typed cut first (pork before gull scraps); meat with
-        // no known animal (barrels, larder pickups) heals the generic value.
-        let heal: number = POCKET.MEAT_HEAL;
-        let best: WildlifeType | null = null;
-        for (const type of Object.keys(player.pocketMeatByType) as WildlifeType[]) {
-          if ((player.pocketMeatByType[type] ?? 0) > 0 && (best === null || WILDLIFE.MEAT_HEAL[type] > WILDLIFE.MEAT_HEAL[best])) {
-            best = type;
-          }
-        }
-        if (best) {
-          player.pocketMeatByType[best] = (player.pocketMeatByType[best] ?? 1) - 1;
-          heal = WILDLIFE.MEAT_HEAL[best];
-        }
-        player.health = Math.min(PLAYER.MAX_HEALTH, player.health + heal);
-      } else if (player.pocketMango > 0) {
-        player.pocketMango -= 1;
-        player.health = Math.min(PLAYER.MAX_HEALTH, player.health + POCKET.FRUIT_HEAL);
-      } else if (crewShip && this.consumeShipItem(crewShip, 'meat', 1)) {
-        player.health = Math.min(PLAYER.MAX_HEALTH, player.health + POCKET.MEAT_HEAL);
-      } else if (crewShip && this.consumeShipItem(crewShip, 'mango', 1)) {
-        player.health = Math.min(PLAYER.MAX_HEALTH, player.health + POCKET.FRUIT_HEAL);
-      } else {
+    } else if (ix >= 4 && ix <= 6) {
+      // D21 (b3.5a): eating is a 0.9 s bite, then heal over time. The food
+      // leaves the pocket / larder only when the bite COMPLETES, so a cancelled
+      // bite (trigger, station) keeps it; refused outright at full health.
+      const req = this.buildEatRequest(player, crewShip, ix);
+      if (!req) return;
+      if (!this.eating.begin(player, req)) {
+        if (this.eating.lastRefusal === 'health_full') this.sendInteractRefused(client, 'eat', 'health_full');
         return;
       }
-      consumed = true;
+      player.pocketUseCooldown = EATING.ACTION_TIME;
+      return;
     }
     if (consumed) {
       player.pocketUseCooldown = POCKET.USE_COOLDOWN;
     }
+  }
+
+  /** What slot 4/5/6 would eat right now, pocket first then the crew larder.
+   *  Nothing is taken here: `consume` runs when the bite completes and re-checks
+   *  that the food is still there (a crewmate may have emptied the larder). */
+  private buildEatRequest(player: Player, crewShip: Ship | null, ix: number) {
+    const larderHas = (item: string) => !!crewShip && crewShip.inventory.some((e) => e.item === item && e.qty >= 1);
+    const fromLarder = (item: string) => () => !!crewShip && this.consumeShipItem(crewShip, item, 1);
+    const fruit = (item: 'banana' | 'coconut' | 'mango', pocketKey: 'pocketBanana' | 'pocketCoconut' | 'pocketMango') => {
+      if (player[pocketKey] > 0) {
+        return eatRequestFor(item, () => {
+          if (player[pocketKey] <= 0) return fromLarder(item)();
+          player[pocketKey] -= 1;
+          return true;
+        });
+      }
+      return larderHas(item) ? eatRequestFor(item, fromLarder(item)) : null;
+    };
+    if (ix === 4) return fruit('banana', 'pocketBanana');
+    if (ix === 5) return fruit('coconut', 'pocketCoconut');
+    // Slot 6: the BEST typed cut first (pork before gull scraps); meat with no
+    // known animal (barrels, larder pickups) heals the generic value; mango is
+    // the fallback when all meat is gone.
+    if (player.pocketMeat > 0) {
+      let best: WildlifeType | null = null;
+      for (const type of Object.keys(player.pocketMeatByType) as WildlifeType[]) {
+        if ((player.pocketMeatByType[type] ?? 0) > 0 && (best === null || WILDLIFE.MEAT_HEAL[type] > WILDLIFE.MEAT_HEAL[best])) {
+          best = type;
+        }
+      }
+      const heal = best ? WILDLIFE.MEAT_HEAL[best] : POCKET.MEAT_HEAL;
+      return eatRequestFor('meat', () => {
+        if (player.pocketMeat <= 0) return false;
+        player.pocketMeat -= 1;
+        if (best && (player.pocketMeatByType[best] ?? 0) > 0) player.pocketMeatByType[best] = (player.pocketMeatByType[best] ?? 1) - 1;
+        return true;
+      }, heal);
+    }
+    if (player.pocketMango > 0) return fruit('mango', 'pocketMango');
+    if (larderHas('meat')) return eatRequestFor('meat', fromLarder('meat'), POCKET.MEAT_HEAL);
+    if (larderHas('mango')) return eatRequestFor('mango', fromLarder('mango'));
+    return null;
   }
 
   private getChestById(chestId: string | null): { chest: TreasureChest; island: Island } | null {

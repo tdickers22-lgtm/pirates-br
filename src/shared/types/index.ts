@@ -1410,7 +1410,7 @@ export type InteractIntent =
  *  are not an [X] (b1.6e): R with an empty reserve, or a trigger the truce holds.
  *  Kept out of InteractIntent so the client can never SEND them as an intent and
  *  the wire whitelist (VALID_INTERACT_INTENTS) stays equal to the union. */
-export type InteractRefusedIntent = InteractIntent | 'reload' | 'fire';
+export type InteractRefusedIntent = InteractIntent | 'reload' | 'fire' | 'eat';
 
 /** Why an [X] the server heard could not be granted. */
 export type InteractRefusalReason =
@@ -1434,6 +1434,8 @@ export type InteractRefusalReason =
   | 'no_ammo'
   /** Inside the opening truce no crew may harm another (src/shared/truce.ts). */
   | 'truce'
+  /** An eat (D21) at full health: the food is kept. */
+  | 'health_full'
   | 'unavailable';
 
 /** Server → client: your [X] was heard and refused. Drives one short amber feed
