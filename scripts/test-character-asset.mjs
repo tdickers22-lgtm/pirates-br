@@ -42,7 +42,7 @@
 //
 //   node --import tsx scripts/test-character-asset.mjs              # the three stage-1 bodies
 //   node --import tsx scripts/test-character-asset.mjs --glb <file> # grade any GLB (red run: pirate_base.glb)
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, statSync } from 'node:fs';
 import { PLAYER } from '../src/shared/constants/index.ts';
 import sharp from 'sharp';
 
@@ -571,7 +571,7 @@ if (argv.includes('--glb')) {
 // Crew colour (characters-03): the tricorn braid, the bicorn cockade and the bandana use a material whose
 // extras.crewTint is true (a mask the client tints; the whole coat is no longer the crew colour).
 // Red: before b3.2c (no wardrobe nodes, no cuts).
-function pokeCount(hatV, pts, c) {
+function pokeCount(hatV, pts, c, hits = null) {
   const S = 2; const NA = 180; const NE = 90; // 2 deg cells: azimuth x elevation from c
   const ang = (p) => { const d = sub(p, c); const r = len(d); return [((Math.atan2(d[2], d[0]) * 180 / Math.PI) + 360) % 360, Math.asin(d[1] / r) * 180 / Math.PI + 90, r]; };
   const grid = new Map(); const tris = hatV.tris ?? [];
@@ -594,7 +594,7 @@ function pokeCount(hatV, pts, c) {
       const s = sub(c, a); const u = dot(s, h) / det; if (u < 0 || u > 1) continue;
       const q = [s[1] * e1[2] - s[2] * e1[1], s[2] * e1[0] - s[0] * e1[2], s[0] * e1[1] - s[1] * e1[0]]; const v = dot(d, q) / det;
       if (v < 0 || u + v > 1) continue;
-      const t = dot(e2, q) / det; if (t > 0 && t < r - 0.001) { n += 1; break; }
+      const t = dot(e2, q) / det; if (t > 0 && t < r - 0.001) { n += 1; hits?.push(p.map((x) => +x.toFixed(3))); break; }
     }
   }
   return n;
@@ -641,6 +641,90 @@ if (!argv.includes('--glb')) {
     const crew = (name) => { const i = nodeOf(name); return i >= 0 && gltf.meshes[gltf.nodes[i].mesh].primitives.some((p) => gltf.materials?.[p.material]?.extras?.crewTint === true); };
     expect(`${b}: crew colour is a mask material (extras.crewTint) on the tricorn, the bicorn and the bandana`, ['hat_tricorn', 'hat_bicorn', 'hat_bandana'].every(crew));
   }
+}
+
+// ── WARDROBE II (b3.2d, characters-01/03): deforming body garments ───────────────────────────
+// Every body GLB carries the nine garment slots as variant nodes (pirateDefault false): coat_frock,
+// coat_jacket, vest_waistcoat, sash, belt, breeches_knee, breeches_slops, boots_tall, boots_shoes. Each is
+// skinned to the body's skeleton with real deformation (>= 2 joints, weights sum to 1, no eye/lid joint),
+// has no vertex farther than 0.25 m from the body at rest (the first b3.2d build shot solidify spikes 1-6 m
+// out), and CLEARS the skin at rest: from the midpoint of each covered bone a ray to every body vertex that
+// bone dominates may not cross the garment before reaching the vertex (1 mm slack). Negative control: the
+// same vertices pushed 40 mm outward along that ray DO cross it, so the ray test can fail. Crew colour
+// (characters-03) is a mask channel: the frock coat (lining, lapels, cuffs), the jacket lining and the sash
+// carry a material with extras.crewTint; the belt, breeches, boots and waistcoat do not (they keep their own
+// colour). Weight QA: the posed Workbench sheets (idle, crouch, aim up, helm, walk, heavy swing; front + side)
+// are committed under docs/asset-sheets/characters/wardrobe-ii/.
+// Red: before b3.2d (no garment nodes, no sheets).
+if (!argv.includes('--glb')) {
+  const SLOTS = { coat_frock: ['spine_02', 'spine_03', 'upperarm_l', 'upperarm_r', 'lowerarm_l', 'lowerarm_r'],
+    coat_jacket: ['spine_02', 'spine_03', 'upperarm_l', 'upperarm_r', 'lowerarm_l', 'lowerarm_r'],
+    vest_waistcoat: ['spine_02', 'spine_03'], sash: ['pelvis', 'spine_01'], belt: ['pelvis', 'spine_01'],
+    breeches_knee: ['thigh_l', 'thigh_r'], breeches_slops: ['thigh_l', 'thigh_r'],
+    boots_tall: ['calf_l', 'calf_r'], boots_shoes: ['foot_l', 'foot_r'] };
+  const CREW = new Set(['coat_frock', 'coat_jacket', 'sash']);
+  for (const b of BODIES) {
+    console.log(`\nwardrobe II (b3.2d): ${b}`);
+    const L = loadGlb(`${OUT}/pirate_base_${b}.glb`);
+    if (!L) { expect(`${b}: body GLB present`, false); continue; }
+    const { g, W } = L; const { gltf } = g;
+    const nodeOf = (name) => gltf.nodes.findIndex((n) => n.mesh !== undefined && n.name === name);
+    const skin = gltf.skins[0];
+    const jw = (name) => { const k = gltf.nodes.findIndex((n) => n.name === name); return k >= 0 ? [W[k][12], W[k][13], W[k][14]] : null; };
+    const mid = (bone) => { const k = gltf.nodes.findIndex((n) => n.name === bone); const c = gltf.nodes[k]?.children?.find((x) => skin.joints.includes(x)); const h = jw(bone); const t = c !== undefined ? [W[c][12], W[c][13], W[c][14]] : h; return h && [(h[0] + t[0]) / 2, (h[1] + t[1]) / 2, (h[2] + t[2]) / 2]; };
+    const cell = 0.05; const hash = new Map();
+    for (const v of L.body) { const key = v.p.map((x) => Math.floor(x / cell)).join(); if (!hash.has(key)) hash.set(key, []); hash.get(key).push(v.p); }
+    const nearBody = (p) => { let best = Infinity; const c = p.map((x) => Math.floor(x / cell)); for (let r = 0; r <= 6 && best > r * cell; r++) for (let i = -r; i <= r; i++) for (let j = -r; j <= r; j++) for (let k = -r; k <= r; k++) { if (Math.max(Math.abs(i), Math.abs(j), Math.abs(k)) !== r) continue; for (const q of hash.get([c[0] + i, c[1] + j, c[2] + k].join()) ?? []) best = Math.min(best, len(sub(p, q))); } return best; };
+    for (const [slot, bones] of Object.entries(SLOTS)) {
+      const i = nodeOf(slot);
+      const node = gltf.nodes[i];
+      if (i < 0 || node.skin === undefined) { expect(`${b}: ${slot} is a skinned garment node`, false, 'missing'); continue; }
+      const v = skinned(g, W, i);
+      const joints = new Set(); let badSum = 0; let nonDeform = 0;
+      for (const prim of gltf.meshes[node.mesh].primitives) {
+        const J = accessor(g, prim.attributes.JOINTS_0); const Wt = accessor(g, prim.attributes.WEIGHTS_0);
+        for (let k = 0; k < J.length; k++) {
+          let sum = 0;
+          for (let q = 0; q < 4; q++) { if (Wt[k][q] > 1e-4) { const nm = gltf.nodes[skin.joints[J[k][q]]].name; joints.add(nm); if (/^(eye|lid)_/.test(nm)) nonDeform += 1; } sum += Wt[k][q]; }
+          if (Math.abs(sum - 1) > 0.01) badSum += 1;
+        }
+      }
+      expect(`${b}: ${slot} deforms on the skeleton (${v.length} verts, ${joints.size} joints, ${badSum} bad weight sums, ${nonDeform} eye/lid)`,
+        v.length > 0 && joints.size >= 2 && !badSum && !nonDeform && node.extras?.pirateDefault === false);
+      let far = 0; let worst = 0;
+      for (let k = 0; k < v.length; k += 3) { const d = nearBody(v[k].p); worst = Math.max(worst, d); if (d > 0.25) far += 1; }
+      expect(`${b}: ${slot} stays on the body at rest (farthest vertex ${worst === Infinity ? '>0.3' : worst.toFixed(3)} m <= 0.25)`, !far);
+      // rays start ON the bone, in 8 bins along it (a single midpoint sees the groin through the crotch gap:
+      // a body that is not star-shaped from one point reads as a false poke); only the garment's height band
+      const ys = v.map((x) => x.p[1]); const y0 = Math.min(...ys) + 0.01; const y1 = Math.max(...ys) - 0.02;
+      let poke = 0; let tested = 0; let neg = 0; const hits = [];
+      for (const bone of bones) {
+        const h = jw(bone); const m = mid(bone); if (!h || !m) continue;
+        const t = [2 * m[0] - h[0], 2 * m[1] - h[1], 2 * m[2] - h[2]]; const ax = sub(t, h); const l2 = dot(ax, ax) || 1;
+        const bins = Array.from({ length: 8 }, () => []);
+        // the crotch seam (|x| < 3 cm on a thigh) is where the two leg shells meet between the legs: the bend
+        // there is concave from every point on either femur, so it is not a star-shaped test region (excluded)
+        const seam = (q) => /^thigh_/.test(bone) && Math.abs(q[0]) < 0.03;
+        for (const x of L.body) if (x.j === bone && x.p[1] > y0 && x.p[1] < y1 && !seam(x.p)) bins[Math.min(7, Math.max(0, Math.floor(8 * dot(sub(x.p, h), ax) / l2)))].push(x.p);
+        bins.forEach((pts, k) => {
+          if (!pts.length) return;
+          const c = [h[0] + ax[0] * (k + 0.5) / 8, h[1] + ax[1] * (k + 0.5) / 8, h[2] + ax[2] * (k + 0.5) / 8];
+          tested += pts.length;
+          poke += pokeCount(v, pts, c, hits);
+          neg += pokeCount(v, pts.map((p) => { const d = unit(sub(p, c)); return [p[0] + 0.04 * d[0], p[1] + 0.04 * d[1], p[2] + 0.04 * d[2]]; }), c);
+        });
+      }
+      expect(`${b}: ${slot} clears the skin at rest (${poke}/${tested} ${bones.join('/')} vertices poke through)`, tested > 0 && poke === 0, hits.slice(0, 4).map((q) => `(${q.join(',')})`).join(' '));
+      expect(`${b}: negative control, the same vertices pushed 40 mm out cross ${slot} (${neg})`, neg > 0);
+      const crew = gltf.meshes[node.mesh].primitives.some((p) => gltf.materials?.[p.material]?.extras?.crewTint === true);
+      expect(`${b}: ${slot} ${CREW.has(slot) ? 'carries' : 'has no'} crew-mask material`, crew === CREW.has(slot));
+    }
+    const gold = ['coat_frock', 'coat_jacket', 'vest_waistcoat', 'belt', 'boots_shoes'].filter((s) => { const i = nodeOf(s); return i >= 0 && gltf.meshes[gltf.nodes[i].mesh].primitives.some((p) => gltf.materials?.[p.material]?.extras?.wardrobeClass === 'gold'); });
+    expect(`${b}: buttons/buckles present on coat, jacket, waistcoat, belt and shoes (${gold.length}/5)`, gold.length === 5);
+  }
+  const QA = ['captain', 'deckhand', 'bosun', 'gunner'].map((o) => `docs/asset-sheets/characters/wardrobe-ii/qa-${o}-poses.png`);
+  const missing = QA.filter((f) => !existsSync(`${ROOT}${f}`) || statSync(`${ROOT}${f}`).size < 50000);
+  expect(`weight QA render sheets committed (${QA.length - missing.length}/${QA.length} posed sheets)`, !missing.length, missing.join(', '));
 }
 
 // ── CLIPS (b3.2b, animations-01/02, characters-05) ────────────────────────

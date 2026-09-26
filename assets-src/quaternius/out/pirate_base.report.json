@@ -183,6 +183,150 @@
      "hat_headscarf": 3268,
      "hat_tricorn": 4672
     }
+   },
+   "wardrobeII": {
+    "landmarks": {
+     "ankle": 0.0685,
+     "hip": 0.9153,
+     "knee": 0.5184,
+     "neck": 1.4397,
+     "shoulder": 1.3749,
+     "waist": 1.0252
+    },
+    "nodes": {
+     "belt": {
+      "groups": [
+       "pelvis",
+       "spine_01",
+       "spine_02",
+       "thigh_l",
+       "thigh_r"
+      ],
+      "tris": 800
+     },
+     "boots_shoes": {
+      "groups": [
+       "ball_l",
+       "ball_r",
+       "calf_l",
+       "calf_r",
+       "foot_l",
+       "foot_r"
+      ],
+      "tris": 4160
+     },
+     "boots_tall": {
+      "groups": [
+       "ball_l",
+       "ball_r",
+       "calf_l",
+       "calf_r",
+       "foot_l",
+       "foot_r",
+       "thigh_l",
+       "thigh_r"
+      ],
+      "tris": 6008
+     },
+     "breeches_knee": {
+      "groups": [
+       "calf_l",
+       "calf_r",
+       "pelvis",
+       "spine_01",
+       "spine_02",
+       "thigh_l",
+       "thigh_r"
+      ],
+      "tris": 4100
+     },
+     "breeches_slops": {
+      "groups": [
+       "calf_l",
+       "calf_r",
+       "pelvis",
+       "spine_01",
+       "spine_02",
+       "thigh_l",
+       "thigh_r"
+      ],
+      "tris": 4748
+     },
+     "coat_frock": {
+      "groups": [
+       "clavicle_l",
+       "clavicle_r",
+       "hand_l",
+       "hand_r",
+       "lowerarm_l",
+       "lowerarm_r",
+       "neck_01",
+       "pelvis",
+       "pinky_01_l",
+       "pinky_01_r",
+       "spine_01",
+       "spine_02",
+       "spine_03",
+       "thigh_l",
+       "thigh_r",
+       "thumb_01_l",
+       "thumb_01_r",
+       "upperarm_l",
+       "upperarm_r"
+      ],
+      "tris": 9928
+     },
+     "coat_jacket": {
+      "groups": [
+       "clavicle_l",
+       "clavicle_r",
+       "hand_l",
+       "hand_r",
+       "lowerarm_l",
+       "lowerarm_r",
+       "neck_01",
+       "pelvis",
+       "pinky_01_l",
+       "pinky_01_r",
+       "spine_01",
+       "spine_02",
+       "spine_03",
+       "thigh_l",
+       "thigh_r",
+       "thumb_01_l",
+       "thumb_01_r",
+       "upperarm_l",
+       "upperarm_r"
+      ],
+      "tris": 7208
+     },
+     "sash": {
+      "groups": [
+       "pelvis",
+       "spine_01",
+       "spine_02",
+       "thigh_l",
+       "thigh_r"
+      ],
+      "tris": 2456
+     },
+     "vest_waistcoat": {
+      "groups": [
+       "clavicle_l",
+       "clavicle_r",
+       "neck_01",
+       "pelvis",
+       "spine_01",
+       "spine_02",
+       "spine_03",
+       "thigh_l",
+       "thigh_r",
+       "upperarm_l",
+       "upperarm_r"
+      ],
+      "tris": 3844
+     }
+    }
    }
   },
   "male": {
@@ -374,6 +518,147 @@
      "hat_headscarf": 3268,
      "hat_tricorn": 4672
     }
+   },
+   "wardrobeII": {
+    "landmarks": {
+     "ankle": 0.0819,
+     "hip": 0.9194,
+     "knee": 0.5135,
+     "neck": 1.4394,
+     "shoulder": 1.3778,
+     "waist": 1.0293
+    },
+    "nodes": {
+     "belt": {
+      "groups": [
+       "pelvis",
+       "spine_01",
+       "spine_02",
+       "thigh_l",
+       "thigh_r"
+      ],
+      "tris": 800
+     },
+     "boots_shoes": {
+      "groups": [
+       "ball_l",
+       "ball_r",
+       "calf_l",
+       "calf_r",
+       "foot_l",
+       "foot_r"
+      ],
+      "tris": 3912
+     },
+     "boots_tall": {
+      "groups": [
+       "ball_l",
+       "ball_r",
+       "calf_l",
+       "calf_r",
+       "foot_l",
+       "foot_r",
+       "thigh_l",
+       "thigh_r"
+      ],
+      "tris": 6160
+     },
+     "breeches_knee": {
+      "groups": [
+       "calf_l",
+       "calf_r",
+       "pelvis",
+       "spine_01",
+       "spine_02",
+       "thigh_l",
+       "thigh_r"
+      ],
+      "tris": 4172
+     },
+     "breeches_slops": {
+      "groups": [
+       "calf_l",
+       "calf_r",
+       "pelvis",
+       "spine_01",
+       "spine_02",
+       "thigh_l",
+       "thigh_r"
+      ],
+      "tris": 4884
+     },
+     "coat_frock": {
+      "groups": [
+       "clavicle_l",
+       "clavicle_r",
+       "hand_l",
+       "hand_r",
+       "lowerarm_l",
+       "lowerarm_r",
+       "neck_01",
+       "pelvis",
+       "spine_01",
+       "spine_02",
+       "spine_03",
+       "thigh_l",
+       "thigh_r",
+       "thumb_01_l",
+       "thumb_01_r",
+       "upperarm_l",
+       "upperarm_r"
+      ],
+      "tris": 9452
+     },
+     "coat_jacket": {
+      "groups": [
+       "clavicle_l",
+       "clavicle_r",
+       "hand_l",
+       "hand_r",
+       "lowerarm_l",
+       "lowerarm_r",
+       "neck_01",
+       "pelvis",
+       "spine_01",
+       "spine_02",
+       "spine_03",
+       "thigh_l",
+       "thigh_r",
+       "thumb_01_l",
+       "thumb_01_r",
+       "upperarm_l",
+       "upperarm_r"
+      ],
+      "tris": 6892
+     },
+     "sash": {
+      "groups": [
+       "pelvis",
+       "spine_01",
+       "spine_02",
+       "spine_03",
+       "thigh_l",
+       "thigh_r"
+      ],
+      "tris": 2456
+     },
+     "vest_waistcoat": {
+      "groups": [
+       "clavicle_l",
+       "clavicle_r",
+       "neck_01",
+       "pelvis",
+       "spine_01",
+       "spine_02",
+       "spine_03",
+       "thigh_l",
+       "thigh_r",
+       "upperarm_l",
+       "upperarm_r"
+      ],
+      "tris": 3488
+     }
+    }
    }
   },
   "stout": {
@@ -563,6 +848,147 @@
      "hat_headscarf": 3268,
      "hat_tricorn": 4672
     }
+   },
+   "wardrobeII": {
+    "landmarks": {
+     "ankle": 0.0827,
+     "hip": 0.9281,
+     "knee": 0.5183,
+     "neck": 1.453,
+     "shoulder": 1.3909,
+     "waist": 1.0381
+    },
+    "nodes": {
+     "belt": {
+      "groups": [
+       "pelvis",
+       "spine_01",
+       "spine_02",
+       "thigh_l",
+       "thigh_r"
+      ],
+      "tris": 800
+     },
+     "boots_shoes": {
+      "groups": [
+       "ball_l",
+       "ball_r",
+       "calf_l",
+       "calf_r",
+       "foot_l",
+       "foot_r"
+      ],
+      "tris": 3904
+     },
+     "boots_tall": {
+      "groups": [
+       "ball_l",
+       "ball_r",
+       "calf_l",
+       "calf_r",
+       "foot_l",
+       "foot_r",
+       "thigh_l",
+       "thigh_r"
+      ],
+      "tris": 6136
+     },
+     "breeches_knee": {
+      "groups": [
+       "calf_l",
+       "calf_r",
+       "pelvis",
+       "spine_01",
+       "spine_02",
+       "thigh_l",
+       "thigh_r"
+      ],
+      "tris": 4112
+     },
+     "breeches_slops": {
+      "groups": [
+       "calf_l",
+       "calf_r",
+       "pelvis",
+       "spine_01",
+       "spine_02",
+       "thigh_l",
+       "thigh_r"
+      ],
+      "tris": 4824
+     },
+     "coat_frock": {
+      "groups": [
+       "clavicle_l",
+       "clavicle_r",
+       "hand_l",
+       "hand_r",
+       "lowerarm_l",
+       "lowerarm_r",
+       "neck_01",
+       "pelvis",
+       "spine_01",
+       "spine_02",
+       "spine_03",
+       "thigh_l",
+       "thigh_r",
+       "thumb_01_l",
+       "thumb_01_r",
+       "upperarm_l",
+       "upperarm_r"
+      ],
+      "tris": 9132
+     },
+     "coat_jacket": {
+      "groups": [
+       "clavicle_l",
+       "clavicle_r",
+       "hand_l",
+       "hand_r",
+       "lowerarm_l",
+       "lowerarm_r",
+       "neck_01",
+       "pelvis",
+       "spine_01",
+       "spine_02",
+       "spine_03",
+       "thigh_l",
+       "thigh_r",
+       "thumb_01_l",
+       "thumb_01_r",
+       "upperarm_l",
+       "upperarm_r"
+      ],
+      "tris": 6660
+     },
+     "sash": {
+      "groups": [
+       "pelvis",
+       "spine_01",
+       "spine_02",
+       "spine_03",
+       "thigh_l",
+       "thigh_r"
+      ],
+      "tris": 2456
+     },
+     "vest_waistcoat": {
+      "groups": [
+       "clavicle_l",
+       "clavicle_r",
+       "neck_01",
+       "pelvis",
+       "spine_01",
+       "spine_02",
+       "spine_03",
+       "thigh_l",
+       "thigh_r",
+       "upperarm_l",
+       "upperarm_r"
+      ],
+      "tris": 3240
+     }
+    }
    }
   }
  },
@@ -650,6 +1076,18 @@
    "a": "assets-src/quaternius/out/T_wardrobe_band_BaseColor.png",
    "normal": "assets-src/quaternius/out/T_wardrobe_band_Normal.png"
   },
+  "MI_wardrobe_breeches": {
+   "a": "assets-src/quaternius/out/T_wardrobe_breeches_BaseColor.png",
+   "normal": "assets-src/quaternius/out/T_wardrobe_breeches_Normal.png"
+  },
+  "MI_wardrobe_brocade": {
+   "a": "assets-src/quaternius/out/T_wardrobe_brocade_BaseColor.png",
+   "normal": "assets-src/quaternius/out/T_wardrobe_brocade_Normal.png"
+  },
+  "MI_wardrobe_canvas": {
+   "a": "assets-src/quaternius/out/T_wardrobe_canvas_BaseColor.png",
+   "normal": "assets-src/quaternius/out/T_wardrobe_canvas_Normal.png"
+  },
   "MI_wardrobe_crew": {
    "a": "assets-src/quaternius/out/T_wardrobe_crew_BaseColor.png",
    "normal": "assets-src/quaternius/out/T_wardrobe_crew_Normal.png"
@@ -669,6 +1107,10 @@
   "MI_wardrobe_scarf": {
    "a": "assets-src/quaternius/out/T_wardrobe_scarf_BaseColor.png",
    "normal": "assets-src/quaternius/out/T_wardrobe_scarf_Normal.png"
+  },
+  "MI_wardrobe_wool": {
+   "a": "assets-src/quaternius/out/T_wardrobe_wool_BaseColor.png",
+   "normal": "assets-src/quaternius/out/T_wardrobe_wool_Normal.png"
   }
  },
  "skeleton": "Quaternius UE-style 65 minus 12 leaf plus eye_l/eye_r",

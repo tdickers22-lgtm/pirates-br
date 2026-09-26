@@ -16,6 +16,11 @@ Stages (one module each, run in this order; later slices append theirs):
                                    hat_bandana, hat_headscarf, acc_eyepatch, acc_earring and a hat-safe cut
                                    hair_<style>_hat per style (non-default nodes, 100% head);
                                    --wardrobe-renders writes docs/asset-sheets/characters/wardrobe-i/.
+  wardrobe II (b3.2d, _pirate_wardrobe_cloth.py)  deforming garments on every body: coat_frock, coat_jacket,
+                                   vest_waistcoat, sash, belt, breeches_knee, breeches_slops, boots_tall, boots_shoes
+                                   (body shells + lofts, Data Transfer weights, crew-colour lining/facings);
+                                   --cloth-renders writes the posed weight-QA and R2 sheets to
+                                   docs/asset-sheets/characters/wardrobe-ii/ (--cloth-qa-only: Workbench poses only).
 Inputs are restored by `node assets-src/quaternius/fetch.mjs` (sha256-pinned, CC0).
 """
 import json
@@ -29,6 +34,7 @@ from mathutils import Vector
 sys.path.insert(0, os.path.dirname(__file__))
 import _pirate_import as imp  # noqa: E402
 import _pirate_wardrobe as wardrobe  # noqa: E402
+import _pirate_wardrobe_cloth as cloth  # noqa: E402
 
 REPO = imp.REPO
 OUT = os.path.join(REPO, "assets-src", "quaternius", "out")
@@ -222,6 +228,7 @@ def main():
         arm, meshes = imp.build_base(body_id, rep, do_retarget=not RAW, out_dir=OUT)
         imp.repoint_images(rep)
         meshes = meshes + wardrobe.dress(arm, meshes, body_id, OUT, rep)
+        meshes = meshes + cloth.dress(arm, meshes, body_id, OUT, rep)
         report["bodies"][body_id] = rep[body_id] | {k: v for k, v in rep.items() if k != body_id}
         report["materials"].update(material_slots(meshes))
         export(arm, meshes, os.path.join(OUT, f"pirate_base_{body_id}.glb"))
@@ -237,6 +244,8 @@ def main():
 
     if "--wardrobe-renders" in ARGS:
         wardrobe_sheet(built)
+    if "--cloth-renders" in ARGS or "--cloth-qa-only" in ARGS:
+        cloth.review_sheets(built, REPO, setup_render, cycles="--cloth-qa-only" not in ARGS)
     if "--renders" not in ARGS:
         return
     os.makedirs(SHEET, exist_ok=True)
