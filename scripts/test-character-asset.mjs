@@ -800,7 +800,15 @@ if (!argv.includes('--glb')) {
 // Red: 3e017cda (boots_tall 18264, coat_frock 8876; coat fronts and vest V/armholes with dozens of spikes).
 if (!argv.includes('--glb')) {
   const CAP = { boots_tall: 2400, boots_shoes: 1800, coat_frock: 6000, coat_jacket: 5000, vest_waistcoat: 3000,
-    breeches_knee: 4300, breeches_slops: 4300, sash: 2500, belt: 900 };
+    breeches_knee: 4300, breeches_slops: 4300, sash: 2500, belt: 900, hat_tricorn: 2800, hat_bicorn: 2800 };
+  // F8 gold: the buttons, buckles and earring rendered grey-silver next to the gold waistcoat (R2 face-1m-captain-noon-3q).
+  // The gold class tint, in sRGB, must be a saturated gold (hue 35-50 deg, saturation >= 0.55). Red: 3e017cda (sat 0.40).
+  // F7 boots: near-black boots on dark-brown breeches read as black stockings. The boot leather class must be a brown
+  // (hue 15-40 deg) at >= 1.5x the breeches' relative luminance. Red: 3e017cda (leather 0.017 vs breeches 0.063).
+  const srgb = (c) => c.slice(0, 3).map((x) => (x <= 0.0031308 ? 12.92 * x : 1.055 * x ** (1 / 2.4) - 0.055));
+  const hsv = (c) => { const [r, g, b] = srgb(c); const mx = Math.max(r, g, b); const d = mx - Math.min(r, g, b); if (!d) return [0, 0];
+    const h = mx === r ? ((g - b) / d + 6) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4; return [h * 60, d / mx]; };
+  const lum = (c) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
   const RIMS = ['coat_frock', 'coat_jacket', 'vest_waistcoat'];
   const rimLoops = (v, outer) => { // outer = the material of the garment's first slot (the cloth face)
     const key = (p) => p.map((x) => Math.round(x * 5000)).join();
@@ -824,10 +832,11 @@ if (!argv.includes('--glb')) {
       const P = [...L, L[0]]; const st = [P[0]]; let carry = 0;
       for (let i = 1; i < P.length; i++) { const d = sub(P[i], P[i - 1]); const l = len(d); let s = 0.01 - carry;
         while (s <= l) { st.push(P[i - 1].map((x, k) => x + d[k] * s / l)); s += 0.01; } carry = l - (s - 0.01); }
-      let spikes = 0; const n = st.length;
+      let spikes = 0; const n = st.length; const at = [];
       for (let i = 0; i < n; i++) { const a = sub(st[i], st[(i - 1 + n) % n]); const b = sub(st[(i + 1) % n], st[i]);
         if (len(a) < 1e-4 || len(b) < 1e-4) continue;
-        if (Math.acos(Math.max(-1, Math.min(1, (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (len(a) * len(b))))) > 35 * Math.PI / 180) spikes += 1; }
+        if (Math.acos(Math.max(-1, Math.min(1, (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (len(a) * len(b))))) > 35 * Math.PI / 180) { spikes += 1; at.push(st[i].map((x) => x.toFixed(3)).join(' ')); } }
+      if (process.env.RIM_WHY) console.log(`    loop ${n} stations, spikes at: ${at.join(' | ')}`);
       return { n, spikes };
     });
   };
@@ -843,7 +852,15 @@ if (!argv.includes('--glb')) {
       const t = gltf.meshes[gltf.nodes[i].mesh].primitives.reduce((s, p) => s + gltf.accessors[p.indices].count / 3, 0);
       total += t; if (t > cap) over.push(`${slot} ${t} > ${cap}`);
     }
-    expect(`${b}: wardrobe II per-slot tri caps (all nine slots ${total} tris)`, !over.length, over.join(', '));
+    expect(`${b}: wardrobe II + hat per-slot tri caps (${Object.keys(CAP).length} slots, ${total} tris)`, !over.length, over.join(', '));
+    const tintOf = (m) => m?.extras?.wardrobeTint ?? m?.pbrMetallicRoughness?.baseColorFactor;
+    const firstMat = (slot) => { const i = nodeOf(slot); return i < 0 ? null : gltf.materials?.[gltf.meshes[gltf.nodes[i].mesh].primitives[0].material]; };
+    const gold = (gltf.materials ?? []).find((m) => m.extras?.wardrobeClass === 'gold');
+    const [gh, gs] = gold ? hsv(tintOf(gold)) : [0, 0];
+    expect(`${b}: gold parts are a saturated gold (sRGB hue ${gh.toFixed(0)} deg, sat ${gs.toFixed(2)}; 35-50, >= 0.55)`, !!gold && gh >= 35 && gh <= 50 && gs >= 0.55);
+    const bt = tintOf(firstMat('boots_tall')); const br = tintOf(firstMat('breeches_knee'));
+    const bh = bt ? hsv(bt)[0] : 0; const ratio = bt && br ? lum(bt) / lum(br) : 0;
+    expect(`${b}: boot leather reads against the breeches (hue ${bh.toFixed(0)} deg, ${ratio.toFixed(2)}x the breeches luminance; 15-40 deg, >= 1.5x)`, bh >= 15 && bh <= 40 && ratio >= 1.5);
     for (const slot of RIMS) {
       const i = nodeOf(slot); if (i < 0) { expect(`${b}: ${slot} present`, false); continue; }
       const loops = rimLoops(skinned(g, W, i), gltf.meshes[gltf.nodes[i].mesh].primitives[0].material);

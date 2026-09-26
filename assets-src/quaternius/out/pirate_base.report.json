@@ -178,10 +178,10 @@
      "hair_buns_hat": 836,
      "hair_buzzedfemale_hat": 286,
      "hair_long_hat": 1608,
-     "hat_bandana": 3268,
-     "hat_bicorn": 4698,
-     "hat_headscarf": 3268,
-     "hat_tricorn": 4672
+     "hat_bandana": 1252,
+     "hat_bicorn": 1242,
+     "hat_headscarf": 1252,
+     "hat_tricorn": 1216
     }
    },
    "wardrobeII": {
@@ -262,6 +262,7 @@
        "lowerarm_r",
        "neck_01",
        "pelvis",
+       "pinky_01_r",
        "spine_01",
        "spine_02",
        "spine_03",
@@ -509,10 +510,10 @@
      "hair_buzzed_hat": 282,
      "hair_long_hat": 2152,
      "hair_simpleparted_hat": 212,
-     "hat_bandana": 3268,
-     "hat_bicorn": 4698,
-     "hat_headscarf": 3268,
-     "hat_tricorn": 4672
+     "hat_bandana": 1252,
+     "hat_bicorn": 1242,
+     "hat_headscarf": 1252,
+     "hat_tricorn": 1216
     }
    },
    "wardrobeII": {
@@ -839,10 +840,10 @@
      "acc_eyepatch": 982,
      "hair_buzzed_hat": 288,
      "hair_simpleparted_hat": 218,
-     "hat_bandana": 3268,
-     "hat_bicorn": 4698,
-     "hat_headscarf": 3268,
-     "hat_tricorn": 4672
+     "hat_bandana": 1252,
+     "hat_bicorn": 1242,
+     "hat_headscarf": 1252,
+     "hat_tricorn": 1216
     }
    },
    "wardrobeII": {
@@ -1071,6 +1072,10 @@
   "MI_wardrobe_band": {
    "a": "assets-src/quaternius/out/T_wardrobe_band_BaseColor.png",
    "normal": "assets-src/quaternius/out/T_wardrobe_band_Normal.png"
+  },
+  "MI_wardrobe_boot": {
+   "a": "assets-src/quaternius/out/T_wardrobe_boot_BaseColor.png",
+   "normal": "assets-src/quaternius/out/T_wardrobe_boot_Normal.png"
   },
   "MI_wardrobe_breeches": {
    "a": "assets-src/quaternius/out/T_wardrobe_breeches_BaseColor.png",

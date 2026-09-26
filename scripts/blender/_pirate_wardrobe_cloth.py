@@ -303,6 +303,111 @@ def fair_rims(B, bm, src, off, span=0.04, corner_deg=60.0, passes=60):
             v.co += nn * (kk - sd)
 
 
+def refair_outer(o, B, span=0.04, corner_deg=60.0, passes=40, max_corners=4, open_corners=6, clear=0.005):
+    """R2 F1 (second pass): fair_rims() runs on the bare shell, but the collar and lapel extrusions, decimate(),
+    solidify() and bridge_folds() all move rim vertices afterwards, and those kinks are what the gate still counted
+    (coat opening 11/8/18 spikes, vest 9). This runs LAST on the finished garment: every boundary of the outer cloth
+    (material 0) faces, the line test-character-asset resamples, is Taubin-smoothed between its authored corners
+    (found at the 4 cm scale) and re-spaced by arc length. Whatever hangs off a rim vertex and is not outer cloth
+    (the solidify rim + lining vertex, the lapel and cuff extrusions) moves with it, so the edge keeps its thickness
+    and the facings stay attached. The longest loop (the coat opening: hem x front, collar foot, collar top, each
+    side) may keep six corners, every other loop four."""
+    mw = o.matrix_world
+    inv = mw.inverted()
+    bm = bmesh.new()
+    bm.from_mesh(o.data)
+    bm.verts.ensure_lookup_table()
+    outer = lambda f: f.material_index == 0
+    adj = {}
+    for e in bm.edges:
+        if sum(1 for f in e.link_faces if outer(f)) == 1:
+            a, b = e.verts
+            adj.setdefault(a, []).append(b)
+            adj.setdefault(b, []).append(a)
+    used, loops = set(), []
+    for s0 in adj:
+        if s0 in used:
+            continue
+        L, prev, cur = [s0], None, s0
+        used.add(s0)
+        while True:
+            nx = next((w for w in adj[cur] if w is not prev and w not in used), None)
+            if nx is None:
+                break
+            used.add(nx)
+            L.append(nx)
+            prev, cur = cur, nx
+        if len(L) >= 8:
+            loops.append(L)
+    loops.sort(key=lambda L: -len(L))
+    rimset = set(used)
+    moved = 0
+    for li, loop in enumerate(loops):
+        n = len(loop)
+        P0 = [mw @ v.co for v in loop]
+        P = list(P0)
+        per = sum((P[(i + 1) % n] - P[i]).length for i in range(n)) or 1.0
+        k = max(2, int(round(span / (per / n))))
+
+        def turn(i):
+            a, b = P[i] - P[(i - k) % n], P[(i + k) % n] - P[i]
+            return 0.0 if a.length < 1e-6 or b.length < 1e-6 else math.degrees(a.angle(b))
+        ang = [turn(i) for i in range(n)]
+        cap = open_corners if (li == 0 and open_corners) else max_corners
+        pinned = {i for i in range(n) if corner_deg < ang[i] < 140 and all(ang[i] >= ang[(i + d) % n] for d in range(-k, k + 1))}
+        pinned = set(sorted(pinned, key=lambda i: -ang[i])[:cap])
+        for _ in range(passes):
+            for lam in (0.5, -0.53):
+                P = [P[i] if i in pinned else P[i] + ((P[(i - 1) % n] + P[(i + 1) % n]) * 0.5 - P[i]) * lam for i in range(n)]
+        cs = sorted(pinned) or [0]
+        newP = list(P)
+        for ci, c0 in enumerate(cs):
+            c1 = cs[(ci + 1) % len(cs)]
+            idx = [(c0 + j) % n for j in range(((c1 - c0) % n) or n)] + [c1]
+            pts = [P[i] for i in idx]
+            acc = [0.0]
+            for a, b in zip(pts, pts[1:]):
+                acc.append(acc[-1] + (b - a).length)
+            tot, m, q = acc[-1] or 1.0, len(idx) - 1, 0
+            for j in range(1, m):
+                t = tot * j / m
+                while q < m - 1 and acc[q + 1] < t:
+                    q += 1
+                u = (t - acc[q]) / max(1e-9, acc[q + 1] - acc[q])
+                newP[idx[j]] = pts[q].lerp(pts[q + 1], min(1.0, max(0.0, u)))
+        for v, p0, p1 in zip(loop, P0, newP):
+            loc, nn, _, _ = B.bvh.find_nearest(p1)
+            if loc is not None and (p1 - loc).dot(nn) < clear:   # never faired into the skin
+                p1 = p1 + nn * (clear - (p1 - loc).dot(nn))
+            d = p1 - p0
+            if d.length < 1e-7:
+                continue
+            moved += 1
+            v.co = inv @ p1
+            for e in v.link_edges:   # the lining/rim vertex and the facing hanging off this rim vertex follow it
+                w = e.other_vert(v)
+                if w not in rimset and not any(outer(f) for f in w.link_faces):
+                    q = (mw @ w.co) + d
+                    loc, nn, _, _ = B.bvh.find_nearest(q)
+                    if loc is not None and (q - loc).dot(nn) < 0.0015:   # the lining stays off the skin too
+                        q = q + nn * (0.0015 - (q - loc).dot(nn))
+                    w.co = inv @ q
+    # the two rings of outer cloth behind a moved rim: a rounded strap corner or a respaced rim leaves the faces behind
+    # it cutting a convex ridge of skin (the waistcoat armhole over the shoulder): hold them off the skin like the rim
+    ring = {e.other_vert(v) for L in loops for v in L for e in v.link_edges} - rimset
+    ring |= {e.other_vert(v) for v in ring for e in v.link_edges} - rimset
+    for v in ring:   # outer cloth held at the rim clearance, the lining behind it at 1.5 mm
+        c = clear if any(outer(f) for f in v.link_faces) else 0.0015
+        p = mw @ v.co
+        loc, nn, _, _ = B.bvh.find_nearest(p)
+        if loc is not None and (p - loc).dot(nn) < c:
+            v.co = inv @ (p + nn * (c - (p - loc).dot(nn)))
+    bm.to_mesh(o.data)
+    bm.free()
+    o.data.update()
+    return moved
+
+
 def decimate(o, ratio):
     """R2 F9: the shell carries the body's full face density; collapse its interior (the rim loops are held by a zero
     weight so the faired openings keep their line) before the lining doubles it"""
@@ -599,6 +704,11 @@ def upper(B, name, hem, torso_off, arm_off, gap, mats, out_dir, cuff, lapels, co
     decimate(o, dec)
     solidify(o, 0.0032)
     bridge_folds(o, B, ["spine_02", "spine_03", "upperarm_l", "upperarm_r", "lowerarm_l", "lowerarm_r"])
+    refair_outer(o, B)
+    # fairing moves the rim a few mm; where that uncovered a fold (the stout's shoulder under the collar end) the
+    # bridge pass pushes the sheet back out, then the rim is faired once more (the bridge falloff can kink it)
+    if bridge_folds(o, B, ["spine_02", "spine_03", "upperarm_l", "upperarm_r"], passes=4):
+        refair_outer(o, B, passes=80)
     return o
 
 
@@ -776,6 +886,9 @@ def vest_waistcoat(B, out_dir):
     o.data.materials[1] = W.material("breeches", out_dir)   # plain wool back lining, not the crew colour
     o.data.materials[2] = W.material("breeches", out_dir)
     solidify(o, 0.0025)
+    refair_outer(o, B, max_corners=1, open_corners=0, passes=80)   # only the V / hem front point stays sharp: the strap corners round off at ~2 cm
+    if bridge_folds(o, B, ["spine_02", "spine_03"], passes=4):
+        refair_outer(o, B, max_corners=1, open_corners=0, passes=80)
     pts = [Vector((B.cx, B.cy, hem + 0.03 + k * (zv - 0.02 - hem - 0.03) / 5)) for k in range(6)]
     append(o, buttons_on(o, pts, Vector((0, 1, 0)), r=0.006))
     transfer_weights(o, B)
@@ -987,7 +1100,7 @@ def boots(B, kind, out_dir):
 
         def off(z):
             o = 0.007 + (0.010 * smoothstep(B.ankle + 0.02, B.ankle + 0.08, z) if tall else 0.0)
-            return o + 0.004 * (1 - smoothstep(toe_z - 0.02, toe_z, z))   # toe box room
+            return o + 0.007 * (1 - smoothstep(toe_z - 0.02, toe_z, z))   # toe box room (4 mm: a 26-gon chord poked the stout's toes)
         # ring heights: dense over the foot, sparser up the shaft
         zs, z = [], zmin + 0.016
         while z < top - 1e-4:
@@ -1048,7 +1161,7 @@ def boots(B, kind, out_dir):
             return v.co - r.normalized() * d + UP * dz
         nv = extrude(bm, top_ring, lambda v: lip(v, 0.004, -0.002), 1)
         extrude(bm, nv, lambda v: lip(v, 0.0, -0.025), 1)
-    o = to_obj(f"boots_{kind}", bm, ["leather", "leather", "band", "gold"], out_dir)
+    o = to_obj(f"boots_{kind}", bm, ["boot", "boot", "band", "gold"], out_dir)
     parts = []
     for n_, (poly, inner, z0, z1) in enumerate(heels):
         # a C-section solid round the back of the sole: outer wall, top lift, inner wall buried in the upper, and

@@ -29,9 +29,9 @@ from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
 X = Vector((1, 0, 0))
-N_SEG = 64          # around the crown
-K_ROWS = 18         # pole to hat line
-M_BRIM = 14         # hat line to brim edge
+N_SEG = 32          # around the crown (R2 F9: 64 x 32 rows made the tricorn 9,216 tris)
+K_ROWS = 9          # pole to hat line
+M_BRIM = 7          # hat line to brim edge
 CUT_MARGIN = 0.004  # hat-safe cuts stop this far under the hat line
 
 MATS = {  # class: (linear tint, roughness, metallic, crew mask)
@@ -40,7 +40,8 @@ MATS = {  # class: (linear tint, roughness, metallic, crew mask)
     "crew": ((0.55, 0.06, 0.05), 0.8, 0.0, True),
     "scarf": ((0.42, 0.24, 0.07), 0.85, 0.0, False),
     "leather": ((0.022, 0.016, 0.012), 0.55, 0.0, False),
-    "gold": ((0.83, 0.62, 0.26), 0.3, 1.0, False),
+    "gold": ((0.76, 0.46, 0.10), 0.3, 1.0, False),   # R2 F8: (0.83, 0.62, 0.26) rendered grey-silver (sRGB sat 0.41)
+    "boot": ((0.16, 0.085, 0.035), 0.5, 0.0, False),   # R2 F7: mid-brown boot leather, 1.6x the breeches' value (near-black boots read as stockings)
     # b3.2d wardrobe II (_pirate_wardrobe_cloth.py): body garments share this one material set
     "wool": ((0.018, 0.026, 0.060), 0.9, 0.0, False),       # frock coat / short jacket broadcloth, navy
     "canvas": ((0.36, 0.32, 0.25), 0.92, 0.0, False),       # slops, sailcloth duck, undyed
@@ -71,7 +72,7 @@ def _height(cls, n=512):
     if cls == "brocade":   # damask: a low motif (sin lattice) over a satin rib
         motif = np.cos(2 * math.pi * 6 * x) * np.cos(2 * math.pi * 6 * y) + 0.5 * np.cos(2 * math.pi * 12 * (x - y))
         return 0.6 * np.tanh(2 * motif) + 0.2 * np.sin(2 * math.pi * 96 * y)
-    if cls == "leather":
+    if cls in ("leather", "boot"):
         g = _noise(n, 0.12, 5)
         return np.abs(g) * -0.8 + 0.3 * _noise(n, 0.4, 6)
     return 0.4 * _noise(n, 0.3, 7)   # gold: faint hammering
@@ -93,7 +94,9 @@ def _save(path, rgb, non_color):
 
 def _textures(cls, out_dir):
     h = _height(cls)
-    strength = {"felt": 1.2, "band": 1.0, "crew": 0.9, "scarf": 0.9, "leather": 1.6, "gold": 0.5}.get(cls, 1.0)
+    # R2 F8: at 1 m every cloth read as the same coarse stucco: cloth normal strength halved, felt near-smooth
+    strength = {"felt": 0.45, "band": 0.8, "crew": 0.45, "scarf": 0.45, "leather": 1.6, "boot": 1.2, "gold": 0.5,
+                "wool": 0.5, "canvas": 0.55, "brocade": 0.5, "breeches": 0.5}.get(cls, 1.0)
     dx = (np.roll(h, -1, 1) - np.roll(h, 1, 1)) * 0.5 * strength
     dy = (np.roll(h, -1, 0) - np.roll(h, 1, 0)) * 0.5 * strength
     nrm = np.stack([-dx, dy, np.ones_like(h)], axis=2)
@@ -366,7 +369,7 @@ def _cocked_hat(name, fr, arm, out_dir, a_f, b_f, A_f, raise_, trim_cls, extra=N
     pole, crown = _crown_rows(fr, 0.012, raise_)
     brim = _brim_rows(fr, crown[-1], a_f, b_f, A_f)
     shell = _grid(f"{name}_shell", crown + brim, pole=pole, v_scale=6.0,
-                  mat_rows=lambda r: 1 if K_ROWS - 3 <= r <= K_ROWS else 0)
+                  mat_rows=lambda r: 1 if K_ROWS - 1 <= r <= K_ROWS else 0)   # the band: ~20 deg of crown at 9 rows
     shell.data.materials.append(material("felt", out_dir))
     shell.data.materials.append(material("band", out_dir))
     if shell.data.polygons[0].normal.dot(fr.n) < 0:   # the pole fan must face up/out: solidify goes outward
@@ -377,7 +380,7 @@ def _cocked_hat(name, fr, arm, out_dir, a_f, b_f, A_f, raise_, trim_cls, extra=N
         bm.free()
     _solidify(shell, 0.0035)
     edge = [p + 0.002 * fr.n for p in brim[-1]]
-    braid = _tube(f"{name}_trim", edge, 0.0032)
+    braid = _tube(f"{name}_trim", edge, 0.0032, seg=5)
     braid.data.materials.append(material(trim_cls, out_dir))
     parts = [shell, braid] + (extra(brim) if extra else [])
     with bpy.context.temp_override(active_object=shell, selected_editable_objects=parts, selected_objects=parts):
@@ -471,8 +474,8 @@ def bandana(fr, arm, out_dir):
     return _cloth_cap("hat_bandana", fr, arm, out_dir, "crew", 0.005, 0.0015, 0.0045, math.radians(90), 0.085, 0.034)
 
 
-def headscarf(fr, arm, out_dir):
-    return _cloth_cap("hat_headscarf", fr, arm, out_dir, "scarf", 0.008, 0.005, 0.006, math.radians(128), 0.19, 0.05)
+def headscarf(fr, arm, out_dir):   # 11 mm off the skull: at 32 x 9 crown rows 8 mm let 6-8 long-hair verts through
+    return _cloth_cap("hat_headscarf", fr, arm, out_dir, "scarf", 0.011, 0.005, 0.006, math.radians(128), 0.19, 0.05)
 
 
 def eyepatch(fr, arm, eyes, out_dir):
