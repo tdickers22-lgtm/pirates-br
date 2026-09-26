@@ -100,8 +100,10 @@ def _glb_json(path):
         return json.loads(f.read(ln))
 
 
-def import_world(path):
-    """Import a GLB and return ONE welded mesh object in world space (flat faces flagged)."""
+def import_world(path, weld=True):
+    """Import a GLB and return ONE mesh object in world space (flat faces flagged), welded unless
+    `weld=False` (a reused far proxy is carried over vertex for vertex as shipped: it is the file
+    test-far-lod-integrity already grades as a surface, and the lods gate grades it as a proxy)."""
     before = set(bpy.data.objects)
     bpy.ops.import_scene.gltf(filepath=path)
     imported = [o for o in bpy.data.objects if o not in before]
@@ -123,7 +125,8 @@ def import_world(path):
                                        selected_editable_objects=meshes):
             bpy.ops.object.join()
     base = meshes[0]
-    F.weld(base.data)
+    if weld:
+        F.weld(base.data)
     return base
 
 
@@ -215,7 +218,10 @@ def ok_surface(src, st):
     return st['loops'] <= src['loops'] and MIN_AREA <= keep <= MAX_AREA, keep
 
 
-def build_key(key, spec):
+def build_key(key, spec, boost=None, drop=()):
+    """One chain. `boost[label]` multiplies a level's starting ratio (a level the node gate refused
+    on the exported file is rebuilt coarser-safe); a label in `drop` is left out of the chain."""
+    boost = boost or {}
     F.wipe()
     src_path = os.path.join(SRC_DIR, f'{key}.glb')
     base = import_world(src_path)
@@ -227,21 +233,26 @@ def build_key(key, spec):
     levels, rows, cap = [], [], n0
     far_path = os.path.join(SRC_DIR, f'{key}_far.glb')
     for label in spec['need']:
+        if label in drop:
+            rows.append({'label': label, 'dropped': True, 'surface_ok': True, 'under_ceiling': False,
+                         'tris': 0, 'keep': 0, 'area': 0, 'loops': 0, 'src_loops': src['loops']})
+            continue
         aim, ceil, floor = tg[label]
         top = 0.9 * cap / n0
         row = {'label': label, 'aim': round(aim, 4), 'ceil': ceil}
         c = None
         if label == 'far' and os.path.exists(far_path):
-            f = import_world(far_path)
+            f = import_world(far_path, weld=False)
             fst = F.surface_stats(f.data)
             if fst['tris'] < cap:
                 c = f
                 c.name = c.data.name = f'{key}_{label}'
+                c['lod_reuse'] = True     # exported as node extras: the gate grades it as a proxy
                 row.update(reuse=True, ratio=round(fst['tris'] / n0, 4))
             else:
                 bpy.data.objects.remove(f)
         if c is None:
-            r = min(aim, top)
+            r = min(aim * boost.get(label, 1.0), top)
             for attempt in range(TRIES):
                 # Each level decimates the level ABOVE it (LOD0 for LOD1): a part the per-part
                 # contract refuses to reduce keeps its coarser parent mesh, so a level is never
@@ -250,6 +261,10 @@ def build_key(key, spec):
                 pr = min(1.0, r * n0 / max(1, F.surface_stats(parent.data)['tris']))
                 c = dup(parent, f'{key}_{label}')
                 reduce_parts(c, pr, FLOOR[label], cards=label == 'far')
+                # Weld at the gate's 1e-4 so this census IS the node gate's: Collapse leaves slivers
+                # whose corners sit < 1e-4 apart, which the gate welds into degenerate (dropped)
+                # triangles and so into boundary loops Blender never counted (tavern, grave_marker).
+                F.weld(c.data)
                 st = F.surface_stats(c.data)
                 good, _ = ok_surface(src, st)
                 if (good and st['tris'] < cap) or r >= top or attempt == TRIES - 1:
@@ -257,8 +272,9 @@ def build_key(key, spec):
                 bpy.data.objects.remove(c)
                 r = min(r * GROW, top)
             row.update(reuse=False, ratio=round(r, 4), attempts=attempt + 1)
-            if label == 'far':
-                row['snapped'] = F.snap_base(c, src_base)
+            # Every decimated level re-seats on the source's lowest point: the per-part rescale
+            # about each part's centre dropped LOD1 bases up to 0.15 m (barrel_lods, lantern_post).
+            row['snapped'] = F.snap_base(c, src_base)
         st = F.surface_stats(c.data)
         good, keep = ok_surface(src, st)
         row.update(tris=st['tris'], keep=round(st['tris'] / n0, 4), area=round(keep, 4), loops=st['loops'],
@@ -289,7 +305,8 @@ def export(levels, key):
         o.select_set(True)
     bpy.context.view_layer.objects.active = levels[0]
     kwargs = dict(filepath=path, export_format='GLB', use_selection=True, export_apply=True, export_yup=True,
-                  export_animations=False, export_skins=False, export_morph=False, export_image_format='NONE')
+                  export_animations=False, export_skins=False, export_morph=False, export_image_format='NONE',
+                  export_extras=True)
     for extra in ({'export_vertex_color': 'ACTIVE', 'export_all_vertex_colors': False},
                   {'export_vertex_color': 'ACTIVE'}, {}):
         try:
@@ -300,6 +317,43 @@ def export(levels, key):
     else:
         raise RuntimeError(f'gltf export failed for {key}')
     return path
+
+
+def js_verdicts(key):
+    """Re-grade the EXPORTED file with the node gate's own reader + weld + census
+    (test-far-lod-integrity --lods-json): {label: why} for every level it refuses."""
+    out = subprocess.run([node_bin(), 'scripts/test-far-lod-integrity.mjs', '--lods-json', key, '--lods-dir', OUT_DIR],
+                         cwd=ROOT, capture_output=True, text=True)
+    if out.returncode != 0:
+        raise RuntimeError(f'node lods grade failed for {key}: {out.stderr[-400:]}')
+    rows = json.loads(out.stdout.strip().splitlines()[-1])[0]['levels']
+    return {r['lvl']: (r['why'] or r['attrWhy']) for r in rows if not (r['ok'] and r['attrOk'])}
+
+
+JS_ROUNDS = 3
+
+
+def build_verified(key, spec):
+    """build_key, then the node gate on the exported file. A refused level is rebuilt from a
+    coarser-safe start (x GROW^2 per round); one still refused after JS_ROUNDS is DROPPED from the
+    chain (the runtime draws the level above further out: cheaper-by-less, never see-through)."""
+    boost, drop, history = {}, set(), []
+    for rnd in range(JS_ROUNDS + 1):
+        row = build_key(key, spec, boost, drop)
+        bad = js_verdicts(key)
+        history.append(bad)
+        if not bad:
+            break
+        for label in bad:
+            if rnd < JS_ROUNDS - 1:
+                boost[label] = boost.get(label, 1.0) * GROW * GROW
+            else:
+                drop.add(label)
+    row['jsRounds'] = len(history)
+    row['jsRefused'] = history[:-1]
+    row['jsFailed'] = history[-1]
+    row['dropped'] = sorted(drop)
+    return row
 
 
 def main():
@@ -324,7 +378,7 @@ def main():
             skipped.append((key, 'skinned: its chain comes from the character rebuild'))
             continue
         try:
-            row = build_key(key, s['lods'])
+            row = build_verified(key, s['lods'])
         except Exception as e:  # one broken source must not hide the rest; it fails the build below
             row = {'key': key, 'error': repr(e), 'levels': []}
         rows.append(row)
@@ -334,7 +388,8 @@ def main():
         print(f"LODS {key:>18} {row.get('src_tris', 0):>6}: {lv or row.get('error')}", flush=True)
     # A hole or lost surface fails the build; a level that is not coarser than the one above (a
     # small multi-part prop at its part floors) is reported and stays red in test-asset-tiers.
-    failed = [r['key'] for r in rows if r.get('error') or not all(l['surface_ok'] for l in r['levels'])]
+    failed = [r['key'] for r in rows if r.get('error') or r.get('jsFailed')
+              or not all(l['surface_ok'] for l in r['levels'])]
     over = [f"{r['key']}:{l['label']}" for r in rows for l in r['levels'] if not l['under_ceiling']]
     with open(REPORT, 'w') as f:
         json.dump({'rows': rows, 'skipped': skipped, 'failed': failed, 'overCeiling': over,

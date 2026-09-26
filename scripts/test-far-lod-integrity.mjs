@@ -79,7 +79,7 @@ const INDEX_BYTES = { 5121: 1, 5123: 2, 5125: 4 };
  * face, indices into positions), drawnTris } — `drawnTris` is what the GPU is
  * asked for (index count / 3), before any welding drops a degenerate.
  */
-export function readGlbTriangles(file) {
+export function readGlbTriangles(file, pickRoot = null) {
   const buf = fs.readFileSync(file);
   if (buf.readUInt32LE(0) !== 0x46546c67) throw new Error(`${file}: not a GLB (bad magic)`);
   const jl = buf.readUInt32LE(12);
@@ -120,12 +120,16 @@ export function readGlbTriangles(file) {
 
   const positions = []; const triangles = [];
   let drawnTris = 0;
+  const attrs = { TEXCOORD_0: 0, COLOR_0: 0, prims: 0 };
   const walk = (ni, parentM) => {
     const n = json.nodes[ni];
     const m = mul(parentM, nodeMat(n));
     if (n.mesh != null) {
       for (const prim of json.meshes[n.mesh].primitives) {
         if (prim.mode != null && prim.mode !== 4) continue; // TRIANGLES only
+        attrs.prims += 1;
+        if (prim.attributes.TEXCOORD_0 != null) attrs.TEXCOORD_0 += 1;
+        if (prim.attributes.COLOR_0 != null) attrs.COLOR_0 += 1;
         const base = positions.length / 3;
         const p = readPositions(prim.attributes.POSITION);
         for (let i = 0; i < p.length; i += 3) {
@@ -143,8 +147,8 @@ export function readGlbTriangles(file) {
     }
     for (const c of n.children || []) walk(c, m);
   };
-  for (const r of json.scenes[json.scene || 0].nodes) walk(r, IDENTITY);
-  return { positions: Float64Array.from(positions), triangles: Uint32Array.from(triangles), drawnTris };
+  for (const r of json.scenes[json.scene || 0].nodes) if (!pickRoot || pickRoot(json.nodes[r].name || '')) walk(r, IDENTITY);
+  return { positions: Float64Array.from(positions), triangles: Uint32Array.from(triangles), drawnTris, attrs };
 }
 
 /**
@@ -152,7 +156,7 @@ export function readGlbTriangles(file) {
  * non-manifold edges, and the total area. Degenerate triangles (two corners on
  * one welded vertex) carry no area and no edges, so they are dropped here.
  */
-export function measureSurface({ positions, triangles, drawnTris }) {
+export function measureSurface({ positions, triangles, drawnTris }, { dedupe = false } = {}) {
   const rawVerts = positions.length / 3;
   const weldId = new Int32Array(rawVerts);
   const keyToId = new Map();
@@ -166,10 +170,20 @@ export function measureSurface({ positions, triangles, drawnTris }) {
   }
   const edgeFaces = new Map(); // undirected edge key → adjacent face count
   const edgeKey = (a, b) => (a < b ? a * welded + b : b * welded + a);
-  let area = 0; let degenerate = 0;
+  let area = 0; let degenerate = 0; let doubled = 0;
+  // A triangle on the same three welded corners as one already seen (the back face of a
+  // double-sided card, or an exporter's duplicate) is ONE surface on screen: counted once, so a
+  // doubled card reads as the open sheet it is and its area is not counted twice. Blender's weld
+  // (the build_lods census) removes such doubles; without this the lods section called a doubled
+  // source card closed and its single-sided LOD "a hole" (grave_marker, gull, tavern). `dedupe`
+  // is the lods-section census; the far-file section keeps its original (b1.1) census.
+  const seenFace = new Set();
   for (let t = 0; t < triangles.length; t += 3) {
     const a = weldId[triangles[t]]; const b = weldId[triangles[t + 1]]; const c = weldId[triangles[t + 2]];
     if (a === b || b === c || a === c) { degenerate += 1; continue; }
+    const fk = [a, b, c].sort((x, y) => x - y).join(',');
+    if (dedupe && seenFace.has(fk)) { doubled += 1; continue; }
+    seenFace.add(fk);
     const ax = positions[triangles[t] * 3]; const ay = positions[triangles[t] * 3 + 1]; const az = positions[triangles[t] * 3 + 2];
     const ux = positions[triangles[t + 1] * 3] - ax; const uy = positions[triangles[t + 1] * 3 + 1] - ay; const uz = positions[triangles[t + 1] * 3 + 2] - az;
     const vx = positions[triangles[t + 2] * 3] - ax; const vy = positions[triangles[t + 2] * 3 + 1] - ay; const vz = positions[triangles[t + 2] * 3 + 2] - az;
@@ -196,7 +210,7 @@ export function measureSurface({ positions, triangles, drawnTris }) {
   const roots = new Set();
   for (let v = 0; v < welded; v++) if (onBoundary[v]) roots.add(find(v));
   return {
-    drawnTris, rawVerts, welded, degenerate, area,
+    drawnTris, rawVerts, welded, degenerate, doubled, area,
     boundaryEdges, boundaryLoops: roots.size, nonManifold,
   };
 }
@@ -237,6 +251,126 @@ export function gradeAll() {
   return rows;
 }
 
+// ── b3.4d: every asset x every level of `<key>_lods.glb` (build_lods.py) ─────────────────────
+// Each level node (name ends in LOD1 / LOD2 / far, a scene root) is the same SURFACE as LOD0:
+// no boundary loop the source does not have (a rock: none at all), 92%..130% of its area (130% =
+// the rescale cap; more is folded spikes), and the UV / vertex-colour attributes LOD0 carries.
+// Every tiered key whose tier asks for a chain has the file (skinned sources exempt: the
+// character rebuild owns their chain). Mutation: PIRATES_BR_MUTATE=farlod:hole drops every 5th
+// triangle of the first level graded; farlod:attr drops its COLOR_0/TEXCOORD_0 census.
+export const LOD_LEVELS = ['LOD1', 'LOD2', 'far'];
+export const MAX_AREA_KEEP = 1.3;
+const MUTATE = (process.env.PIRATES_BR_MUTATE || '').replace(/^farlod:/, '');
+const levelOf = (name) => { const m = /(?:^|[_\-.])(LOD1|LOD2|far)$/i.exec(name); return m ? (m[1].toLowerCase() === 'far' ? 'far' : m[1].toUpperCase()) : null; };
+
+export async function lodChainKeys() {
+  const { TIERS } = await import(pathToFileURL(path.resolve('scripts/test-asset-tiers.mjs')).href);
+  const out = [];
+  for (const t of Object.values(TIERS)) {
+    if (!t.lods || t.noMesh) continue;
+    for (const key of t.keys) {
+      const j = JSON.parse((() => { const b = fs.readFileSync(path.join(DIR, `${key}.glb`)); return b.subarray(20, 20 + b.readUInt32LE(12)).toString(); })());
+      out.push({ key, need: t.lods.need, skinned: !!(j.skins && j.skins.length) });
+    }
+  }
+  return out;
+}
+
+export function gradeLodsFile(key, dir = DIR) {
+  const src = readGlbTriangles(path.join(DIR, `${key}.glb`));
+  const near = measureSurface(src, { dedupe: true });
+  const file = path.join(dir, `${key}_lods.glb`);
+  const buf = fs.readFileSync(file);
+  const json = JSON.parse(buf.subarray(20, 20 + buf.readUInt32LE(12)).toString());
+  const levels = {};
+  for (const r of json.scenes[json.scene || 0].nodes) {
+    const n = json.nodes[r];
+    const lvl = levelOf(n.name || '');
+    if (lvl) levels[lvl] = { name: n.name, reuse: !!(n.extras && n.extras.lod_reuse) };
+  }
+  const out = [];
+  let first = true;
+  for (const lvl of LOD_LEVELS) {
+    if (!levels[lvl]) continue;
+    const tri = readGlbTriangles(file, (n) => n === levels[lvl].name);
+    if (first && MUTATE === 'hole') tri.triangles = tri.triangles.filter((_, i) => Math.floor(i / 3) % 5 !== 0);
+    if (first && MUTATE === 'attr') tri.attrs = { ...tri.attrs, TEXCOORD_0: 0, COLOR_0: 0 };
+    first = false;
+    out.push({ lvl, m: measureSurface(tri, { dedupe: true }), attrs: tri.attrs, reuse: levels[lvl].reuse });
+  }
+  return { key, near, srcAttrs: src.attrs, levels: out, images: (json.images || []).length };
+}
+
+/**
+ * Per-level verdicts for one lods file — the ONE definition both this gate and build_lods.py
+ * (which re-grades every exported file through `--lods-json` and rebuilds a level that fails)
+ * use. A far level carrying `extras.lod_reuse` is the shipped `<key>_far.glb` proxy carried over
+ * unwelded (flora cards, story proxies): like the shark's far puppet it is a different mesh, not
+ * a decimation, so it is held to the triangle ceiling (cheaper than the level above, the story
+ * band for a story key) and its area/loops are reported, not graded — the proxy itself is graded
+ * as a surface by the far-file section above.
+ */
+export function lodVerdicts(g, stories = storyAssetNames()) {
+  const rows = [];
+  let above = g.near.drawnTris;
+  for (const { lvl, m, attrs, reuse } of g.levels) {
+    const keep = m.area / g.near.area;
+    const label = `${g.key} ${lvl}: ${m.drawnTris} tris, area ${(100 * keep).toFixed(0)}%, loops ${m.boundaryLoops}/${g.near.boundaryLoops}${reuse ? ' (reused far proxy)' : ''}`;
+    let why = '';
+    if (m.drawnTris >= above) why += `not cheaper than the level above (${above}); `;
+    if (reuse) {
+      if (stories.includes(g.key) && (m.drawnTris < STORY_TRIS[0] || m.drawnTris > STORY_TRIS[1])) why += `outside the ${STORY_TRIS[0]}-${STORY_TRIS[1]} story band; `;
+    } else {
+      const loopsOk = isRock(g.key) ? m.boundaryLoops === 0 : m.boundaryLoops <= g.near.boundaryLoops;
+      if (!loopsOk) why += 'opens a hole; ';
+      if (keep < MIN_AREA_KEEP) why += 'lost surface; ';
+      if (keep > MAX_AREA_KEEP) why += 'spiked surface; ';
+    }
+    const attrWhy = [];
+    for (const a of ['TEXCOORD_0', 'COLOR_0']) {
+      if (g.srcAttrs[a] > 0 && !(attrs[a] === attrs.prims && attrs.prims > 0)) attrWhy.push(`${a} on ${attrs[a]} of ${attrs.prims} primitive(s)`);
+    }
+    rows.push({ lvl, label, ok: !why, why: why.trim(), attrOk: attrWhy.length === 0, attrWhy: attrWhy.join('; '), reuse });
+    above = m.drawnTris;
+  }
+  return rows;
+}
+
+async function gradeLodChains() {
+  const keys = await lodChainKeys();
+  const stories = storyAssetNames();
+  let graded = 0; let levelsGraded = 0;
+  for (const { key, need, skinned } of keys) {
+    const file = path.join(DIR, `${key}_lods.glb`);
+    if (skinned) { console.log(`  – ${key}: skinned source, its chain comes from the character rebuild (not graded here)`); continue; }
+    expect(`${key}_lods.glb exists (tier asks for ${need.join(' + ')})`, fs.existsSync(file), 'run scripts/blender/build_lods.py');
+    if (!fs.existsSync(file)) continue;
+    const g = gradeLodsFile(key);
+    graded += 1;
+    expect(`${key}_lods.glb ships no image (levels bind LOD0's materials by name)`, g.images === 0, `${g.images} image(s)`);
+    for (const v of lodVerdicts(g, stories)) {
+      levelsGraded += 1;
+      expect(v.label, v.ok, v.why);
+      expect(`${key} ${v.lvl} keeps LOD0's TEXCOORD_0 / COLOR_0`, v.attrOk, v.attrWhy);
+    }
+  }
+  expect(`LOD chains graded (not vacuous)`, graded >= 60 && levelsGraded >= 150, `${graded} files, ${levelsGraded} levels`);
+  console.log(`  – ${graded} lods files, ${levelsGraded} levels graded`);
+}
+
+/** `--lods-json <key[,key]> [--lods-dir <dir>]`: the verdicts as JSON, for build_lods.py. */
+function lodsJson() {
+  const i = process.argv.indexOf('--lods-json');
+  const d = process.argv.indexOf('--lods-dir');
+  const dir = d > 0 ? path.resolve(process.argv[d + 1]) : DIR;
+  const stories = storyAssetNames();
+  const out = process.argv[i + 1].split(',').filter(Boolean).map((key) => {
+    const g = gradeLodsFile(key, dir);
+    return { key, levels: lodVerdicts(g, stories) };
+  });
+  console.log(JSON.stringify(out));
+}
+
 function printTable(rows) {
   const head = ['asset', 'near tris', 'far tris', 'keep', 'near loops', 'far loops', 'near area', 'far area', 'area%', 'far nonmani'];
   const widths = [14, 9, 8, 6, 10, 9, 9, 8, 6, 11];
@@ -253,7 +387,7 @@ function printTable(rows) {
   }
 }
 
-function main() {
+async function main() {
   console.log(`Far-LOD integrity — weld ${WELD}, area keep ≥ ${MIN_AREA_KEEP}, tris keep ≤ ${MAX_TRI_KEEP}`);
   const rows = gradeAll();
   printTable(rows);
@@ -298,4 +432,7 @@ function main() {
 
 // The parser and the census are importable (build_far_lods.py mirrors them in
 // Blender; one-off analyses reuse them); only a direct run grades.
-if (pathToFileURL(process.argv[1] ?? '').href === import.meta.url) main();
+if (pathToFileURL(process.argv[1] ?? '').href === import.meta.url) {
+  if (process.argv.includes('--lods-json')) lodsJson();
+  else main();
+}
