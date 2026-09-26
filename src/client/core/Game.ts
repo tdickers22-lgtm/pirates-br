@@ -1104,6 +1104,7 @@ export class Game {
       get visibleInteractKind() { return self.visibleInteractKind; },
       set visibleInteractKind(v) { self.visibleInteractKind = v; },
       getServerClock: () => this.network.getServerClock(),
+      getLatencyMs: () => this.network.getLatencyMs(),
       findNearbyCannonIndex: (player, ship) => findNearbyCannonIndex(player, ship),
       findRepairableHole: (player, ship) => this.findRepairableHole(player, ship),
       flashIslandBanner: (name) => this.flashIslandBanner(name),
@@ -1790,6 +1791,7 @@ export class Game {
   }
 
   private resetLocalRoundState() {
+    this.hud.resetScoreboard();
     // A new round may raise the elimination card again.
     this.matchResultsShown = false;
     this.spectatePlacement = null;
@@ -2043,6 +2045,18 @@ export class Game {
   }
 
   private bindMapUiActions() {
+    // b3.5f: hold Tab = scoreboard. Focus inside a menu keeps Tab for focus moves.
+    const tabHold = (down: boolean) => (event: KeyboardEvent) => {
+      if (event.code !== 'Tab') return;
+      const el = document.activeElement;
+      if (down && (!this.inMatch || (el && el !== document.body && el.tagName !== 'CANVAS'))) return;
+      if (down) event.preventDefault();
+      this.hud.setScoreboardKey(down);
+    };
+    window.addEventListener('keydown', tabHold(true));
+    window.addEventListener('keyup', tabHold(false));
+    window.addEventListener('blur', () => this.hud.setScoreboardKey(false));
+    this.hud.onPadScoreboardShown = () => { if (this.map.mapOpen) this.toggleMap(false); };
     window.addEventListener('keydown', (event) => {
       if (event.repeat) return;
       // Don't toggle the map while typing (menu name field) or before a match.
@@ -3549,6 +3563,7 @@ export class Game {
       // The ATTACK button (LMB, touch Bail/Dig, pad RT) drives the held tool's
       // own verb through useItem (touchContexts.routeHeldTool, gated b1.4c).
       const input = routeHeldTool(this.input.buildInput(), equippedTool, this.spyglassActive, this.input.isFiring());
+      input.inputScheme = this.input.scheme.current; // b3.5f: scoreboard aim-assist icon (D13)
       if (input.useWheelItem && input.wheelIndex !== null) {
         this.startPocketUsePreview(input.wheelIndex);
       }
