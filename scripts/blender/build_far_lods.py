@@ -888,17 +888,20 @@ def verify(rows):
     return failed
 
 
-ONLY = {n.strip() for n in os.environ.get('BR_FAR_ONLY', '').split(',') if n.strip()}
-WANT_STORY = os.environ.get('BR_FAR_STORY') == '1' or bool(ONLY & set(STORY_FAR))
-if WANT_STORY:
-    FAR.update(STORY_FAR)
-unknown = ONLY - set(FAR) - set(STORY_FAR)
-if unknown:
-    print(f"BR_FAR_ONLY names no far asset: {', '.join(sorted(unknown))}")
-    sys.exit(1)
-rows = [build(asset, ratio, sheets) for asset, (ratio, sheets) in FAR.items() if not ONLY or asset in ONLY]
-failed = verify(rows)
-if failed:
-    print(f"FAR LODS FAILED: {', '.join(failed)}")
-    sys.exit(1)
-print('FAR LODS DONE')
+# build_lods.py (b3.4d) imports the weld / census / decimate helpers above, so the
+# build runs only when this file is the -P script.
+if __name__ == '__main__':
+    ONLY = {n.strip() for n in os.environ.get('BR_FAR_ONLY', '').split(',') if n.strip()}
+    WANT_STORY = os.environ.get('BR_FAR_STORY') == '1' or bool(ONLY & set(STORY_FAR))
+    if WANT_STORY:
+        FAR.update(STORY_FAR)
+    unknown = ONLY - set(FAR) - set(STORY_FAR)
+    if unknown:
+        print(f"BR_FAR_ONLY names no far asset: {', '.join(sorted(unknown))}")
+        sys.exit(1)
+    rows = [build(asset, ratio, sheets) for asset, (ratio, sheets) in FAR.items() if not ONLY or asset in ONLY]
+    failed = verify(rows)
+    if failed:
+        print(f"FAR LODS FAILED: {', '.join(failed)}")
+        sys.exit(1)
+    print('FAR LODS DONE')
