@@ -6765,6 +6765,9 @@ export class Match {
     player.cannonFlightTimer = 0;
     this.cutlassChargeByPlayer.delete(player.id);
     this.cutlassFireHeldByPlayer.delete(player.id);
+    // Going down ends the bite (the food is kept: a cancelled bite never consumes) and drops any
+    // queued heal-over-time, so downed vitality stays DBNO.DOWNED_HEALTH for the finisher.
+    this.eating.forget(player.id);
     this.broadcast({
       type: 'player_downed',
       ts: Date.now(),

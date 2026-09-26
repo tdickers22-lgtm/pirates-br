@@ -113,7 +113,8 @@ export class EatingSystem {
   /** Start a bite. False (and `lastRefusal`) when refused; the food is untouched. */
   begin(player: EaterState & StationFlags, req: EatRequest): boolean {
     this.lastRefusal = null;
-    if (player.state === 'eliminated' || player.state === 'respawning') {
+    // A downed pirate is out of the fight: no bite, no heal (downed vitality is the finisher's target).
+    if (player.state === 'eliminated' || player.state === 'respawning' || player.state === 'downed') {
       this.lastRefusal = 'dead';
       return false;
     }
@@ -150,7 +151,7 @@ export class EatingSystem {
 
   /** Advance the bite and the heal queue by one tick. */
   tick(player: EaterState, dt: number): void {
-    if (player.state === 'eliminated' || player.state === 'respawning') {
+    if (player.state === 'eliminated' || player.state === 'respawning' || player.state === 'downed') {
       this.forget(player.id);
       return;
     }
@@ -184,7 +185,7 @@ export class EatingSystem {
     if (queue.length === 0) this.heals.delete(player.id);
   }
 
-  /** Death, respawn or leaving the match. */
+  /** Downed, death, respawn or leaving the match. */
   forget(playerId: string): void {
     this.actions.delete(playerId);
     this.heals.delete(playerId);

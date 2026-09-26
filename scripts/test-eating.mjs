@@ -12,7 +12,7 @@
 //   node --import tsx scripts/test-eating.mjs
 import { Match } from '../src/server/core/Match.ts';
 import { readFileSync } from 'node:fs';
-import { SERVER_TICK_MS, PLAYER, WILDLIFE } from '../src/shared/constants/index.ts';
+import { SERVER_TICK_MS, PLAYER, WILDLIFE, DBNO } from '../src/shared/constants/index.ts';
 import { EatingSystem, eatRequestFor } from '../src/server/systems/EatingSystem.ts';
 
 let failures = 0;
@@ -194,6 +194,47 @@ console.log('70 % move during the bite');
   expect('control: walking reaches full speed', walk > PLAYER.MOVE_SPEED * 0.9, `walk=${walk.toFixed(2)} m/s`);
   expect('eating walk tops out at 70 % of MOVE_SPEED', munch <= PLAYER.MOVE_SPEED * 0.7 + 1e-6 && munch >= PLAYER.MOVE_SPEED * 0.6,
     `eat=${munch.toFixed(2)} walk=${walk.toFixed(2)} MOVE_SPEED=${PLAYER.MOVE_SPEED}`);
+}
+
+console.log('Going down ends the bite and the heal (b3-bugs-02)');
+{
+  // Bite in progress when the pirate is downed: the bite is cancelled, the food is kept,
+  // and downed vitality (the finisher's target) never rises.
+  const e = makeEater('downed-mid-bite');
+  e.player.health = 40;
+  e.player.pocketBanana = 1;
+  e.eat(4);
+  e.step(); e.step();
+  e.match.enterDowned(e.player);
+  const maxHp = [];
+  for (let i = 0; i < ticksFor(2.5); i += 1) { e.step(); maxHp.push(e.player.health); }
+  expect('downed mid-bite: still downed', e.player.state === 'downed', `state=${e.player.state}`);
+  expect('downed mid-bite: vitality never rises above DBNO.DOWNED_HEALTH', Math.max(...maxHp) <= DBNO.DOWNED_HEALTH + 1e-6,
+    `max health while downed=${Math.max(...maxHp)} DOWNED_HEALTH=${DBNO.DOWNED_HEALTH}`);
+  expect('downed mid-bite: the banana is kept (cancelled bite never consumes)', e.player.pocketBanana === 1, `pocketBanana=${e.player.pocketBanana}`);
+  expect('downed mid-bite: no bite left on the eating system', !e.match.eating.isEating(e.player.id));
+}
+{
+  // Bite finished, heal-over-time still queued, then downed: the queued heal is dropped.
+  const e = makeEater('downed-heal-queue');
+  e.player.health = 20;
+  e.player.pocketMeat = 1;
+  e.player.pocketMeatByType = { cooked: 1 };
+  e.player.pocketBanana = 1;
+  e.eat(4);
+  e.run(1.3);
+  const owed = e.match.eating.pendingHeal(e.player.id);
+  e.match.enterDowned(e.player);
+  const hp = [];
+  for (let i = 0; i < ticksFor(3); i += 1) { e.step(); hp.push(e.player.health); }
+  expect('downed with a heal queued: control, the heal was owed', owed > 0, `pendingHeal=${owed}`);
+  expect('downed with a heal queued: vitality never rises above DBNO.DOWNED_HEALTH', Math.max(...hp) <= DBNO.DOWNED_HEALTH + 1e-6,
+    `max health while downed=${Math.max(...hp)}`);
+  expect('downed with a heal queued: nothing owed any more', e.match.eating.pendingHeal(e.player.id) === 0, `pendingHeal=${e.match.eating.pendingHeal(e.player.id)}`);
+  // A downed pirate cannot start a bite either (applyDownedInput never routes eat, and begin refuses).
+  e.player.health = DBNO.DOWNED_HEALTH;
+  const ok = e.match.eating.begin(e.player, { item: 'banana', heal: 10, over: 1, consume: () => true });
+  expect("downed: EatingSystem.begin refuses with 'dead'", !ok && e.match.eating.lastRefusal === 'dead', `ok=${ok} refusal=${e.match.eating.lastRefusal}`);
 }
 
 if (failures > 0) { console.error(`\ntest-eating: ${failures} FAILED`); process.exit(1); }
