@@ -57,6 +57,7 @@ import subprocess
 import sys
 import time
 
+import bmesh
 import bpy
 from mathutils import Matrix
 
@@ -159,13 +160,36 @@ def targets(spec, n0):
 # Per-part triangle floors per level: (closed part, open sheet). A box stays a box near; a leaf
 # card of 16-26 triangles may fall to a 2-triangle card far out (area is rescaled either way).
 FLOOR = {'LOD1': (12, 6), 'LOD2': (8, 4), 'far': (4, 2)}
+# SUB-PIXEL PART CULL (b3.4f): a CLOSED part the per-part contract refuses (Collapse folds it or
+# loses its area) is dropped at LOD2/far when it is thinner than CULL_MM (tube diameter
+# 4*V/A: a wire wrap, a thin quillon) and small next to the whole (<= CULL_SHARE of its area).
+# At LOD2 distance a 2.6 mm wire is under a pixel on the grip it lies on; kept at source it held
+# the cutlass LOD2 at 3168 tris (ceiling 1500) and far at 2438 (4%). The level records the culled
+# area as node extras `lod_culled_area` (m2) and both contracts, here and in
+# test-far-lod-integrity, grade the level against source area minus the culled area. 4 mm at far
+# too, on purpose: a 3 mm iron hoop band reads 5-6 mm here and must survive on a far barrel.
+CULL_MM = {'LOD2': 4.0, 'far': 4.0}
+CULL_SHARE = 0.15
 
 
-def reduce_parts(obj, ratio, floor, cards=False):
+def thin_mm(me):
+    """Tube diameter of a closed part: 4*V/A (a tube of diameter d gives d, a plate of thickness t 2t)."""
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    vol = abs(bm.calc_volume(signed=True))
+    area = sum(f.calc_area() for f in bm.faces)
+    bm.free()
+    return 4000.0 * vol / max(area, 1e-12)
+
+
+def reduce_parts(obj, ratio, floor, cards=False, cull_mm=None):
     """Collapse each LOOSE PART on its own toward `ratio` (never under `floor` triangles), then scale
     it about its centre back to its own source area (capped, build_far_lods.rescale_to_area): Collapse
     shrinks convex parts and pulls sheet boundaries inward, and the rescale is what keeps a 40% barrel
-    hoop or a 40% palm frond the same size on screen. The far-LOD story recipe, at every level."""
+    hoop or a 40% palm frond the same size on screen. The far-LOD story recipe, at every level.
+    Returns the area (m2) of the refused thin parts culled under `cull_mm` (0 when none)."""
+    whole = F.surface_stats(obj.data)['area']
+    culled = 0.0
     existing = set(bpy.data.objects)
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True)
@@ -202,6 +226,11 @@ def reduce_parts(obj, ratio, floor, cards=False):
             bpy.data.meshes.remove(old)
             if cards and sheet:
                 F.card_from_part(part)
+            elif cull_mm and not sheet and s0['area'] <= CULL_SHARE * whole and thin_mm(part.data) < cull_mm:
+                culled += s0['area']
+                old = part.data
+                part.data = bpy.data.meshes.new(f'{part.name}_culled')
+                bpy.data.meshes.remove(old)
         else:
             bpy.data.meshes.remove(keep_me)
     bpy.ops.object.select_all(action='DESELECT')
@@ -210,11 +239,11 @@ def reduce_parts(obj, ratio, floor, cards=False):
     bpy.context.view_layer.objects.active = obj
     if len(parts) > 1:
         bpy.ops.object.join()
-    return obj
+    return culled
 
 
-def ok_surface(src, st):
-    keep = st['area'] / max(src['area'], 1e-12)
+def ok_surface(src, st, culled=0.0):
+    keep = st['area'] / max(src['area'] - culled, 1e-12)
     return st['loops'] <= src['loops'] and MIN_AREA <= keep <= MAX_AREA, keep
 
 
@@ -260,13 +289,16 @@ def build_key(key, spec, boost=None, drop=()):
                 parent = levels[-1] if levels else base
                 pr = min(1.0, r * n0 / max(1, F.surface_stats(parent.data)['tris']))
                 c = dup(parent, f'{key}_{label}')
-                reduce_parts(c, pr, FLOOR[label], cards=label == 'far')
+                culled = reduce_parts(c, pr, FLOOR[label], cards=label == 'far', cull_mm=CULL_MM.get(label))
+                culled += float(c.get('lod_culled_area', 0.0))   # dup() carries the parent's cull
+                if culled > 0:
+                    c['lod_culled_area'] = round(culled, 6)
                 # Weld at the gate's 1e-4 so this census IS the node gate's: Collapse leaves slivers
                 # whose corners sit < 1e-4 apart, which the gate welds into degenerate (dropped)
                 # triangles and so into boundary loops Blender never counted (tavern, grave_marker).
                 F.weld(c.data)
                 st = F.surface_stats(c.data)
-                good, _ = ok_surface(src, st)
+                good, _ = ok_surface(src, st, float(c.get('lod_culled_area', 0.0)))
                 if (good and st['tris'] < cap) or r >= top or attempt == TRIES - 1:
                     break
                 bpy.data.objects.remove(c)
@@ -276,7 +308,9 @@ def build_key(key, spec, boost=None, drop=()):
             # about each part's centre dropped LOD1 bases up to 0.15 m (barrel_lods, lantern_post).
             row['snapped'] = F.snap_base(c, src_base)
         st = F.surface_stats(c.data)
-        good, keep = ok_surface(src, st)
+        good, keep = ok_surface(src, st, 0.0 if row.get('reuse') else float(c.get('lod_culled_area', 0.0)))
+        if c.get('lod_culled_area'):
+            row['culled_area'] = float(c['lod_culled_area'])
         row.update(tris=st['tris'], keep=round(st['tris'] / n0, 4), area=round(keep, 4), loops=st['loops'],
                    src_loops=src['loops'], surface_ok=bool(good) or row.get('reuse', False),
                    coarser=st['tris'] < cap,

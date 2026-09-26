@@ -117,7 +117,6 @@ export const tierOf = (key) => Object.entries(TIERS).find(([, t]) => t.keys.incl
 // RATCHET-BEGIN
 export const RATCHET = [
   // fp-weapons
-  'cutlass:lods',
   // fp-tools
   'tool_bucket:lods', 'tool_bucket:textures', 'tool_bucket:verts',
   'tool_hammer:lods', 'tool_hammer:textures', 'tool_hammer:verts',

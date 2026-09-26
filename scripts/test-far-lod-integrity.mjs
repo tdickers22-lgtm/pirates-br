@@ -39,6 +39,8 @@ const ASSET_LIB = path.resolve('src/client/assets/AssetLibrary.ts');
 const WELD = 1e-4;
 /** A far file that keeps less surface than this is not the same shape. */
 export const MIN_AREA_KEEP = 0.92;
+/** Largest share of the source surface a level may drop as sub-pixel thin parts (lod_culled_area). */
+export const MAX_CULL_SHARE = 0.3;
 /** …and one that keeps more triangles than this is not a far LOD. */
 export const MAX_TRI_KEEP = 0.4;
 const TABLE_ONLY = process.argv.includes('--table');
@@ -286,7 +288,7 @@ export function gradeLodsFile(key, dir = DIR) {
   for (const r of json.scenes[json.scene || 0].nodes) {
     const n = json.nodes[r];
     const lvl = levelOf(n.name || '');
-    if (lvl) levels[lvl] = { name: n.name, reuse: !!(n.extras && n.extras.lod_reuse) };
+    if (lvl) levels[lvl] = { name: n.name, reuse: !!(n.extras && n.extras.lod_reuse), culled: Number((n.extras && n.extras.lod_culled_area) || 0) };
   }
   const out = [];
   let first = true;
@@ -295,8 +297,9 @@ export function gradeLodsFile(key, dir = DIR) {
     const tri = readGlbTriangles(file, (n) => n === levels[lvl].name);
     if (first && MUTATE === 'hole') tri.triangles = tri.triangles.filter((_, i) => Math.floor(i / 3) % 5 !== 0);
     if (first && MUTATE === 'attr') tri.attrs = { ...tri.attrs, TEXCOORD_0: 0, COLOR_0: 0 };
+    if (MUTATE === 'nocull') levels[lvl].culled = 0;   // grade a culled level on the whole source area (must go red)
     first = false;
-    out.push({ lvl, m: measureSurface(tri, { dedupe: true }), attrs: tri.attrs, reuse: levels[lvl].reuse });
+    out.push({ lvl, m: measureSurface(tri, { dedupe: true }), attrs: tri.attrs, reuse: levels[lvl].reuse, culled: levels[lvl].culled });
   }
   return { key, near, srcAttrs: src.attrs, levels: out, images: (json.images || []).length };
 }
@@ -309,14 +312,18 @@ export function gradeLodsFile(key, dir = DIR) {
  * a decimation, so it is held to the triangle ceiling (cheaper than the level above, the story
  * band for a story key) and its area/loops are reported, not graded — the proxy itself is graded
  * as a surface by the far-file section above.
+ * A level carrying `extras.lod_culled_area` (build_lods.py sub-pixel part cull, b3.4f: thin closed
+ * parts such as the cutlass wire wrap dropped at LOD2/far) is graded against the source area minus
+ * that culled area, and the cull itself may not exceed MAX_CULL_SHARE of the source's surface.
  */
 export function lodVerdicts(g, stories = storyAssetNames()) {
   const rows = [];
   let above = g.near.drawnTris;
-  for (const { lvl, m, attrs, reuse } of g.levels) {
-    const keep = m.area / g.near.area;
-    const label = `${g.key} ${lvl}: ${m.drawnTris} tris, area ${(100 * keep).toFixed(0)}%, loops ${m.boundaryLoops}/${g.near.boundaryLoops}${reuse ? ' (reused far proxy)' : ''}`;
+  for (const { lvl, m, attrs, reuse, culled = 0 } of g.levels) {
+    const keep = m.area / Math.max(g.near.area - culled, 1e-12);
+    const label = `${g.key} ${lvl}: ${m.drawnTris} tris, area ${(100 * keep).toFixed(0)}%, loops ${m.boundaryLoops}/${g.near.boundaryLoops}${reuse ? ' (reused far proxy)' : ''}${culled > 0 ? ` (culled ${(100 * culled / g.near.area).toFixed(0)}% thin parts)` : ''}`;
     let why = '';
+    if (culled > MAX_CULL_SHARE * g.near.area) why += `culled ${(100 * culled / g.near.area).toFixed(0)}% of the surface (> ${100 * MAX_CULL_SHARE}%); `;
     if (m.drawnTris >= above) why += `not cheaper than the level above (${above}); `;
     if (reuse) {
       if (stories.includes(g.key) && (m.drawnTris < STORY_TRIS[0] || m.drawnTris > STORY_TRIS[1])) why += `outside the ${STORY_TRIS[0]}-${STORY_TRIS[1]} story band; `;
