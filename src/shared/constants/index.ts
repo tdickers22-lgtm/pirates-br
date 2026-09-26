@@ -985,10 +985,12 @@ export const STORM_PHASES = [
   { waitSec: 105, shrinkSec: 55,  startRadius: 840, endRadius: 480, dmgPerSec:  1.3 },
   // Phase 3 — urgency kicks in
   { waitSec:  80, shrinkSec: 45,  startRadius: 480, endRadius: 320, dmgPerSec:  2.2 },
-  // Phase 4 — getting spicy (60 s wait)
-  { waitSec:  55, shrinkSec: 35,  startRadius: 320, endRadius: 190, dmgPerSec:  3.8 },
-  // Phase 5 — danger zone (45 s wait)
-  { waitSec:  40, shrinkSec: 25,  startRadius: 190, endRadius:  95, dmgPerSec:  5.8 },
+  // Phase 4 — getting spicy (55 s wait). b3.5c: shrinks over 45 s not 35, so
+  // bots still outside at 575 s make the wall instead of mass-foundering there.
+  { waitSec:  55, shrinkSec: 45,  startRadius: 320, endRadius: 190, dmgPerSec:  3.8 },
+  // Phase 5 — danger zone (40 s wait). b3.5c: 35 s shrink (was 25) moves the
+  // mean match end into 720-840 s.
+  { waitSec:  40, shrinkSec: 35,  startRadius: 190, endRadius:  95, dmgPerSec:  5.8 },
   // Phase 6 — very dangerous (30 s wait)
   { waitSec:  30, shrinkSec: 20,  startRadius:  95, endRadius:  70, dmgPerSec:  8.5 },
   // Phase 7 — THE ARENA, not a demolition circle (END-01, gameplay-22).
@@ -1435,7 +1437,7 @@ export const PACING_TARGETS = {
  *  the seek radius is forced to 0 (or BOT_DEFEND_RANGE under fire) regardless,
  *  so this number only ever speaks from t=150 s — which is exactly the window
  *  the wreck is up in. */
-export const BOT_ENGAGE_RANGE_BY_PHASE = [440, 540, 570, 580, 640, 780, 900];
+export const BOT_ENGAGE_RANGE_BY_PHASE = [440, 540, 570, 680, 640, 780, 900];
 /** Seek radius multiplier while the ring is actively shrinking — everyone is
  *  being funnelled together anyway, so hunting is fair game. */
 export const BOT_ENGAGE_SHRINK_MULT = 1.2;
@@ -1451,7 +1453,9 @@ export const BOT_ENGAGE_SHRINK_MULT = 1.2;
 /*  b3.5c: 5/7/7/7 let 26 of 38 founders in 150-300 s be PvP (mean 7.25 afloat
  *  at 300 s against 9.6-10.4); 2/3 in phases 0-1 lands 10.25. [2,3,5,6,4,5,10]
  *  was tried for the mid lulls and made 480/600/end worse. */
-export const BOT_MAX_HUNTERS_BY_PHASE = [2, 3, 4, 5, 6, 8, 10];
+/*  b3.5c pass 2: phase 3 (520-610 s) opens to 7 hunters and a 680 m seek so the
+ *  mid-match lull is broken by fights, not by the wall. */
+export const BOT_MAX_HUNTERS_BY_PHASE = [2, 3, 4, 7, 6, 8, 10];
 /** During early peace a bot only answers ships that shot at it inside this range. */
 export const BOT_DEFEND_RANGE = 260;
 
