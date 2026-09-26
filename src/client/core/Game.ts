@@ -1005,6 +1005,7 @@ export class Game {
       ocean: this.ocean,
       get localPlayerId() { return self.localPlayerId; },
       tempSlashPos: this.tempSlashPos,
+      shipRoot: (id: string) => self.shipRenderer.getShipGroup(id),
       spawnRemoteSlashArc: (worldPos) => this.viewmodel.spawnRemoteSlashArc(worldPos),
       getCutlassSwingProgress: (player) => this.getCutlassSwingProgress(player),
       // RIG-01: the skinned pirate's mixer is stepped less often with range.

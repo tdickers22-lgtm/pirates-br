@@ -720,6 +720,114 @@ console.log('First-person viewmodel');
     /hammerSwingAngle\(phase\)/.test(vmSrc) && /repairBlowPhase\(/.test(vmSrc) && /makeCarpentersHammerMesh\(0\)/.test(vmSrc));
 }
 
+// ── b3.3c STATION CONTACTS (animations-02): the two-bone IK post-solver puts
+// both hands on the live grips (helm pegs, capstan knobs, cannon breech
+// handles, mast rungs) on the legacy rig the balanced/high tiers draw today AND
+// on the v2 male + pirate_clips.glb the cutover ships. Holders are built the way
+// ShipRenderer tags them (userData.ikGrips, points in the holder's local frame).
+{
+  const IK = await import('../src/client/rendering/character/ikSolvers.ts');
+  const expectFn = expect;
+  const load = (p) => { const b = readFileSync(p); return new Promise((res, rej) => new GLTFLoader().parse(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength), '', res, rej)); };
+  const holder = (kind, pos, rotY, points) => { const o = new THREE.Object3D(); o.position.copy(pos); o.rotation.y = rotY; o.userData[IK.IK_GRIPS_KEY] = { kind, points }; return o; };
+  const ring = (n, r, y, z) => Array.from({ length: n }, (_, i) => { const a = (i / n) * Math.PI * 2; return V(Math.cos(a) * r, y + Math.sin(a) * r, z); });
+  const knobs = Array.from({ length: 8 }, (_, i) => { const a = (i / 8) * Math.PI * 2; return V(Math.cos(a) * 0.72, 0, -Math.sin(a) * 0.72); });
+  const rungs = []; for (let k = 0; k <= 8; k++) for (const x of [-0.18, 0.18]) rungs.push(V(x, 0.2 + k * 0.33, 0));
+  const STATIONS = [
+    // wheel: pegs on a 0.52 m ring in the holder's XY plane, 0.06 m toward the
+    // helmsman; peg faces 0.56 m ahead of her (the live stand-off is the probe's job)
+    ['helm', 'helm', () => holder('helm', V(0, 1.25, 0.62), Math.PI, ring(8, 0.52, 0, 0.06))],
+    ['capstan', 'capstan_push', () => holder('capstan', V(0, 1.02, 1.05), 0, knobs)],
+    // cannon: barrel along the pivot's +x, breech handles either side of the cascabel
+    ['cannon', 'cannon_aim', () => holder('cannon', V(0, 0.9, 0.62), -Math.PI / 2, [V(-0.16, 0.1, 0.2), V(-0.16, 0.1, -0.2)])],
+    ['ladder', 'climb', () => holder('ladder', V(0, 0, 0.3), 0, rungs)],
+  ];
+  const rigs = [
+    ['legacy pirate_base', await load('public/assets/models/pirate_base.glb'), null],
+    ['v2 male', await load('assets-src/quaternius/out/pirate_base_male.glb'), (await load('public/assets/models/pirate_clips.glb')).animations],
+  ];
+  // The legacy rig is what balanced/high draw TODAY: enforced. The v2 rows are
+  // enforced the moment pirate_v2.glb ships (the D25 tripwire pattern); until
+  // then they print their numbers as PENDING (v2 right arm still ~0.1 m short
+  // of the side peg under its helm clip, aim_pistol palm 0.30 m: b3.2f2 handoff).
+  const v2Live = existsSync('public/assets/models/pirate_v2.glb');
+  const pending = (label, ok, detail = '') => console.log(`  ${ok ? '✓' : '… PENDING (v2 not shipped)'} ${label}  (${detail})`);
+  for (const [rigName, gltf, clipsOverride] of rigs) {
+    const expect = rigName.startsWith('v2') && !v2Live ? pending : expectFn;
+    const clips = clipsOverride ?? gltf.animations;
+    const body = new THREE.Group(); body.add(gltf.scene);
+    const mixer = new THREE.AnimationMixer(gltf.scene);
+    const byName = (n) => gltf.scene.getObjectByName(n);
+    const handBone = (s) => byName(`hand_${s}`);
+    const elbowBone = (s) => byName(`lowerarm_${s}`) ?? byName(`forearm_${s}`);
+    const shoulderBone = (s) => byName(`upperarm_${s}`);
+    const wp = (o) => o.getWorldPosition(new THREE.Vector3());
+    for (const [kind, clipName, mk] of STATIONS) {
+      const clip = clips.find((c) => c.name === clipName);
+      if (!clip) { expect(`${rigName} ${kind}: clip ${clipName} exists`, false); continue; }
+      mixer.stopAllAction(); const act = mixer.clipAction(clip); act.reset().play();
+      mixer.setTime(clip.duration * 0.5); body.updateMatrixWorld(true);
+      const h = mk(); body.add(h); body.updateMatrixWorld(true);
+      const clipHandR = wp(handBone('r'));
+      const clipUpper = shoulderBone('r').quaternion.clone();
+      // 20 frames of the real update order: restore -> mixer step -> post-solve
+      let res = null;
+      for (let f = 0; f < 20; f++) {
+        IK.restoreContactClipPose(gltf.scene);
+        mixer.update(0); body.updateMatrixWorld(true);
+        res = IK.applyStationContacts(gltf.scene, body, h, 1 / 60);
+      }
+      const worst = Math.max(res.l, res.r);
+      expect(`${rigName} ${kind}: both hands on the live grips (<= 0.08 m) after the IK post-solve`, Number.isFinite(worst) && worst <= 0.08,
+        `residual l ${res.l.toFixed(3)} r ${res.r.toFixed(3)} (clip hand_r ${clipHandR.toArray().map((v) => v.toFixed(2)).join(',')})`);
+      let elbowsOk = true; let det = '';
+      for (const s of ['l', 'r']) {
+        const sh = wp(shoulderBone(s)); const el = wp(elbowBone(s)); const ha = wp(handBone(s));
+        const mid = sh.clone().add(ha).multiplyScalar(0.5);
+        // down (station) or out to her own side (ladder, hands overhead); never forward/inward through the chest
+        const out = (s === 'l' ? 1 : -1) * (el.x - mid.x);
+        const ok = kind === 'ladder' ? out >= -0.02 : el.y <= mid.y + 0.02;
+        if (!ok) elbowsOk = false;
+        det += `${s}: elbow dy ${(el.y - mid.y).toFixed(3)} out ${out.toFixed(3)} hand f ${ha.z.toFixed(2)} y ${ha.y.toFixed(2)}; `;
+      }
+      expect(`${rigName} ${kind}: elbows bend down/out, never forward through the chest`, elbowsOk, det);
+      if (kind === 'helm') {
+        const ok = ['l', 'r'].every((s) => { const p = wp(handBone(s)); return p.z >= 0.45 && p.z <= 0.85 && p.y >= 1.0 && p.y <= 1.5; });
+        expect(`${rigName} helm: both hands f 0.45-0.85 m, y 1.0-1.5 m`, ok, det);
+      }
+      IK.restoreContactClipPose(gltf.scene);
+      expect(`${rigName} ${kind}: restore puts the clip pose back exactly (no compounding under a still mixer)`,
+        shoulderBone('r').quaternion.angleTo(clipUpper) < 2e-3, `angle ${shoulderBone('r').quaternion.angleTo(clipUpper).toExponential(2)}`);
+      body.remove(h);
+    }
+    // Leaving the station eases the contact out: the clip hand returns.
+    const off = IK.applyStationContacts(gltf.scene, body, null, 1);
+    expect(`${rigName}: no station = no hand solve`, Number.isNaN(off.l) && Number.isNaN(off.r));
+    // Foot IK on the deck plane: a boot pushed 6 cm into the planking comes back onto it.
+    mixer.stopAllAction(); const idle = clips.find((c) => c.name === 'idle'); mixer.clipAction(idle).reset().play(); mixer.setTime(0.1);
+    IK.restoreContactClipPose(gltf.scene); body.updateMatrixWorld(true);
+    // push the LOWER boot 6 cm into the planking (the deck is the body's y = 0)
+    const sole0 = Math.min(...['l', 'r'].map((s) => wp(byName(`foot_${s}`)).y - 0.045));
+    gltf.scene.position.y = -sole0 - 0.06; body.updateMatrixWorld(true);
+    IK.applyStationContacts(gltf.scene, body, null, 1 / 60);
+    const soles = ['l', 'r'].map((s) => wp(byName(`foot_${s}`)).y - 0.045);
+    expect(`${rigName}: foot IK lifts both boots out of the deck (sole >= -0.01 m)`, Math.min(...soles) >= -0.01, `soles ${soles.map((v) => v.toFixed(3)).join(', ')}`);
+    gltf.scene.position.y = 0; IK.restoreContactClipPose(gltf.scene);
+  }
+  // v2 aim_pistol, the clip itself (no station): the pistol hand is out in front on the eye line.
+  for (const [rigName, g, clipsOverride] of rigs) {
+    const expect = rigName.startsWith('v2') && !v2Live ? pending : expectFn;
+    const clip = (clipsOverride ?? g.animations).find((c) => c.name === 'aim_pistol');
+    const body = g.scene.parent;
+    const m = new THREE.AnimationMixer(g.scene); m.clipAction(clip).reset().play(); m.setTime(clip.duration * 0.5); body.updateMatrixWorld(true);
+    IK.applyStationContacts(g.scene, body, null, 1, 0); body.updateMatrixWorld(true);
+    const hr = g.scene.getObjectByName('hand_r').getWorldPosition(new THREE.Vector3());
+    const eye = g.scene.getObjectByName('head').getWorldPosition(new THREE.Vector3()).y + 0.08;
+    expect(`${rigName} aim_pistol (post-solve): hand_r >= 0.35 m forward and within 0.12 m of the eye line`, hr.z >= 0.35 && Math.abs(hr.y - eye) <= 0.12,
+      `hand_r f ${hr.z.toFixed(2)} y ${hr.y.toFixed(2)} eye ${eye.toFixed(2)}`);
+  }
+}
+
 const ms = performance.now() - t0;
 console.log(`\n${checks - failures}/${checks} checks, ${ms.toFixed(0)} ms`);
 if (failures) { console.error(`FAIL: ${failures} inversion check(s)`); process.exit(1); }

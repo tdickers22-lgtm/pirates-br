@@ -13,6 +13,7 @@
  * The fallback is still graded end to end there (vm:animations:1): head
  * pitch, forward station reach, aim lift and a contralateral gait.
  */
+import { applyStationContacts, nearestGripHolder } from './character/ikSolvers.js';
 import * as THREE from 'three';
 import { PLAYER, WEAPONS } from '../../shared/constants/index.js';
 import type { Player, Ship } from '../../shared/types/index.js';
@@ -20,7 +21,7 @@ import { angleWrap } from '../../shared/utils/index.js';
 import { lowTierHeadPitchX, pitchUpToBoneX } from './signConventions.js';
 import { getShipFloorYAt, toShipLocalPointInto } from '../../shared/interactions.js';
 import { AVATAR_RIG } from './factories/PlayerMeshFactory.js';
-import { applyRigFlinch, playRigDeath, updatePlayerRig } from './factories/PlayerRigFactory.js';
+import { applyRigFlinch, playRigDeath, playerRigOf, updatePlayerRig } from './factories/PlayerRigFactory.js';
 import type { InputManager } from '../input/InputManager.js';
 import type { OceanRenderer } from './OceanRenderer.js';
 
@@ -157,6 +158,8 @@ export type PlayerAnimatorView = {
    *  AnimationMixer is stepped falls off with range. Optional so a probe can
    *  build a view without a camera; missing means "step every pirate fully". */
   readonly camera?: THREE.Camera;
+  /** The ship's scene root, so station IK can find the live grips (b3.3c). Optional for probes. */
+  shipRoot?(shipId: string): THREE.Object3D | null;
   /**
    * Drawn ground height at a world (x, z), or null off every island — the same
    * answer the terrain the player can SEE gives (GridGround, TERRAIN-01), not
@@ -356,6 +359,17 @@ export class PlayerAnimator {
         this.view.getCutlassSwingProgress(player),
         plant.left, plant.right,
       );
+      // Station contacts (b3.3c): hands onto the live wheel pegs / capstan bars /
+      // breech handles / rungs, the aimed pistol out on the eye line, boots out of the deck.
+      const rig = playerRigOf(mesh);
+      if (rig) {
+        const kind = player.mastClimb !== null ? 'ladder' : player.atHelm ? 'helm' : player.atCannon ? 'cannon'
+          : (player as { atCapstan?: boolean }).atCapstan ? 'capstan' : null;
+        const shipRoot = kind && ship ? this.view.shipRoot?.(ship.id) ?? null : null;
+        const holder = shipRoot && kind ? nearestGripHolder(shipRoot, kind, mesh.position) : null;
+        const aiming = !holder && (rig.upper.name === 'aim_pistol' || rig.upper.name === 'fire_pistol');
+        applyStationContacts(rig.root, mesh, holder, dt, aiming ? (remote ? remote.pitch : player.rotation.y) : null);
+      }
       applyRigFlinch(mesh, flinchYaw(mesh), flinchEnvelope(mesh, dt));
       return;
     }
