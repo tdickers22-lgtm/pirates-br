@@ -35,33 +35,76 @@ export const modeBotCrews = (mode) => MODES[mode].crews;
 export const MARKS = PACING_TARGETS.MARKS;
 
 /** One bot-only match. Returns crews afloat at each mark, the sim second it
- *  ended at, and why ('last_ship' | 'gold' | 'timeout' when MINUTES ran out). */
-export function simulateMatch({ matchId, minutes, mode = MODE, botCount, marks = MARKS }) {
+ *  ended at, and why ('last_ship' | 'gold' | 'timeout' when MINUTES ran out),
+ *  plus the sim second of every founder (`sinks`) and every PvP kill (`kills`).
+ *  `seed` pins PIRATES_BR_MAP_SEED for this match only (Match reads it when it
+ *  is constructed), so one process can run several explicit seeds. */
+export function simulateMatch({ matchId, minutes, mode = MODE, botCount, marks = MARKS, seed }) {
   const crews = botCount ?? (process.env.MODE ? modeBotCrews(mode) : PACING_TARGETS.BOT_CREWS);
+  const prevSeed = process.env.PIRATES_BR_MAP_SEED;
+  if (seed !== undefined) process.env.PIRATES_BR_MAP_SEED = String(seed);
   const match = new Match({ matchId, botCount: crews, mode });
+  if (seed !== undefined) {
+    if (prevSeed === undefined) delete process.env.PIRATES_BR_MAP_SEED;
+    else process.env.PIRATES_BR_MAP_SEED = prevSeed;
+  }
   const state = match['state'];
   state.phase = 'playing';
   const dt = SERVER_TICK_MS / 1000;
   const steps = Math.ceil((minutes * 60) / dt);
   const at = {};
+  const sinks = [];
+  const kills = [];
+  let alivePrev = state.shipsAlive;
+  const pvpKills = () => {
+    let n = 0;
+    for (const p of state.players) {
+      if (match['isSkeletonPlayer']?.(p)) continue;
+      n += p.kills ?? 0;
+    }
+    for (const d of match['matchStatDeltas']?.values?.() ?? []) n -= d?.skeletonsKilled ?? 0;
+    return n;
+  };
+  let killsPrev = pvpKills();
   let next = 0;
   for (let i = 0; i < steps; i++) {
     match['tick']();
     const t = match['t'];
+    if (state.shipsAlive < alivePrev) for (let k = state.shipsAlive; k < alivePrev; k++) sinks.push(t);
+    alivePrev = state.shipsAlive;
+    const kNow = pvpKills();
+    if (kNow > killsPrev) for (let k = killsPrev; k < kNow; k++) kills.push(t);
+    killsPrev = Math.max(killsPrev, kNow);
     while (next < marks.length && t >= marks[next]) { at[marks[next]] = state.shipsAlive; next += 1; }
     if (state.phase === 'ended') break;
   }
   const endAlive = state.shipsAlive;
   for (const m of marks) if (at[m] === undefined) at[m] = endAlive;
   const endReason = state.phase === 'ended' ? (match['endReason'] ?? 'unknown') : 'timeout';
+  const endT = match['t'];
   match.stop?.();
-  return { matchId, marks: at, endT: match['t'], endAlive, endReason };
+  return { matchId, seed, marks: at, endT, endAlive, endReason, sinks, kills };
 }
 
-export function runPacing({ runs, minutes, marks = MARKS, log = console.log }) {
+/** Longest stretch after `from` with no founder and no PvP kill, up to the end
+ *  of the match. Returns { gap, start } (seconds). */
+export function longestLull(row, from) {
+  const events = [...row.sinks, ...row.kills].filter((t) => t >= from).sort((a, b) => a - b);
+  let prev = from;
+  let best = { gap: 0, start: from };
+  for (const t of [...events, row.endT]) {
+    if (t - prev > best.gap) best = { gap: t - prev, start: prev };
+    prev = Math.max(prev, t);
+  }
+  return best;
+}
+
+export function runPacing({ runs, minutes, marks = MARKS, log = console.log, seeds }) {
   const rows = [];
-  for (let run = 0; run < runs; run++) {
-    const row = simulateMatch({ matchId: `pacing-${run}`, minutes, marks, mode: MODE });
+  const n = seeds ? seeds.length : runs;
+  for (let run = 0; run < n; run++) {
+    const seed = seeds ? seeds[run] : undefined;
+    const row = simulateMatch({ matchId: seeds ? `pacing-s${seed}` : `pacing-${run}`, minutes, marks, mode: MODE, seed });
     rows.push(row);
     log(`run ${run}: ` + marks.map((m) => `${m}s=${row.marks[m]}`).join(' ')
       + `  end t=${row.endT.toFixed(0)}s alive=${row.endAlive} reason=${row.endReason}`);
@@ -90,7 +133,14 @@ export function gradeBands(mean, bands) {
   });
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (import.meta.url === pathToFileURL(process.argv[1]).href && process.env.PACING_CHILD_SEED) {
+  // Child mode for test-pacing-curve's parallel runner: one seed, one JSON line.
+  const seed = Number(process.env.PACING_CHILD_SEED);
+  const minutes = PACING_TARGETS.MAX_MATCH_SECONDS / 60;
+  const row = simulateMatch({ matchId: `pacing-s${seed}`, minutes, mode: MODE, seed });
+  process.stdout.write(`PACING_ROW ${JSON.stringify(row)}\n`);
+  process.exit(0);
+} else if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const RUNS = Number(process.env.RUNS ?? 3);
   const MINUTES = Number(process.env.MINUTES ?? PACING_TARGETS.MAX_MATCH_SECONDS / 60);
   const CREWS = process.env.MODE ? modeBotCrews(MODE) : PACING_TARGETS.BOT_CREWS;

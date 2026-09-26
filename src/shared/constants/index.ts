@@ -122,7 +122,7 @@ export const ECONOMY = {
   CHEST_SELL_MULTIPLIER: 1.65,
   HOARDER_QUEST_CHEST_BONUS: 1.3,
   /** Iron Cuirass price at the Tallyman — ~a chest-and-a-half of gold,
-   *  so armor is a real decision against the 9000g win target. */
+   *  so armor is a real decision against the 8,000g (GOLD_WIN_TARGET) win target. */
   ARMOR_PRICE: 1200,
 } as const;
 
@@ -197,7 +197,7 @@ export const LANDING_STORES_MIN = {
 } as const;
 
 // ── Hold cargo: the gold race made PHYSICAL ──────────────────
-// The 9000g win target used to be an invisible number on a scoreboard. Past
+// The 8,000g (GOLD_WIN_TARGET) win target used to be an invisible number on a scoreboard. Past
 // SAFE_GOLD a crew's winnings stop being pocket coin and become CARGO: crates
 // and coin-spill you can SEE stacked in the hold, weight the hull carries as
 // lost top speed, plunder a boarder can cut out of you, and treasure that
@@ -901,6 +901,14 @@ export const STORM_LIGHTNING = {
 } as const;
 
 // ── Weapons ──────────────────────────────────────────────────
+/** D19 interim balance (mechanicshud-13): every pirate still spawns with the
+ *  full four-weapon kit, but the Wrecker's Glass (eye_of_reach, 95 damage,
+ *  5 km, one-shot headshot) carries only this many spare rounds at spawn: the
+ *  one in the breech plus 2. An ammo crate still tops it up to reserveMax, so
+ *  the sniper is earned by resupply, not handed out. It is never aim-assisted
+ *  (AimAssist.ts NEVER_ASSISTED). */
+export const WRECKERS_GLASS_SPAWN_RESERVE = 2;
+
 export const WEAPONS: Record<WeaponId, {
   name: string;
   damage: number;
@@ -1374,25 +1382,41 @@ export const BOT_EARLY_PEACE_SECONDS = (() => {
   return Number.isFinite(n) && n >= 0 ? n : 150;
 })();
 
-/** RNG-01 pacing bands for the seeded bot-only sim (scripts/pacing-sim.mjs,
- *  graded by scripts/test-pacing-curve.mjs under PACING=1). MARKS are sim
- *  seconds; the later ones are the storm arc: P3 starts 395, mid-P3 480, P4
- *  520, P5 610, P6 675, P7 725, the last ring closes at 755. BANDS are mean
- *  crews afloat [lo, hi] at a mark, 9 bot crews, 2+ runs. Only the two the
- *  audit could stand behind are pinned; tighten once the printed arc is stable.
- *  Numbers quoted in older comments came from a sim that stopped at 360 s. */
+/** Pacing bands for the seeded bot-only sim (scripts/pacing-sim.mjs, graded by
+ *  scripts/test-pacing-curve.mjs under PACING=1). Re-graded 2026-09 (b3.5c,
+ *  mechanicshud-12): the sim now runs the fleet a solo queue actually gets
+ *  (MODES.solo, 12 sloops) on 8 EXPLICIT seeds, and grades the whole arc, not
+ *  two marks. The owner's curve was written for 15 crews (15/15 at 150 s,
+ *  12-13 at 300, 9-10 at 480, 5-7 at 600, 2-3 at 720, end 720-840 s); the bands
+ *  below are that curve scaled to 12 crews (x 12/15). MARKS are sim seconds;
+ *  the storm arc: P3 starts 395, P4 520, P5 610, P6 675, P7 725, the last ring
+ *  closes at 755. Measured before this re-grade (seed 20260801): 12 afloat to
+ *  180 s, 7 at 240, 5 at 300, and the match ENDED at 441 s: the lobby emptied
+ *  in five minutes and the storm arc never mattered. */
 export const PACING_TARGETS = {
-  BOT_CREWS: 9,
-  MARKS: [60, 120, 150, 180, 240, 300, 360, 395, 480, 520, 610, 675, 725, 755],
-  /** 150: the peace window holds — nobody is sunk before it lifts (seeded runs
-   *  print exactly 9; BOT_EARLY_PEACE_SECONDS=0 prints 8.5). 360: the audit's
-   *  band; the seeded mean sits on its top edge (7.0) — the lobby empties
-   *  slower than designed, which is a pacing fact, not a gate defect. */
-  BANDS: { 150: [9, 9], 360: [4.5, 7] } as Record<number, [number, number]>,
-  /** Sim length. NOTE: as of RNG-01 no seeded bot-only match ends at all (3-6
-   *  crews still afloat at 780 s, 3 at 1500 s) — the closed ring does not sink
-   *  bot hulls. Reported per run by pacing-sim; graded by the endgame lane. */
-  MAX_MATCH_SECONDS: 13 * 60,
+  /** Bot crews in a sim run: a full solo lobby. */
+  BOT_CREWS: 12,
+  /** 8 explicit match seeds (PIRATES_BR_MAP_SEED per run). */
+  SEEDS: [20260801, 1, 77, 4242, 90210, 314159, 8675309, 20261031],
+  MARKS: [60, 120, 150, 180, 240, 300, 360, 395, 480, 520, 600, 675, 720, 755, 840],
+  /** Mean crews afloat [lo, hi] at a mark over SEEDS. */
+  BANDS: {
+    150: [12, 12],
+    300: [9.6, 10.4],
+    480: [7.2, 8],
+    600: [4, 5.6],
+    720: [1.6, 2.4],
+  } as Record<number, [number, number]>,
+  /** Mean match end (last ship afloat or gold), sim seconds. */
+  END_BAND: [720, 840] as [number, number],
+  /** No hull founders in any seed before the truce lifts. */
+  FIRST_FOUNDER_MIN_SECONDS: 150,
+  /** After this second, no window longer than LULL_MAX_SECONDS passes without
+   *  a founder or a PvP kill, in any seed. */
+  LULL_FROM_SECONDS: 240,
+  LULL_MAX_SECONDS: 120,
+  /** Sim length: past the top of END_BAND so a late end is measured, not cut. */
+  MAX_MATCH_SECONDS: 15 * 60,
 };
 /** Engage-seek radius by storm phase index (clamped to the last entry) once the
  *  early-peace window is over. The old flat 920/780 had every bot converging

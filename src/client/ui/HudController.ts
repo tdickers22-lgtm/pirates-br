@@ -32,6 +32,7 @@ import { areOnboardingCardsOpen, closeOnboardingCards, syncCountdownCard, wireOn
 import { FirstTimeTips } from './firstTimeTips.js';
 import { crewStripRows, type CrewStripRow } from './crewStrip.js';
 import { glyph, glyphEither, glyphSet, keys } from './InputGlyphs.js';
+import { goldRacePlan } from './goldRace.js';
 
 /** Everything the HUD reads or writes on the Game instance. */
 export type HudView = {
@@ -1348,7 +1349,10 @@ export class HudController {
     this.updateTruceLine();
 
     this.view.ui.shipsAlive.textContent = String(this.view.state.shipsAlive);
-    this.view.ui.goldAmount.textContent = `${player.gold}/${ECONOMY.GOLD_WIN_TARGET}`;
+    // D18: plain gold. The target only speaks once a crew is past half of it,
+    // and then on the objective line (getObjectiveSummary), not in the chip.
+    const goldChip = goldRacePlan(this.view.state.players, this.view.localPlayerId).chip;
+    if (this.view.ui.goldAmount.textContent !== goldChip) this.view.ui.goldAmount.textContent = goldChip;
     this.renderHoldCargo(ship);
     this.view.ui.healthFill.style.width = `${Math.max(0, player.health)}%`;
     this.view.ui.armorFill.style.width = `${Math.max(0, Math.min(100, ((player.armor ?? 0) / PLAYER.MAX_ARMOR) * 100))}%`;
@@ -2955,6 +2959,11 @@ export class HudController {
       return `Objective: deliver ${context.chestsInHold} chest${context.chestsInHold === 1 ? '' : 's'} to ${context.closestHoarder.island.name}`;
     }
     if (context.mappedIsland) return `Objective: dig the ${BROKER_NAME}'s marks on ${context.mappedIsland.name}`;
+    // THE GOLD RACE GETS ONE LINE, AND ONLY WHEN IT IS A RACE (D18). Until a
+    // crew is past half the target the chip is plain gold and this line says
+    // what to do; past it, the race is the objective: "Gold race: Mara 4,100 / 8,000".
+    const goldRace = goldRacePlan(this.view.state?.players ?? [], this.view.localPlayerId).line;
+    if (goldRace) return goldRace;
     // WHERE GOLD COMES OUT OF THE GROUND.
     //
     // Between the first sail and the first chest the line jumped straight to
@@ -2965,7 +2974,6 @@ export class HudController {
     if (player.gold < ECONOMY.GOLD_WIN_TARGET * 0.06 && !context.chestsInHold && !player.carryingChestId) {
       return `Objective: dig a chest — sparkling sand on the beaches, hold ${glyph('interact')} with the shovel`;
     }
-    if (player.gold >= ECONOMY.GOLD_WIN_TARGET * 0.72) return 'Objective: protect your lead and finish the gold run';
     if (ship && ship.upgrades.length < 2) return 'Objective: claim upgrades, raid ships, and sell treasure';
     return 'Objective: raid ships, sell treasure, and stay ahead of the storm';
   }

@@ -1,6 +1,6 @@
 import { v4 as uuid } from 'uuid';
 import type { CannonAmmoType, CannonLoadedShot, Player, Ship, Projectile, ProjectileType, Vec3, WeaponId } from '../../shared/types/index.js';
-import { WEAPONS, SHIP, PLAYER, SHIP_UPGRADES } from '../../shared/constants/index.js';
+import { WEAPONS, SHIP, PLAYER, SHIP_UPGRADES, WRECKERS_GLASS_SPAWN_RESERVE } from '../../shared/constants/index.js';
 import { angleWrap, degreesToRad } from '../../shared/utils/index.js';
 import { getConstrainedCannonAim } from '../../shared/interactions.js';
 import { truceRefusesCannon } from '../../shared/truce.js';
@@ -455,7 +455,7 @@ export class WeaponSystem {
   createDefaultWeapons(): Player['weapons'] {
     return [
       { weaponId: 'blunderbuss' as WeaponId, ammo: 1, reserve: 5, reloading: false, reloadTimer: 0 },
-      { weaponId: 'eye_of_reach' as WeaponId, ammo: 1, reserve: 5, reloading: false, reloadTimer: 0 },
+      { weaponId: 'eye_of_reach' as WeaponId, ammo: 1, reserve: WRECKERS_GLASS_SPAWN_RESERVE, reloading: false, reloadTimer: 0 },
       { weaponId: 'flintknock' as WeaponId, ammo: 1, reserve: 5, reloading: false, reloadTimer: 0 },
       { weaponId: 'cutlass' as WeaponId, ammo: 0, reserve: 0, reloading: false, reloadTimer: 0 },
     ];
