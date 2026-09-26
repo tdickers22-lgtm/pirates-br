@@ -27,6 +27,7 @@ import { mkdirSync, writeFileSync, readFileSync, createWriteStream } from 'node:
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { browserArgs, describeGl } from '../lib/browser-args.mjs';
+import { fpArmsInPage, handCoverageInPage } from '../lib/viewmodel-coverage.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const OUT = path.resolve(process.argv[2] ?? '/tmp/pbr-char-probe');
@@ -189,6 +190,26 @@ try {
       if (g.debugPerfPanel) g.debugPerfPanel.style.display = 'none';
       const e = document.createElement('style'); e.textContent = '#hud{visibility:hidden!important;}'; document.head.appendChild(e);
     });
+    // First-person frame (b3.2h): the local view hands must be the character's fp_arms, <= 4k tris, and
+    // cover <= 45 % of the screen on the live renderer. Before any aimAt, so the camera is the player's own.
+    await page.waitForFunction(() => {
+      const vm = window.__piratesBR.viewmodel;
+      let n = 0;
+      vm.localViewWeaponRoot.traverse((o) => { if (o.name === 'fp_arms') n += 1; });
+      return n > 0 || window.__piratesBR.state.players.find((p) => p.id === window.__piratesBR.localPlayerId)?.state !== 'alive';
+    }, null, { timeout: 30_000 }).catch(() => {});
+    await sleep(1500);
+    const fp = await page.evaluate(fpArmsInPage);
+    const fpCov = await page.evaluate(handCoverageInPage);
+    const fpFile = path.join(OUT, `${tier}-first-person.png`);
+    await page.screenshot({ path: fpFile, timeout: 90_000 });
+    report.firstPerson = report.firstPerson ?? {};
+    report.firstPerson[tier] = { ...fp, coverage: +fpCov.coverage.toFixed(4) };
+    console.log(`  first person: weapon ${fp.weaponId} pocket ${fp.pocketKind}, hands ${fp.hands.map((h) => `${h.root}.${h.hand}:${h.fpArms ? 'fp_arms' : 'PRIMITIVE'}/${h.tris}t`).join(' ') || 'none'}, fp_arms loaded on ${fp.loadedArms} hands, ${(fpCov.coverage * 100).toFixed(1)}% of screen`);
+    expect(`${tier}: first person draws hands and every one is fp_arms (non-vacuous)`,
+      fp.hands.length > 0 && fp.hands.every((h) => h.fpArms), fp.hands.map((h) => `${h.hand}:${h.fpArms}`).join(' ') || 'no hands drawn');
+    expect(`${tier}: first-person fp_arms <= 4000 tris`, fp.drawnFpTris > 0 && fp.drawnFpTris <= 4000, `${fp.drawnFpTris}`);
+    expect(`${tier}: first-person hands cover <= 45% of the screen`, fpCov.coverage > 0 && fpCov.coverage <= 0.45, `${(fpCov.coverage * 100).toFixed(1)}%`);
     // Kind census over every remote pirate (independent of distance culling).
     const all = await page.evaluate(censusInPage, null);
     const pmf = all.bodies.filter((b) => b.kind === 'pmf').length;
@@ -217,7 +238,7 @@ try {
     expect(`${tier}: <= ${DRAW_CAP[tier]} draws per remote pirate`, near.length > 0 && maxDraws <= DRAW_CAP[tier],
       near.map((b) => `${b.kind}:${b.draws}`).join(' '));
 
-    const tierShots = [];
+    const tierShots = [{ label: 'first person', file: fpFile }];
     if (target) {
       const views = [
         ['face 2 m 3/4', [1.6, 0.9, 1.8], 1.62],

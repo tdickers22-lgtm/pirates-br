@@ -276,6 +276,30 @@ def build(repo, render_dir=None):
         o["fpArms"] = json.dumps(info)
         report[s] = info
         arms.append(o)
+    # three.js multiplies every material by COLOR_0 and ignores COLOR_1+. The cut kept the body's own colour
+    # layers, which the join padded with black on the cloth, and the exporter wrote them all (skin bake as
+    # COLOR_3): white-glove hands, black sleeves. Keep ONLY the skin bake, white on every non-skin face.
+    for o in arms:
+        me = o.data
+        col = me.color_attributes.get("Col")
+        if col is None:
+            col = me.color_attributes.new("Col", "FLOAT_COLOR", "CORNER")
+            for d in col.data:
+                d.color = (1.0, 1.0, 1.0, 1.0)
+        skin_slots = {i for i, ms in enumerate(o.material_slots) if ms.material and ms.material.name.startswith("fp_skin")}
+        for poly in me.polygons:
+            if poly.material_index in skin_slots:
+                continue
+            for li in poly.loop_indices:
+                col.data[li].color = (1.0, 1.0, 1.0, 1.0)
+        for a in [a for a in me.color_attributes if a.name != "Col"]:
+            me.color_attributes.remove(a)
+        col = me.color_attributes.get("Col")
+        me.color_attributes.active_color = col
+        try:
+            me.color_attributes.render_color_index = me.color_attributes.active_color_index
+        except (AttributeError, TypeError):
+            pass
     for ob in list(bpy.data.objects):
         if ob not in arms:
             bpy.data.objects.remove(ob, do_unlink=True)

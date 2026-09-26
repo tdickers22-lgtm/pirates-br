@@ -17,19 +17,74 @@
 // capture is saved twice — with the HUD, and with the HUD hidden so the
 // viewmodel silhouette can be read on its own.
 //
-// node scripts/viewmodel-states-probe.mjs [outDir]
+// node scripts/probes/viewmodel-states-probe.mjs [outDir=/tmp/pbr-viewmodel-states] [sections]
 import { chromium } from 'playwright';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { mkdirSync, writeFileSync, createWriteStream } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { browserArgs, describeGl } from '../lib/browser-args.mjs';
+import { fpArmsInPage, handCoverageInPage } from '../lib/viewmodel-coverage.mjs';
 
-const OUT = process.argv[2] ?? 'test-results/viewmodel-states';
+// b3.2h: its OWN stack on 3101/8091 (never the owner's 3000/8090, never 8080), ONE headless
+// software-GL Chromium via browser-args at 960x540, both killed in finally. Every recorded state
+// also measures the hands' real screen coverage (lib/viewmodel-coverage.mjs) and whether they are
+// the character's fp_arms; any state over 45 %, or a drawn hand that is still the primitive, exits 1.
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const OUT = path.resolve(process.argv[2] ?? '/tmp/pbr-viewmodel-states');
 // Optional section filter so a single defect can be re-verified without paying
-// for the whole 10-minute sweep: weapons | tools | cutlass | damage | capstan.
+// for the whole sweep: weapons | tools | pockets | cutlass | damage | capstan.
 const ONLY = (process.argv[3] ?? 'all').split(',');
 const run = (name) => ONLY.includes('all') || ONLY.includes(name);
 mkdirSync(OUT, { recursive: true });
-const browser = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist'] });
-const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+const SERVER_PORT = process.env.PIRATES_BR_SERVER_PORT ?? '8091';
+const CLIENT_PORT = process.env.PIRATES_BR_CLIENT_PORT ?? '3101';
+const CLIENT_URL = `http://127.0.0.1:${CLIENT_PORT}`;
+if (['3000', '8090', '8080'].includes(CLIENT_PORT) || ['3000', '8090', '8080'].includes(SERVER_PORT)) {
+  console.error('viewmodel-states: 3000/8090 are the owner\'s ports and 8080 corrupts WebSockets on this Mac');
+  process.exit(2);
+}
+const COVERAGE_CAP = 0.45;
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+const started = [];
+async function up(url) {
+  try { const r = await fetch(url, { signal: AbortSignal.timeout(1500) }); return r.ok || r.status === 404; } catch { return false; }
+}
+async function ensure(name, command, url, env) {
+  if (await up(url)) { console.log(`[viewmodel-states] ${name} already up at ${url}, reusing it`); return; }
+  const log = createWriteStream(`/tmp/pbr-viewmodel-states-${name}.log`);
+  const child = spawn(command, { cwd: ROOT, shell: true, detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env } });
+  child.stdout.pipe(log); child.stderr.pipe(log);
+  started.push(child);
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null) throw new Error(`${name} exited before listening`);
+    if (await up(url)) return;
+    await sleepMs(600);
+  }
+  throw new Error(`${name} never answered ${url}`);
+}
+let browser;
+function teardown() {
+  try { browser?.close(); } catch { /* gone */ }
+  for (const child of started.splice(0)) {
+    try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch { /* gone */ } }
+  }
+}
+process.on('SIGINT', () => { teardown(); process.exit(130); });
+process.on('SIGTERM', () => { teardown(); process.exit(143); });
+let page;
+let gateFailsCrash = null;
+const gateFails = [];
+const report = { gl: describeGl(), handVisibility: [], cutlassSwing: [], damage: {}, capstan: {} };
 const errors = [];
+try {
+await ensure('server', 'npm run dev:server', `http://127.0.0.1:${SERVER_PORT}/health`, { PORT: SERVER_PORT, PIRATES_BR_MAP_SEED: process.env.PIRATES_BR_MAP_SEED ?? '20260801', PIRATES_BR_DEV_HOOKS: '1' });
+await ensure('client', `npx vite --port ${CLIENT_PORT} --strictPort`, CLIENT_URL, { PIRATES_BR_SERVER_PORT: SERVER_PORT, BROWSER: 'none' });
+console.log(`[viewmodel-states] stack ${CLIENT_URL} / :${SERVER_PORT}, gl ${describeGl()}`);
+browser = await chromium.launch({ headless: true, args: browserArgs(['--mute-audio']) });
+page = await browser.newPage({ viewport: { width: 960, height: 540 }, deviceScaleFactor: 1 });
+page.setDefaultTimeout(90_000);
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
 page.on('pageerror', (e) => errors.push(String(e)));
 const wait = (ms) => page.waitForTimeout(ms);
@@ -39,6 +94,7 @@ await page.route('**/@vite/client*', (route) => route.fulfill({
   status: 200,
   contentType: 'application/javascript',
   body: [
+    `globalThis.__GAME_SERVER_PORT__ = ${JSON.stringify(SERVER_PORT)};`,
     'export const createHotContext = () => ({ on(){}, off(){}, send(){}, accept(){}, acceptExports(){}, dispose(){}, prune(){}, invalidate(){}, data:{} });',
     'export const updateStyle = () => {};',
     'export const removeStyle = () => {};',
@@ -57,14 +113,14 @@ const setHud = (on) => page.evaluate((v) => {
 
 /** Full frame + a HUD-free 640×480 crop of the viewmodel region. */
 async function shot(n) {
-  await page.screenshot({ path: `${OUT}/${n}.png`, timeout: 60_000 });
+  // One HUD-free frame per state (SwiftShader frames are slow; the HUD copy added nothing to read).
   await setHud(false);
-  await page.screenshot({ path: `${OUT}/${n}-vm.png`, clip: { x: 320, y: 180, width: 700, height: 540 }, timeout: 60_000 });
+  await page.screenshot({ path: `${OUT}/${n}-vm.png`, timeout: 90_000 });
   await setHud(true);
 }
 
 async function join() {
-  await page.goto('http://127.0.0.1:3000/?debug&forceinput', { waitUntil: 'domcontentloaded' });
+  await page.goto(`${CLIENT_URL}/?debug&forceinput`, { waitUntil: 'domcontentloaded' });
   // Several agents' probes hammer one dev server; the loading screen can sit for
   // a minute before the menu is even visible.
   await page.waitForSelector('#menu-solo-btn', { state: 'visible', timeout: 180_000 });
@@ -109,8 +165,6 @@ async function ensureAshore() {
 }
 await ensureAshore();
 
-const report = { handVisibility: [], cutlassSwing: [], damage: {}, capstan: {} };
-
 /** Palm NDC + on-screen flag for every first-person hand currently drawn. */
 const handProbe = () => page.evaluate(() => {
   const g = window.__piratesBR;
@@ -149,11 +203,17 @@ const handProbe = () => page.evaluate(() => {
   };
 });
 
-const record = (label, snap) => {
+const record = async (label, snap) => {
   const rows = snap.hands.filter((h) => h.visible);
   const off = rows.filter((h) => !h.onScreen).map((h) => `${h.root}.${h.hand}${JSON.stringify(h.ndc)}`);
-  report.handVisibility.push({ label, ...snap, drawnHands: rows.length, offScreen: off });
-  console.log(`${label.padEnd(26)} weap=${snap.weaponId ?? '-'} pocket=${snap.pocketKind ?? '-'} st=${snap.state} hands=${rows.map((h) => `${h.root}.${h.hand}${h.onScreen ? '' : '!OFF'}${JSON.stringify(h.ndc.slice(0, 2))}`).join(' ') || '**NONE**'}`);
+  const fp = await page.evaluate(fpArmsInPage);
+  const cov = await page.evaluate(handCoverageInPage);
+  const primitive = fp.hands.filter((h) => !h.fpArms).map((h) => `${h.root}.${h.hand}`);
+  report.handVisibility.push({ label, ...snap, drawnHands: rows.length, offScreen: off, coverage: +cov.coverage.toFixed(4), fpTris: fp.drawnFpTris, primitive });
+  if (cov.coverage > COVERAGE_CAP) gateFails.push(`${label}: hands cover ${(cov.coverage * 100).toFixed(1)}% > 45%`);
+  if (primitive.length) gateFails.push(`${label}: primitive hand drawn (${primitive.join(' ')})`);
+  if (fp.drawnFpTris > 4000) gateFails.push(`${label}: fp_arms ${fp.drawnFpTris} tris > 4000`);
+  console.log(`${label.padEnd(26)} weap=${snap.weaponId ?? '-'} pocket=${snap.pocketKind ?? '-'} st=${snap.state} cov=${(cov.coverage * 100).toFixed(1)}% fp=${fp.drawnFpTris}t hands=${rows.map((h) => `${h.root}.${h.hand}${h.onScreen ? '' : '!OFF'}${JSON.stringify(h.ndc.slice(0, 2))}`).join(' ') || '**NONE**'}`);
 };
 
 async function equipSlot(slot) {
@@ -238,13 +298,13 @@ for (const slot of run('weapons') ? [0, 1, 2, 3] : []) {
   if (eq.vm !== id) console.log(`  !! slot ${slot}: viewmodel still showing ${eq.vm}`);
   await unpin();
   await wait(300);
-  record(`${id}-rest`, await handProbe());
+  await record(`${id}-rest`, await handProbe());
   await shot(`w-${id}-rest`);
   if (id === 'cutlass') continue; // its own section below
 
   await page.evaluate(() => { window.__piratesBR.input.mouseButtons.add(0); });
   await wait(100);
-  record(`${id}-fire`, await handProbe());
+  await record(`${id}-fire`, await handProbe());
   await shot(`w-${id}-fire`);
   await page.evaluate(() => { window.__piratesBR.input.mouseButtons.delete(0); });
   await wait(250);
@@ -252,7 +312,7 @@ for (const slot of run('weapons') ? [0, 1, 2, 3] : []) {
   for (const p of [0.15, 0.35, 0.55, 0.8]) {
     await pin({ reloading: true, ammo: 0, reloadTimer: 0.5 }, p);
     await wait(300);
-    record(`${id}-reload-${p}`, await handProbe());
+    await record(`${id}-reload-${p}`, await handProbe());
     await shot(`w-${id}-reload-${String(p).replace('.', '')}`);
   }
   await unpin();
@@ -266,16 +326,30 @@ for (const [wheelSlot, name] of run('tools') ? [[9, 'axe'], [7, 'shovel'], [8, '
   const got = await equipTool(wheelSlot, name);
   if (got !== name) { console.log(`tool ${name}: wheel slot ${wheelSlot} gave "${got}" — skipped`); continue; }
   await wait(400);
-  record(`${name}-rest`, await handProbe());
+  await record(`${name}-rest`, await handProbe());
   await shot(`t-${name}-rest`);
   await page.evaluate(() => { window.__piratesBR.input.mouseButtons.add(0); });
   for (let f = 0; f < 6; f++) {
     await wait(60);
-    record(`${name}-swing-f${f}`, await handProbe());
+    await record(`${name}-swing-f${f}`, await handProbe());
     await shot(`t-${name}-swing-f${f}`);
   }
   await page.evaluate(() => { window.__piratesBR.input.mouseButtons.delete(0); });
   await wait(250);
+}
+// ── POCKETS (b3.2h): food and carried planks, the two use-previews the node gate builds inline ──
+console.log('\n── pockets ──');
+for (const kind of run('pockets') ? ['wood', 'banana', 'coconut', 'mango', 'meat'] : []) {
+  await ensureAshore();
+  await equipSlot(0);
+  await page.evaluate((k) => { const g = window.__piratesBR; g.pocketUsePreviewKind = k; g.pocketUsePreviewTimer = 60; }, kind);
+  await wait(900);
+  const snap = await handProbe();
+  if (snap.pocketKind !== kind) console.log(`  !! pocket ${kind}: viewmodel shows ${snap.pocketKind}`);
+  await record(`pocket-${kind}`, snap);
+  await shot(`p-${kind}`);
+  await page.evaluate(() => { const g = window.__piratesBR; g.pocketUsePreviewKind = null; g.pocketUsePreviewTimer = 0; });
+  await wait(300);
 }
 if (run('cutlass')) {
 // ═══ 2. CUTLASS SWING READABILITY ════════════════════════════════════════
@@ -562,7 +636,19 @@ try {
 
 }
 report.errors = errors.slice(0, 20);
+report.gateFails = gateFails;
 writeFileSync(`${OUT}/report.json`, JSON.stringify(report, null, 1));
 console.log(`\nshots + report.json in ${OUT}/`);
-if (errors.length) console.log('console errors:', errors.slice(0, 5));
-await browser.close();
+} catch (e) {
+  gateFailsCrash = String(e?.stack ?? e);
+} finally {
+  try { await browser?.close(); } catch { /* gone */ }
+  teardown();
+}
+if (gateFailsCrash) { console.error(`  ✗ FAIL: probe crashed: ${gateFailsCrash}`); process.exit(1); }
+const measured = report.handVisibility.length;
+if (!measured) { console.error('  ✗ FAIL: no state measured (VACUOUS)'); process.exit(1); }
+for (const f of gateFails) console.error(`  ✗ FAIL: ${f}`);
+const worst = report.handVisibility.reduce((a, b) => (b.coverage > (a?.coverage ?? -1) ? b : a), null);
+console.log(`${gateFails.length ? '' : '  ✓ '}${measured} states, worst coverage ${(worst.coverage * 100).toFixed(1)}% (${worst.label}), cap 45%`);
+process.exit(gateFails.length ? 1 : 0);

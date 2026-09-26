@@ -71,18 +71,38 @@ if (!fs.existsSync(glbPath)) {
     const tris = [];
     let triCount = 0;
     let skinHasColour = false;
+    const colourWhy = [];
     const matNames = new Set();
     for (const prim of gltf.meshes[node.mesh].primitives) {
       const pos = read(prim.attributes.POSITION);
       const idx = prim.indices !== undefined ? read(prim.indices).map((v) => v[0]) : pos.map((_, i) => i);
       const mat = gltf.materials?.[prim.material]?.name ?? '';
       matNames.add(mat.replace(/\.\d+$/, ''));
-      if (mat.startsWith('fp_skin') && prim.attributes.COLOR_0 !== undefined) skinHasColour = true;
+      // three.js multiplies the material colour by COLOR_0 (and ignores COLOR_1+), so COLOR_0 must BE the skin
+      // albedo on the skin and white on the cloth. Red on fae3800e: the skin bake went out as COLOR_3 behind
+      // three inherited body layers (COLOR_0 on the skin = pure white -> white-glove hands in the live frame,
+      // COLOR_0 on sleeve / cuff / gold = black -> the crew tint multiplied to black).
+      const extra = Object.keys(prim.attributes).filter((k) => /^COLOR_[1-9]/.test(k));
+      if (extra.length) colourWhy.push(`${mat}: stray ${extra.join(',')}`);
+      if (prim.attributes.COLOR_0 !== undefined) {
+        const acc = gltf.accessors[prim.attributes.COLOR_0];
+        const norm = acc.normalized ? (acc.componentType === 5121 ? 255 : 65535) : 1;
+        const cols = read(prim.attributes.COLOR_0);
+        const mean = [0, 1, 2].map((c) => cols.reduce((sum, v) => sum + v[c], 0) / cols.length / norm);
+        if (mat.startsWith('fp_skin')) {
+          const tone = mean[0] > mean[1] && mean[1] > mean[2] && mean[0] > 0.08 && mean[0] < 0.9;
+          if (tone) skinHasColour = true;
+          else colourWhy.push(`${mat} COLOR_0 mean ${mean.map((v) => v.toFixed(2)).join(',')} is not a skin tone`);
+        } else if (Math.min(...mean) < 0.95) {
+          colourWhy.push(`${mat} COLOR_0 mean ${mean.map((v) => v.toFixed(2)).join(',')} darkens its material (must be white)`);
+        }
+      }
       for (let i = 0; i + 2 < idx.length; i += 3) tris.push([pos[idx[i]], pos[idx[i + 1]], pos[idx[i + 2]]]);
       triCount += idx.length / 3;
     }
     totalTris += triCount;
-    expect(`fp_arm_${s}: skin albedo baked to COLOR_0`, skinHasColour);
+    expect(`fp_arm_${s}: skin albedo baked to COLOR_0 (a skin tone), cloth COLOR_0 white, no stray COLOR_n`,
+      skinHasColour && colourWhy.length === 0, colourWhy.join('; '));
     expect(`fp_arm_${s}: sleeve + cuff materials (crew-tinted at runtime)`, matNames.has('fp_sleeve') && matNames.has('fp_cuff'), [...matNames].join(','));
     const zs = tris.flat().map((p) => p[2]);
     expect(`fp_arm_${s}: forearm runs +Z out of frame (>= 0.25 m behind the grip)`, Math.max(...zs) >= 0.25, `z ${Math.min(...zs).toFixed(3)}..${Math.max(...zs).toFixed(3)}`);
