@@ -3,7 +3,7 @@ import { idealBrace } from '../../shared/sailing.js';
 import { anchorRaiseSeconds } from '../../shared/anchor.js';
 import { v4 as uuid } from 'uuid';
 import type {
-  Crew, GameState, HullSections, InteractRefusalReason, InteractRefusedIntent, InteractRefusedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool, WreckEvent, ItemType,
+  Crew, GameState, HullSections, InteractRefusalReason, InteractRefusedIntent, InteractRefusedPayload, CannonLoadedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool, WreckEvent, ItemType,
 } from '../../shared/types/index.js';
 import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, FIRST_SAIL_ASSIST, MATCH_END, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, STORM_PHASES, STORM_RESPAWN_GRACE_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT, WRECK_SITES, SHOP_PRICES, SHOP_QUANTITIES, type ShopLine, hullForCrewSize, botDifficultyLadder, MODES, isModeId, type BotSkill, type ModeId } from '../../shared/constants/index.js';
 import { warmIslandGrounds } from '../../shared/terrainGrid.js';
@@ -24,7 +24,7 @@ import { holeRepairTime } from '../../shared/flooding/floodModel.js';
 import { BAIL_RETURN_DELAY, bailPoseOf, canScoop, throwLanding, type BailPose } from '../../shared/flooding/bail.js';
 import { buildInputAck, buildHotSnapshot, buildWireSnapshot } from './snapshot.js';
 import { WeaponSystem } from '../systems/WeaponSystem.js';
-import type { HitscanTrace } from '../systems/WeaponSystem.js';
+import type { CannonLoadRecord, HitscanTrace } from '../systems/WeaponSystem.js';
 import { StormSystem, STORM_EYE_RESOLUTION_SECONDS } from '../systems/StormSystem.js';
 import { IslandSystem } from '../systems/IslandSystem.js';
 import { TradingSystem } from '../systems/TradingSystem.js';
@@ -2912,6 +2912,8 @@ export class Match {
     if (input.cannonAmmo && this.consumeOneShot(client, 'cannonAmmo', input.seq)) {
       player.selectedCannonAmmo = input.cannonAmmo;
     }
+    // D20 (b3.5b): the client's "Auto-load cannons" setting (absent = keep).
+    if (typeof input.autoLoadCannons === 'boolean') player.autoLoadCannons = input.autoLoadCannons;
 
     if (input.dropChest && player.carryingChestId && this.consumeOneShot(client, 'dropChest', input.seq)) {
       this.dropCarriedChest(player, true);
@@ -2921,7 +2923,14 @@ export class Match {
     // Reload (also blocked while a chest fills your hands)
     if (input.reload && !player.carryingChestId && this.consumeOneShot(client, 'reload', input.seq)) {
       const activeWeapon = player.weapons[player.activeSlot];
-      if (!activeWeapon || !WEAPONS[activeWeapon.weaponId].melee) {
+      if (player.atCannon && ship) {
+        // D20 (b3.5b): at a gun, R / gamepad X / touch Load rams a shot of the
+        // selected type (cheapest stocked when it is out; every rack empty =
+        // no_ammo). A loaded or loading gun ignores the press.
+        this.weapons.lastRefusal = null;
+        if (this.weapons.loadCannon(player, ship, player.cannonIndex)) this.sendCannonLoaded(client, this.weapons.lastLoad);
+        else if (this.weapons.lastRefusal === 'no_ammo') this.sendInteractRefused(client, 'reload', 'no_ammo');
+      } else if (!activeWeapon || !WEAPONS[activeWeapon.weaponId].melee) {
         const noReload = this.weapons.startReload(player);
         if (noReload) this.sendInteractRefused(client, 'reload', noReload);
       }
@@ -3444,6 +3453,11 @@ export class Match {
       this.sendInteractRefused(client, 'fire', 'truce');
     }
 
+    // D20 (b3.5b): an auto-loader at an empty gun starts ramming a shot.
+    if (player.atCannon && ship && this.weapons.autoLoadManned(player, ship)) {
+      this.sendCannonLoaded(client, this.weapons.lastLoad);
+    }
+
     // Fire (suppressed entirely while a treasure chest is in your hands — Sea-of-Thieves style)
     if (!cutlassHandled && input.fire && !player.carryingChestId) {
       if (player.respawnProtectionTimer > 0) {
@@ -3468,6 +3482,7 @@ export class Match {
         if (traces.length > 0) {
           this.resolveFirearmHits(player, traces);
         }
+        if (this.weapons.lastLoad) this.sendCannonLoaded(client, this.weapons.lastLoad);
         const held = this.truceHeldShotBy === player.id ? 'truce' : (traces.length === 0 ? this.weapons.lastRefusal : null);
         if (held) { this.truceHeldShotBy = null; this.sendInteractRefused(client, 'fire', held); }
       }
@@ -5803,6 +5818,17 @@ export class Match {
   private refuse(reason: InteractRefusalReason): false {
     this.lastRefusalReason = reason;
     return false;
+  }
+
+  /** D20: tell the loader what went into the gun; `fallback` drives the dry
+   *  click + "No <selected>: loaded <shot>" prompt on the client. */
+  private sendCannonLoaded(client: ConnectedClient, rec: CannonLoadRecord | null) {
+    if (!rec) return;
+    this.send(client.ws, {
+      type: 'cannon_loaded',
+      ts: Date.now(),
+      payload: { ...rec } satisfies CannonLoadedPayload,
+    });
   }
 
   /** Answer a dead [X] — one short nudge per press storm, to the presser only. */

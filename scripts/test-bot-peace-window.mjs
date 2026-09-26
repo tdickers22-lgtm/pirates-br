@@ -127,9 +127,8 @@ function sailPair({ atTime, seconds, provoke }) {
     match.t = t;
     pinPair();
     match.bots.update(dt, t, state.players, state.ships, state.islands, state.storm, weapons, state.seaRocks);
-    for (const cooldowns of [a.cannonCooldowns, b.cannonCooldowns]) {
-      for (let c = 0; c < cooldowns.length; c += 1) cooldowns[c] = Math.max(0, cooldowns[c] - dt);
-    }
+    // D20 (b3.5b): the real cannon clock (barrel cooldown AND the 1.6 s load).
+    weapons.tickCannons(dt, [a, b]);
   }
   return { shots, attempts };
 }

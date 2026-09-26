@@ -1,5 +1,5 @@
 import { v4 as uuid } from 'uuid';
-import type { Player, Ship, Projectile, ProjectileType, Vec3, WeaponId } from '../../shared/types/index.js';
+import type { CannonAmmoType, CannonLoadedShot, Player, Ship, Projectile, ProjectileType, Vec3, WeaponId } from '../../shared/types/index.js';
 import { WEAPONS, SHIP, PLAYER, SHIP_UPGRADES } from '../../shared/constants/index.js';
 import { angleWrap, degreesToRad } from '../../shared/utils/index.js';
 import { getConstrainedCannonAim } from '../../shared/interactions.js';
@@ -8,7 +8,53 @@ import { cannonLaunchVelocity, cannonMuzzlePosition, hullRatesOf } from '../../s
 
 /** Why a fire or reload press did nothing (b1.6e): Match turns it into an
  *  interact_refused nudge so a dead trigger or a dead R is never silent. */
-export type WeaponRefusal = 'no_ammo' | 'truce';
+export type WeaponRefusal = 'no_ammo' | 'truce' | 'unloaded';
+
+/** D20 (b3.5b): seconds to ram one shot into a gun (R / gamepad X / touch Load,
+ *  or the auto-load). It runs under the 3.5 s SHIP.CANNON_RELOAD barrel
+ *  cooldown, so an auto-loader keeps today's 3.5 s cadence exactly. */
+export const CANNON_LOAD_SECONDS = 1.6;
+
+/** Stores item behind each cannon shot type. */
+const CANNON_STORE_ITEM: Record<CannonAmmoType, string> = {
+  cannonball: 'cannonball',
+  chainshot: 'chainshot',
+  firebomb: 'firebomb_ball',
+};
+/** D20 fallback order when the selected type is out: CHEAPEST stocked first
+ *  (SHOP_PRICES: cannonball 30 < chainshot 90 < firebomb 130). */
+export const CANNON_FALLBACK_ORDER: readonly CannonAmmoType[] = ['cannonball', 'chainshot', 'firebomb'];
+
+/** What the last successful load rammed (Match turns it into 'cannon_loaded'). */
+export interface CannonLoadRecord {
+  shipId: string;
+  cannonIndex: number;
+  shot: CannonLoadedShot;
+  selected: CannonAmmoType;
+  fallback: boolean;
+}
+
+/** Size the per-gun load arrays to the battery (hand-built hulls, old saves). */
+export function ensureCannonLoads(ship: Ship): { loaded: (CannonLoadedShot | null)[]; left: number[] } {
+  const n = ship.cannonCooldowns.length;
+  if (!ship.cannonLoaded) ship.cannonLoaded = [];
+  if (!ship.cannonLoadLeft) ship.cannonLoadLeft = [];
+  while (ship.cannonLoaded.length < n) ship.cannonLoaded.push(null);
+  while (ship.cannonLoadLeft.length < n) ship.cannonLoadLeft.push(0);
+  return { loaded: ship.cannonLoaded, left: ship.cannonLoadLeft };
+}
+
+/** 'empty' | 'loading' | 'loaded' for one gun (server and tests read the same). */
+export function cannonLoadState(ship: Ship, cannonIndex: number): 'empty' | 'loading' | 'loaded' {
+  const shot = ship.cannonLoaded?.[cannonIndex] ?? null;
+  if (!shot) return 'empty';
+  return (ship.cannonLoadLeft?.[cannonIndex] ?? 0) > 0 ? 'loading' : 'loaded';
+}
+
+/** Bots always auto-load (they obey the same load clock through the same path). */
+export function autoLoadsCannons(player: Player): boolean {
+  return player.isBot === true || player.autoLoadCannons === true;
+}
 
 export interface HitscanTrace {
   origin: Vec3;
@@ -34,6 +80,8 @@ export class WeaponSystem {
   /** Why the LAST tryFire / startReload call did nothing, or null when it
    *  acted (or had nothing to say). Single-threaded tick, read right after. */
   lastRefusal: WeaponRefusal | null = null;
+  /** The load the LAST loadCannon / tryFire / autoLoadManned rammed, or null. */
+  lastLoad: CannonLoadRecord | null = null;
 
   update(dt: number, players: Player[]) {
     for (const player of players) {
@@ -73,6 +121,7 @@ export class WeaponSystem {
     // respawn clock is dead: no gun fires for a corpse (Match gates human input
     // earlier; this closes the bot ghost-helm path, BOT-02).
     this.lastRefusal = null;
+    this.lastLoad = null;
     if (player.state === 'eliminated' || player.state === 'downed' || player.state === 'respawning') return [];
 
     // If player is at a cannon, fire ship cannon. THE TRUCE (b1.6e): the guns
@@ -219,75 +268,34 @@ export class WeaponSystem {
     yaw: number, pitch: number,
     cannonIndex: number,
   ): Projectile[] {
-    if (cannonIndex >= ship.cannonCooldowns.length) return [];
+    if (cannonIndex < 0 || cannonIndex >= ship.cannonCooldowns.length) return [];
+    const loads = ensureCannonLoads(ship);
+    const state = cannonLoadState(ship, cannonIndex);
+    // D20 (b3.5b): a gun fires only what was rammed into it. An empty gun
+    // under an auto-loader starts the load (the trigger IS the load button);
+    // otherwise the trigger is a dry click that names R.
+    if (state !== 'loaded') {
+      if (state === 'empty') {
+        if (autoLoadsCannons(player)) this.loadCannon(player, ship, cannonIndex);
+        else this.lastRefusal = 'unloaded';
+      }
+      return [];
+    }
     if (ship.cannonCooldowns[cannonIndex] > 0) return [];
 
-    // Ship cannons spend shared stores; the HUD shows the same finite counts.
-    const cannonballIdx = ship.inventory.findIndex(s => s.item === 'cannonball' && s.qty > 0);
-    const firebombIdx = ship.inventory.findIndex(s => s.item === 'firebomb_ball' && s.qty > 0);
-    const chainshotIdx = ship.inventory.findIndex(s => s.item === 'chainshot' && s.qty > 0);
-
-    const preferredAmmo = player.selectedCannonAmmo;
-    let projType: ProjectileType = preferredAmmo;
-    let usedIdx = -1;
-    let consumesInventory = false;
-
-    if (preferredAmmo === 'firebomb') {
-      if (firebombIdx >= 0) {
-        usedIdx = firebombIdx;
-        consumesInventory = true;
-      } else if (chainshotIdx >= 0) {
-        projType = 'chainshot';
-        usedIdx = chainshotIdx;
-        consumesInventory = true;
-      } else if (cannonballIdx >= 0) {
-        projType = 'cannonball';
-        usedIdx = cannonballIdx;
-        consumesInventory = true;
-      }
-    } else if (preferredAmmo === 'chainshot') {
-      if (chainshotIdx >= 0) {
-        usedIdx = chainshotIdx;
-        consumesInventory = true;
-      } else if (firebombIdx >= 0) {
-        projType = 'firebomb';
-        usedIdx = firebombIdx;
-        consumesInventory = true;
-      } else if (cannonballIdx >= 0) {
-        projType = 'cannonball';
-        usedIdx = cannonballIdx;
-        consumesInventory = true;
-      }
-    } else {
-      // Cannonball preference falls back like the other ammo types: super
-      // shots keep their cannonball-only gate, then firebomb, then chainshot —
-      // an empty ball rack no longer silently refuses to fire.
-      projType = 'cannonball';
-      if (cannonballIdx >= 0) {
-        usedIdx = cannonballIdx;
-        consumesInventory = true;
-      } else if (player.superCannonballs > 0) {
-        // No inventory consumed — the super-shot path below takes over.
-      } else if (firebombIdx >= 0) {
-        projType = 'firebomb';
-        usedIdx = firebombIdx;
-        consumesInventory = true;
-      } else if (chainshotIdx >= 0) {
-        projType = 'chainshot';
-        usedIdx = chainshotIdx;
-        consumesInventory = true;
-      }
-    }
-
-    const usesSuperShot = projType === 'cannonball' && player.superCannonballs > 0;
-    if (!usesSuperShot && (!consumesInventory || usedIdx < 0)) return [];
-    if (usesSuperShot) {
-      player.superCannonballs = Math.max(0, player.superCannonballs - 1);
-    } else if (consumesInventory) {
-      ship.inventory[usedIdx].qty--;
-      if (ship.inventory[usedIdx].qty <= 0) ship.inventory.splice(usedIdx, 1);
-    }
+    const shot = loads.loaded[cannonIndex] as CannonLoadedShot;
+    const usesSuperShot = shot === 'super_cannonball';
+    const projType: ProjectileType = usesSuperShot ? 'cannonball' : shot;
+    loads.loaded[cannonIndex] = null;
+    loads.left[cannonIndex] = 0;
     ship.cannonCooldowns[cannonIndex] = SHIP.CANNON_RELOAD;
+    // Auto-load: ram the next shot straight away; it finishes under the
+    // barrel cooldown. Out of stores is not this shot's refusal (it fired);
+    // the NEXT trigger on the empty gun says no_ammo.
+    if (autoLoadsCannons(player)) {
+      this.loadCannon(player, ship, cannonIndex);
+      this.lastRefusal = null;
+    }
 
     const constrained = getConstrainedCannonAim(ship, cannonIndex, yaw, pitch);
     yaw = constrained.yaw;
@@ -320,6 +328,68 @@ export class WeaponSystem {
 
     this.pendingProjectiles.push(proj);
     return [proj];
+  }
+
+  /** D20: which shot a load takes from the stores. The selected type when
+   *  stocked (cannonball selected spends the loader's banked super shot first,
+   *  as before); else the CHEAPEST stocked type; null when every rack is empty.
+   *  Super shots never stand in for another selected type. */
+  pickCannonShot(player: Player, ship: Ship): { shot: CannonLoadedShot; fallback: boolean } | null {
+    const selected = player.selectedCannonAmmo ?? 'cannonball';
+    const stocked = (t: CannonAmmoType) => ship.inventory.some((s) => s.item === CANNON_STORE_ITEM[t] && s.qty > 0);
+    if (selected === 'cannonball' && (player.superCannonballs ?? 0) > 0) return { shot: 'super_cannonball', fallback: false };
+    if (stocked(selected)) return { shot: selected, fallback: false };
+    for (const t of CANNON_FALLBACK_ORDER) if (stocked(t)) return { shot: t, fallback: true };
+    return null;
+  }
+
+  /** D20: ram one shot into gun `cannonIndex` (R / gamepad X / touch Load, the
+   *  auto-load, and bots all come here). Debits the stores NOW, then the gun is
+   *  loaded after CANNON_LOAD_SECONDS whether or not the loader stays. Returns
+   *  true when a load started; a gun already loaded or loading is a silent no;
+   *  every rack empty sets lastRefusal = 'no_ammo'. */
+  loadCannon(player: Player, ship: Ship, cannonIndex: number): boolean {
+    this.lastLoad = null;
+    if (cannonIndex < 0 || cannonIndex >= ship.cannonCooldowns.length) return false;
+    if (player.state === 'eliminated' || player.state === 'downed' || player.state === 'respawning') return false;
+    const loads = ensureCannonLoads(ship);
+    if (cannonLoadState(ship, cannonIndex) !== 'empty') return false;
+    const pick = this.pickCannonShot(player, ship);
+    if (!pick) {
+      this.lastRefusal = 'no_ammo';
+      return false;
+    }
+    if (pick.shot === 'super_cannonball') {
+      player.superCannonballs = Math.max(0, player.superCannonballs - 1);
+    } else {
+      const item = CANNON_STORE_ITEM[pick.shot];
+      const idx = ship.inventory.findIndex((s) => s.item === item && s.qty > 0);
+      ship.inventory[idx].qty--;
+      if (ship.inventory[idx].qty <= 0) ship.inventory.splice(idx, 1);
+    }
+    loads.loaded[cannonIndex] = pick.shot;
+    loads.left[cannonIndex] = CANNON_LOAD_SECONDS;
+    this.lastLoad = {
+      shipId: ship.id,
+      cannonIndex,
+      shot: pick.shot,
+      selected: player.selectedCannonAmmo ?? 'cannonball',
+      fallback: pick.fallback,
+    };
+    return true;
+  }
+
+  /** D20 auto-load for a pirate manning a gun: an empty barrel under an
+   *  auto-loader starts loading (entering the gun, or stores restocked). Silent
+   *  when the racks are empty; the trigger reports that. */
+  autoLoadManned(player: Player, ship: Ship): boolean {
+    this.lastLoad = null;
+    if (!player.atCannon || !autoLoadsCannons(player)) return false;
+    if (cannonLoadState(ship, player.cannonIndex) !== 'empty') return false;
+    const prev = this.lastRefusal;
+    const started = this.loadCannon(player, ship, player.cannonIndex);
+    this.lastRefusal = prev;
+    return started;
   }
 
   /** The ammo crate: every firearm back to a full magazine and reserve, reloads
@@ -364,6 +434,11 @@ export class WeaponSystem {
         if (ship.cannonCooldowns[i] > 0) {
           ship.cannonCooldowns[i] = Math.max(0, ship.cannonCooldowns[i] - dt);
         }
+      }
+      // D20: the load clock (arrays sized here so every hull ships them).
+      const loads = ensureCannonLoads(ship);
+      for (let i = 0; i < loads.left.length; i++) {
+        if (loads.left[i] > 0) loads.left[i] = Math.max(0, loads.left[i] - dt);
       }
     }
   }

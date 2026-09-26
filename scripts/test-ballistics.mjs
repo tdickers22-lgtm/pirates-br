@@ -46,6 +46,10 @@ const gunner = (ship) => ({ id: 'gunner', state: 'alive', atCannon: true, cannon
 function fire(ship, yaw, pitch, cannonIndex = 0) {
   const ws = new WeaponSystem(() => 0.5, () => 1e9);
   ship.cannonCooldowns.fill(0);
+  // D20 (b3.5b): a gun fires only what was rammed into it; this table is about
+  // the arc, so every barrel starts loaded with a plain ball.
+  ship.cannonLoaded = ship.cannonCooldowns.map(() => 'cannonball');
+  ship.cannonLoadLeft = ship.cannonCooldowns.map(() => 0);
   ws.tryFire(gunner(ship), ship, yaw, pitch, cannonIndex);
   const [p] = ws.flushProjectiles();
   return p;

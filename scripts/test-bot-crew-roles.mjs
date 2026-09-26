@@ -104,7 +104,8 @@ function run(hands) {
     match.updateBotFlooding(dt);
     match.physics.updateShips(dt, t, state.ships, state.players, state.islands, state.seaRocks, state.storm);
     for (const ship of [a, b]) {
-      for (let c = 0; c < ship.cannonCooldowns.length; c += 1) ship.cannonCooldowns[c] = Math.max(0, ship.cannonCooldowns[c] - dt);
+      // D20 (b3.5b): the real cannon clock (barrel cooldown AND the 1.6 s load).
+      match.weapons.tickCannons(dt, [ship]);
     }
     const atHelm = crew.filter((p) => p.atHelm).length;
     if (atHelm > 1) twoHelmsmen += 1;

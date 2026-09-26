@@ -90,9 +90,13 @@ const T0 = BOT_EARLY_PEACE_SECONDS + 50;
 const WARM_SECONDS = 25;
 for (let i = 0; i < Math.ceil(WARM_SECONDS / dt); i += 1) {
   pinPair(true);
+  // The weapon's truce clock reads match.t (D23); keep it on the harness clock
+  // or every gun reads as inside the truce (red on 829b31e5 before b3.5b).
+  match.t = T0 + i * dt;
   match.bots.update(dt, T0 + i * dt, state.players, state.ships, state.islands, state.storm, weapons, state.seaRocks);
   for (const ship of [a, b]) {
-    for (let c = 0; c < ship.cannonCooldowns.length; c += 1) ship.cannonCooldowns[c] = Math.max(0, ship.cannonCooldowns[c] - dt);
+    // D20 (b3.5b): the real cannon clock (barrel cooldown AND the 1.6 s load).
+    weapons.tickCannons(dt, [ship]);
   }
 }
 const aliveShotsA = shotsOf(pirateA);

@@ -123,7 +123,8 @@ function sailBerth({ seconds, provokeAt = null }) {
       provoked = true;
     }
     match.bots.update(dt, t, state.players, state.ships, state.islands, state.storm, weapons, state.seaRocks);
-    for (let c = 0; c < a.cannonCooldowns.length; c += 1) a.cannonCooldowns[c] = Math.max(0, a.cannonCooldowns[c] - dt);
+    // D20 (b3.5b): the real cannon clock (barrel cooldown AND the 1.6 s load).
+    weapons.tickCannons(dt, [a]);
   }
   return { shots, behaviorA: match.bots.bots.get(state.players.find((p) => p.shipId === a.id).id).crew.behavior };
 }

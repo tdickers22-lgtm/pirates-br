@@ -504,7 +504,12 @@ console.log('\n5. Cannonball selection falls back like firebomb/chainshot');
     id: 'gunner', state: 'alive', atCannon: true,
     selectedCannonAmmo: 'cannonball', superCannonballs: 0,
   };
+  // D20 (b3.5b): a gun fires only what was rammed into it, so each row loads
+  // (R) with the selected type, waits out the 1.6 s load, then fires. The
+  // cheapest-first fallback rows live in test-cannon-ammo.
   const fire = (ship) => {
+    weapons.loadCannon(gunner, ship, 0);
+    for (let i = 0; i < 120; i += 1) weapons.tickCannons(1 / 60, [ship]);
     weapons.tryFire(gunner, ship, 0, 0, 0);
     return weapons.flushProjectiles()[0] ?? null;
   };

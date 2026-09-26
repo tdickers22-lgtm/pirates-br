@@ -163,6 +163,14 @@ export interface Ship {
   sinkProgress: number;   // 0-1; 1 = fully sunk
   sinking: boolean;
   cannonCooldowns: number[];  // seconds until ready
+  /** D20 (b3.5b): what sits in each barrel, parallel to cannonCooldowns. null =
+   *  empty. While cannonLoadLeft[i] > 0 the entry is the shot being rammed home
+   *  (the stores were already debited); the gun is LOADED once that reaches 0.
+   *  A loaded gun stays loaded when its gunner walks away. Sized lazily by
+   *  WeaponSystem (ensureCannonLoads) so hand-built hulls need not carry it. */
+  cannonLoaded?: (CannonLoadedShot | null)[];
+  /** D20: seconds left on the 1.6 s load of each gun (0 = not loading). */
+  cannonLoadLeft?: number[];
   chainshottedUntil: number; // sim-time seconds (GameState.serverTime clock)
   /** 0–1 rigging health; chainshot tears canvas and caps speed until repaired at sails */
   sailIntegrity: number;
@@ -231,6 +239,9 @@ export interface Ship {
 type PlayerState = 'alive' | 'swimming' | 'boarding' | 'downed' | 'respawning' | 'eliminated';
 export type WeaponSlot = 0 | 1 | 2 | 3;
 export type CannonAmmoType = 'cannonball' | 'firebomb' | 'chainshot';
+/** What a loaded barrel holds (D20): a stores type, or the loader's banked
+ *  super shot (rammed only when cannonball is the selected type). */
+export type CannonLoadedShot = CannonAmmoType | 'super_cannonball';
 
 export interface Player {
   id: string;
@@ -303,6 +314,11 @@ export interface Player {
    *  the shooter (CREDIT-01); Match reads it to name the honest cause. */
   lastEnvDamage?: { cause: 'fall' | 'fire' | 'drowned' | 'storm' | 'shark'; at: number } | null;
   selectedCannonAmmo: CannonAmmoType;
+  /** D20 "Auto-load cannons": at a gun this pirate rams a shot whenever the
+   *  barrel is empty (and straight after each shot), keeping the one-button
+   *  flow. Client setting riding PlayerInput.autoLoadCannons: default ON for
+   *  touch and gamepad, OFF for mouse+keyboard. Bots always auto-load. */
+  autoLoadCannons?: boolean;
   kegs: number;
   kegCooldown: number;
   cannonFlightTimer: number;
@@ -1061,6 +1077,10 @@ type MsgType =
   | 'prop_removed'
   /** The [X] was heard and REFUSED — feedback so a dead press is never silent. */
   | 'interact_refused'
+  /** D20 (b3.5b): a load was rammed into a gun, to the loader only.
+   *  CannonLoadedPayload; `fallback` = the selected type was out and the
+   *  cheapest stocked type went in instead (dry click + prompt). */
+  | 'cannon_loaded'
   | 'treasure_map'
   | 'trade_request'
   | 'trade_update'
@@ -1436,10 +1456,21 @@ export type InteractRefusalReason =
   | 'truce'
   /** An eat (D21) at full health: the food is kept. */
   | 'health_full'
+  /** D20: the trigger on an EMPTY gun (auto-load off): R / gamepad X / touch Load rams one. */
+  | 'unloaded'
   | 'unavailable';
 
 /** Server → client: your [X] was heard and refused. Drives one short amber feed
  *  line plus a dull thud, so a dead press is never silent. */
+/** Server -> loader: a gun took a shot (D20). */
+export interface CannonLoadedPayload {
+  shipId: string;
+  cannonIndex: number;
+  shot: CannonLoadedShot;
+  selected: CannonAmmoType;
+  fallback: boolean;
+}
+
 export interface InteractRefusedPayload {
   intent: InteractRefusedIntent;
   reason: InteractRefusalReason;
@@ -1476,6 +1507,9 @@ export interface PlayerInput {
   specialAttack: boolean;
   slot: WeaponSlot | null;
   cannonAmmo: CannonAmmoType | null;
+  /** D20: the player's "Auto-load cannons" setting (absent = unchanged; the
+   *  server default is OFF, the mouse+keyboard default). */
+  autoLoadCannons?: boolean;
   yaw: number;
   pitch: number;
   /** Radial inventory: 0 banana, 1 wood to ship, 2 coconut, 3 mango */

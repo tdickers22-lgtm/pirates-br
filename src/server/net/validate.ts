@@ -140,6 +140,8 @@ export function sanitizePlayerInput(raw: unknown): PlayerInput | null {
     specialAttack: bool(input.specialAttack),
     slot,
     cannonAmmo,
+    // D20 (b3.5b): the "Auto-load cannons" setting; absent stays absent.
+    ...(typeof input.autoLoadCannons === 'boolean' ? { autoLoadCannons: input.autoLoadCannons } : {}),
     yaw: angleWrap(yaw),
     pitch: clamp(pitch, -Math.PI / 2, Math.PI / 2),
     wheelIndex,
