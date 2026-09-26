@@ -117,11 +117,7 @@ export const tierOf = (key) => Object.entries(TIERS).find(([, t]) => t.keys.incl
 // RATCHET-BEGIN
 export const RATCHET = [
   // fp-weapons
-  'cutlass:band', 'cutlass:lods', 'cutlass:textures',
-  'flintlock:band', 'flintlock:lods', 'flintlock:textures',
-  'flintknock:band', 'flintknock:lods', 'flintknock:textures',
-  'blunderbuss:band', 'blunderbuss:lods', 'blunderbuss:textures',
-  'eye_of_reach:band', 'eye_of_reach:lods', 'eye_of_reach:textures',
+  'cutlass:lods',
   // fp-tools
   'tool_bucket:lods', 'tool_bucket:textures', 'tool_bucket:verts',
   'tool_hammer:lods', 'tool_hammer:textures', 'tool_hammer:verts',

@@ -47,6 +47,21 @@
 //       as stale (drop the row in the rebuild commit), an unlisted doubleSided
 //       hero fails, and a name that is not in the roster fails.
 //
+//   [b'] SPEC CHANGE (b3.4f, 2026-09-26, declared per the b3.4a handoff): a file that has been
+//       REBUILT (it left DOUBLE_SIDED_PENDING) is graded as PBR: one material with baseColor +
+//       normal + ORM (metallicRoughness and occlusion textures) and at most 3 images. A pending
+//       file keeps the old one-image rule until its rebuild lands.
+//   [l] CUTLASS BLADE CONTINUITY (assets-04). The v1 blade was three tilted boxes, a kinked,
+//       stair-stepped silhouette. The `blade` node must be ONE connected component (positions
+//       welded) with >= 600 vertices, >= 95% of its 1 cm stations (bins along +Y) populated, and
+//       no lateral step (centre of the station's x extent) > 2 mm per 1 cm station.
+//   [m] METAL READS AS METAL (assets-02). Sampling the ORM texture at the UVs of an all-metal
+//       node (cutlass `blade`, gun `muzzle`): >= 90% of the samples have ORM.b > 0.8.
+//   [n] FIT SCALE (assets-05). The SHIPPED heroWeaponFit formula (fitBoxOnto onto
+//       primitiveWeaponBox) must scale every weapon by 0.85-1.15: a hero authored at the wrong
+//       size (the v1 flintknock was a 1.14 m musket fitted at 0.50) fails here. The flintknock is
+//       also graded as a one-handed pistol: authored length 0.46-0.60 m.
+//
 // Mutation proof: PIRATES_BR_MUTATE_HERO=cutlass:tris tightens the cutlass band
 // to an impossible window (ratchet ignored), and the gate must go red.
 //
@@ -139,12 +154,74 @@ function stats(g) {
     images: (g.json.images || []).length };
 }
 
+/** Node's first primitive (hero nodes are one primitive each). */
+function nodePrim(g, name) {
+  const n = g.json.nodes.find((x) => x.name === name && x.mesh != null);
+  return n ? { prim: g.json.meshes[n.mesh].primitives[0], t: n.translation || [0, 0, 0] } : null;
+}
+
+// [l] one welded component, 1 cm stations, lateral steps.
+function gradeBlade(g, h) {
+  const { prim, t } = nodePrim(g, 'blade');
+  const pos = readAccessor(g, prim.attributes.POSITION).map((p) => [p[0] + t[0], p[1] + t[1], p[2] + t[2]]);
+  if (h.mutate === 'kink') for (const p of pos) if (p[1] > 0.6) p[0] += 0.005;
+  const ia = g.json.accessors[prim.indices], iv = g.json.bufferViews[ia.bufferView];
+  const ioff = (iv.byteOffset || 0) + (ia.byteOffset || 0), isz = COMP[ia.componentType][0];
+  const idx = Array.from({ length: ia.count }, (_, i) => (isz === 4 ? g.bin.readUInt32LE(ioff + i * 4)
+    : isz === 2 ? g.bin.readUInt16LE(ioff + i * 2) : g.bin.readUInt8(ioff + i)));
+  const key = (p) => p.map((c) => Math.round(c * 1e5)).join(',');
+  const weld = new Map(), id = pos.map((p) => { const k = key(p); if (!weld.has(k)) weld.set(k, weld.size); return weld.get(k); });
+  const parent = Array.from({ length: weld.size }, (_, i) => i);
+  const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+  for (let i = 0; i < idx.length; i += 3) for (const j of [1, 2]) parent[find(id[idx[i + j]])] = find(id[idx[i]]);
+  const comps = new Set(parent.map((_, i) => find(i))).size;
+  expect(`[l] cutlass blade: ${comps} connected component(s), ${weld.size} welded vertices (one piece, >= 600)`,
+    comps === 1 && weld.size >= 600, 'the blade must be one lofted mesh, not boxes');
+  const y0 = Math.min(...pos.map((p) => p[1])), y1 = Math.max(...pos.map((p) => p[1]));
+  const bins = Math.floor((y1 - y0) / 0.01) + 1, lo = new Array(bins).fill(Infinity), hi = new Array(bins).fill(-Infinity);
+  for (const p of pos) { const b = Math.min(bins - 1, Math.floor((p[1] - y0) / 0.01)); lo[b] = Math.min(lo[b], p[0]); hi[b] = Math.max(hi[b], p[0]); }
+  let filled = 0, worst = 0, at = -1, prev = -1;
+  for (let b = 0; b < bins; b++) {
+    if (!Number.isFinite(lo[b])) continue;
+    filled += 1;
+    const c = (lo[b] + hi[b]) / 2;
+    if (prev >= 0) { const step = Math.abs(c - (lo[prev] + hi[prev]) / 2) / (b - prev); if (step > worst) { worst = step; at = b; } }
+    prev = b;
+  }
+  expect(`[l] cutlass blade: ${filled}/${bins} 1 cm stations populated (>= 95%)`, filled >= bins * 0.95);
+  expect(`[l] cutlass blade: worst lateral step ${(worst * 1000).toFixed(2)} mm per 1 cm station (<= 2 mm, at y=${(y0 + at * 0.01).toFixed(2)})`,
+    worst <= 0.002, 'a kink or a stair step in the blade silhouette');
+}
+
+// [m] ORM.b sampled at an all-metal node's UVs.
+async function gradeMetal(g, h, node) {
+  const { prim } = nodePrim(g, node);
+  const mat = g.json.materials[prim.material];
+  const ti = mat?.pbrMetallicRoughness?.metallicRoughnessTexture?.index;
+  if (ti == null || prim.attributes.TEXCOORD_0 == null) { expect(`[m] ${h.file}: ${node} has an ORM texture and UVs`, false); return; }
+  const img = g.json.images[g.json.textures[ti].source];
+  const view = g.json.bufferViews[img.bufferView];
+  const { default: sharp } = await import('sharp');
+  const { data, info } = await sharp(g.bin.subarray(view.byteOffset || 0, (view.byteOffset || 0) + view.byteLength)).raw().toBuffer({ resolveWithObject: true });
+  const uv = readAccessor(g, prim.attributes.TEXCOORD_0);
+  const thr = h.mutate === 'nometal' ? 1.01 : 0.8;
+  let metal = 0;
+  for (const [u, v] of uv) {
+    const x = Math.min(info.width - 1, Math.max(0, Math.floor((u - Math.floor(u)) * info.width)));
+    const y = Math.min(info.height - 1, Math.max(0, Math.floor((v - Math.floor(v)) * info.height)));
+    if (data[(y * info.width + x) * info.channels + 2] / 255 > thr) metal += 1;
+  }
+  const frac = metal / Math.max(1, uv.length);
+  expect(`[m] ${h.file}: ${(frac * 100).toFixed(1)}% of the ${node} samples read ORM.b > ${thr} (>= 90%)`, frac >= 0.9,
+    'metal charts must bake metalness 1.0 (metal_material), or steel reads as plastic');
+}
+
 // ── the roster ──────────────────────────────────────────────────────────────
 // nodes: names that must survive the build. pivot: extra assertions in glTF
 // space (x right, y up, z forward — the same frame the client uses).
 const HERO = [
-  { file: 'cutlass', tris: [3500, 9000], nodes: ['cutlass_body'],
-    pivot: (b) => [['blade above the grip', b.get('cutlass_body').max[1] > 0.9],
+  { file: 'cutlass', tris: [3500, 9000], nodes: ['cutlass_body', 'blade'],
+    pivot: (b) => [['blade above the grip', b.get('blade').max[1] > 0.9],
       ['grip at the origin', Math.abs(b.get('cutlass_body').min[1]) < 0.30]] },
   ...['flintlock', 'flintknock', 'blunderbuss'].map((f) => ({
     file: f, tris: [3500, 9000], nodes: [`${f}_body`, 'hammer', 'trigger', 'muzzle'],
@@ -175,8 +252,7 @@ const HERO = [
 ];
 
 // [k] files still exported doubleSided by the 2026-09 atlas pass. SHRINK ONLY (see the header).
-export const DOUBLE_SIDED_PENDING = ['cutlass', 'flintlock', 'flintknock', 'blunderbuss', 'eye_of_reach',
-  'cannon', 'wheel', 'capstan', 'ship_lantern'];
+export const DOUBLE_SIDED_PENDING = ['cannon', 'wheel', 'capstan', 'ship_lantern'];
 export const CARD_MATERIAL = /(glass|pane|card|sail|canvas|flag|leaf|flame)/i;
 const pending = new Set(DOUBLE_SIDED_PENDING);
 
@@ -199,6 +275,7 @@ if (mutate) {
   if (row && what === 'tris') { row.tris = [1, 2]; console.log(`  ! mutation: ${file} triangle band -> ${row.tris}`); }
   if (row && what === 'twosided') { pending.delete(file); console.log(`  ! mutation: ${file} dropped from DOUBLE_SIDED_PENDING`); }
   if (what === 'stale') { pending.add(file); console.log(`  ! mutation: ${file} added to DOUBLE_SIDED_PENDING`); }
+  if (row && ['kink', 'nometal', 'fit'].includes(what)) { row.mutate = what; console.log(`  ! mutation: ${file} ${what}`); }
 }
 
 console.log(`HERO GLB census — ${HERO.length} files\n`);
@@ -214,9 +291,17 @@ for (const h of HERO) {
   // `mats: 2` is the lantern: its glass is emissive, and an emissive pane baked
   // flat into an albedo atlas is just a yellow sticker.
   const wantMats = h.mats ?? 1;
-  expect(`[b] ${h.file}: ${wantMats} material(s), one of them the atlas with a baseColorTexture`,
-    s.mats === wantMats && s.textured === 1 && s.images === 1,
-    `${s.mats} materials, ${s.textured} textured, ${s.images} images — the Cycles bake did not land`);
+  if (pending.has(h.file)) {
+    expect(`[b] ${h.file}: ${wantMats} material(s), one of them the atlas with a baseColorTexture`,
+      s.mats === wantMats && s.textured === 1 && s.images === 1,
+      `${s.mats} materials, ${s.textured} textured, ${s.images} images — the Cycles bake did not land`);
+  } else {
+    const pbr = (g.json.materials || []).filter((m) => m.pbrMetallicRoughness?.baseColorTexture && m.normalTexture
+      && m.occlusionTexture && m.pbrMetallicRoughness?.metallicRoughnessTexture);
+    expect(`[b'] ${h.file}: ${wantMats} material(s), one PBR (baseColor + normal + ORM), ${s.images} images <= 3`,
+      s.mats === wantMats && pbr.length === 1 && s.images >= 2 && s.images <= 3,
+      `${s.mats} materials, ${pbr.length} with the full PBR set, ${s.images} images`);
+  }
   expect(`[c] ${h.file}: COLOR_0 on every primitive and white (min ${s.colorMin.toFixed(3)})`,
     s.color0 === s.prims && s.colorMin >= 0.94, 'AO is in the atlas; a non-white COLOR_0 applies it twice');
   for (const n of h.nodes) expect(`[d] ${h.file}: node '${n}' survives the build`, boxes.has(n), `nodes: ${[...boxes.keys()].join(', ')}`);
@@ -234,12 +319,43 @@ for (const h of HERO) {
         `doubleSided: ${two.map((m) => m.name).join(', ')} — closed solids cull back faces (use_backface_culling)`);
     }
   }
+  if (h.file === 'cutlass' && boxes.has('blade')) gradeBlade(g, h);
+  if (!pending.has(h.file) && (boxes.has('blade') || boxes.has('muzzle'))) await gradeMetal(g, h, boxes.has('blade') ? 'blade' : 'muzzle');
   if (h.far) {
     const farFile = `${h.file}_far.glb`;
     if (!fs.existsSync(path.join(DIR, farFile))) { expect(`[h] ${farFile}: present (LOD1 at 60 m)`, false); continue; }
     const fs2 = stats(readGlb(farFile));
     expect(`[h] ${h.file}_far: ${fs2.tris} tris ≤ 45% of ${s.tris}`, fs2.tris <= s.tris * 0.45,
       'a far LOD that saves nothing is a second upload for nothing');
+  }
+}
+
+// [n] the shipped fit, on the real bounds.
+{
+  let api = null, why = '';
+  try {
+    const { tsImport } = await import('tsx/esm/api');
+    const { installCanvasStub } = await import('./lib/canvas-stub.mjs');
+    installCanvasStub();
+    api = await tsImport('../src/client/rendering/factories/WeaponMeshFactory.ts', import.meta.url);
+  } catch (e) { why = String(e?.message ?? e).split('\n')[0]; }
+  expect('[n] WeaponMeshFactory (fitBoxOnto, primitiveWeaponBox) loads for the fit check', !!api, why);
+  if (api) {
+    const THREE = await import('three');
+    for (const h of HERO.filter((x) => ['cutlass', 'flintlock', 'flintknock', 'blunderbuss', 'eye_of_reach'].includes(x.file))) {
+      const boxes = nodeBoxes(readGlb(`${h.file}.glb`));
+      const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+      for (const b of boxes.values()) for (let i = 0; i < 3; i++) { min[i] = Math.min(min[i], b.min[i]); max[i] = Math.max(max[i], b.max[i]); }
+      const fit = api.fitBoxOnto(new THREE.Box3(new THREE.Vector3(...min), new THREE.Vector3(...max)), api.primitiveWeaponBox(h.file));
+      const lo = h.mutate === 'fit' ? 0.999 : 0.85, hi = h.mutate === 'fit' ? 1.0 : 1.15;
+      expect(`[n] ${h.file}: heroWeaponFit scale ${fit.scale.toFixed(3)} in [${lo}, ${hi}] (long axis ${fit.axis})`,
+        fit.scale >= lo && fit.scale <= hi, 'author the file at the size of the envelope it replaces');
+      if (h.file === 'flintknock') {
+        const len = max[2] - min[2];
+        expect(`[n] flintknock: authored length ${len.toFixed(3)} m in [0.46, 0.60] (a one-handed pistol, not a shrunken musket)`,
+          len >= 0.46 && len <= 0.60);
+      }
+    }
   }
 }
 

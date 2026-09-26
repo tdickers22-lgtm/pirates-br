@@ -137,6 +137,16 @@ def _img(path, data):
     return img
 
 
+def _rgba(sockets, name):
+    """The COLOR socket called `name` on a Mix node. With data_type 'RGBA' the node still carries
+    Float/Vector/Color sockets that share the names A/B/Result, and a lookup by name can hand back
+    the FLOAT one: a tint or wear mix wired that way bakes greyscale (b3.4f verified the fix)."""
+    for s in sockets:
+        if s.name == name and s.type == 'RGBA':
+            return s
+    return sockets[name]
+
+
 def source_material(name, asset_id, res='1k', scale=1.0, tint=None, metallic=None, roughness=None,
                     rough_mul=1.0, normal_strength=1.0, wear=0.0, blend=0.25):
     """Box-projected PolyHaven material. `scale` multiplies the texture's real-world density (2 = the
@@ -169,9 +179,9 @@ def source_material(name, asset_id, res='1k', scale=1.0, tint=None, metallic=Non
         mx.data_type = 'RGBA'
         mx.blend_type = 'MULTIPLY'
         mx.inputs['Factor'].default_value = 1.0
-        nt.links.new(col, mx.inputs['A'])
-        mx.inputs['B'].default_value = (*tint[:3], 1.0)
-        col = mx.outputs['Result']
+        nt.links.new(col, _rgba(mx.inputs, 'A'))
+        _rgba(mx.inputs, 'B').default_value = (*tint[:3], 1.0)
+        col = _rgba(mx.outputs, 'Result')
     arm = tex(src['maps']['arm'], True)
     sep = nt.nodes.new('ShaderNodeSeparateColor')
     nt.links.new(arm.outputs['Color'], sep.inputs['Color'])
@@ -197,9 +207,9 @@ def source_material(name, asset_id, res='1k', scale=1.0, tint=None, metallic=Non
         wm.data_type = 'RGBA'
         wm.blend_type = 'SCREEN'
         nt.links.new(ramp.outputs['Result'], wm.inputs['Factor'])
-        nt.links.new(col, wm.inputs['A'])
-        wm.inputs['B'].default_value = (0.55, 0.52, 0.48, 1.0)
-        col = wm.outputs['Result']
+        nt.links.new(col, _rgba(wm.inputs, 'A'))
+        _rgba(wm.inputs, 'B').default_value = (0.55, 0.52, 0.48, 1.0)
+        col = _rgba(wm.outputs, 'Result')
         if rough is not None:
             rs = nt.nodes.new('ShaderNodeMath')
             rs.operation = 'SUBTRACT'
