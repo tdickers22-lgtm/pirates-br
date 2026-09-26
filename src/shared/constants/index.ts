@@ -1638,3 +1638,9 @@ export const SEA_POI = {
   /** Radius of the gull circle, metres. */
   GULL_RADIUS: 15,
 } as const;
+
+/** b3.5f (D13): the only input-scheme values the server echoes to the
+ *  scoreboard. Anything else on the wire is dropped (returns null). */
+export function parseInputScheme(raw: unknown): 'mouse' | 'gamepad' | 'touch' | null {
+  return raw === 'mouse' || raw === 'gamepad' || raw === 'touch' ? raw : null;
+}

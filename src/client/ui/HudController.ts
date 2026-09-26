@@ -34,6 +34,8 @@ import { FirstTimeTips } from './firstTimeTips.js';
 import { crewStripRows, type CrewStripRow } from './crewStrip.js';
 import { glyph, glyphEither, glyphSet, keys } from './InputGlyphs.js';
 import { goldRacePlan } from './goldRace.js';
+import { buildScoreboard, ConnectionPill, CrewOutTracker, PAD_VIEW_BUTTON, ScoreboardHold, ScoreboardView } from './Scoreboard.js';
+import { touchScoreboardHeld } from '../input/TouchControls.js';
 
 /** Everything the HUD reads or writes on the Game instance. */
 export type HudView = {
@@ -65,6 +67,8 @@ export type HudView = {
   /** The newest (sim time, local time) pair as read off the socket — see
    *  NetworkClient.getServerClock. The overload detector's only input. */
   getServerClock(): { server: number; at: number } | null;
+  /** b3.5f: last heartbeat round trip (NetworkClient.getLatencyMs), for the connection pill. */
+  getLatencyMs?(): number | null;
   findNearbyCannonIndex(player: Player, ship: Ship): number | null;
   findRepairableHole(player: Player, ship: Ship): ShipHole | null;
   flashIslandBanner(name: string): void;
@@ -358,6 +362,48 @@ export function attackerMarkPlacement(
 export class HudController {
   /** Kept alive for the lifetime of the HUD; disconnected by nothing, like the HUD itself. */
   private footerObserver: ResizeObserver | null = null;
+
+  // b3.5f: in-match scoreboard (Tab / View hold / touch Crews) + connection pill.
+  private readonly scoreboardHold = new ScoreboardHold();
+  private readonly crewOut = new CrewOutTracker();
+  private readonly netPill = new ConnectionPill();
+  private readonly scoreboardView = new ScoreboardView();
+  /** Game closes the chart the View press opened once the hold becomes the board. */
+  onPadScoreboardShown: (() => void) | null = null;
+
+  /** Round reset / back to the menu: hide the board and the pill, forget placements. */
+  resetScoreboard() {
+    this.scoreboardHold.clear();
+    this.crewOut.reset();
+    this.netPill.reset();
+    this.scoreboardView.showBoard(null);
+    this.scoreboardView.showPill({ level: 'hidden', text: '' });
+  }
+
+  /** Tab down / up (Game's key listener). */
+  setScoreboardKey(down: boolean) { this.scoreboardHold.set('key', down); }
+
+  private updateScoreboard(): void {
+    const state = this.view.state;
+    const playing = !!state && state.phase === 'playing';
+    if (!state || state.phase === 'waiting') { this.crewOut.reset(); this.netPill.reset(); }
+    const crews = state?.crews ?? [];
+    if (state) this.crewOut.observe(crews, state.players);
+    this.scoreboardHold.set('touch', touchScoreboardHeld());
+    const pads = typeof navigator !== 'undefined' && navigator.getGamepads ? navigator.getGamepads() : [];
+    let viewDown = false;
+    for (const pad of pads) if (pad?.connected && pad.buttons[PAD_VIEW_BUTTON]?.pressed) viewDown = true;
+    if (this.scoreboardHold.pad(viewDown, performance.now())) this.onPadScoreboardShown?.();
+    const show = !!state && state.phase !== 'waiting' && crews.length > 0 && this.scoreboardHold.visible;
+    this.scoreboardView.showBoard(show ? buildScoreboard({
+      crews, players: state!.players, ships: state!.ships,
+      localPlayerId: this.view.localPlayerId, localScheme: this.view.input.scheme.current,
+      outOrder: this.crewOut.order,
+    }) : null);
+    const clock = playing ? this.view.getServerClock() : null;
+    const gap = clock ? Math.max(0, Date.now() - clock.at) : null;
+    this.scoreboardView.showPill(playing ? this.netPill.update(this.view.getLatencyMs?.() ?? null, gap, Date.now()) : { level: 'hidden', text: '' });
+  }
 
   constructor(private readonly view: HudView) {
     this.watchFooterHeight();
@@ -1248,6 +1294,7 @@ export class HudController {
   }
 
   updateHud() {
+    this.updateScoreboard();
     if (!this.view.state) return;
 
     const player = this.view.getLocalPlayer();

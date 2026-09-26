@@ -5,7 +5,7 @@ import { v4 as uuid } from 'uuid';
 import type {
   Crew, GameState, HullSections, InteractRefusalReason, InteractRefusedIntent, InteractRefusedPayload, CannonLoadedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool, WreckEvent, ItemType,
 } from '../../shared/types/index.js';
-import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, FIRST_SAIL_ASSIST, MATCH_END, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, STORM_PHASES, STORM_RESPAWN_GRACE_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT, WRECK_SITES, SHOP_PRICES, SHOP_QUANTITIES, type ShopLine, hullForCrewSize, botDifficultyLadder, MODES, isModeId, type BotSkill, type ModeId } from '../../shared/constants/index.js';
+import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, FIRST_SAIL_ASSIST, MATCH_END, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, STORM_PHASES, STORM_RESPAWN_GRACE_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT, WRECK_SITES, SHOP_PRICES, SHOP_QUANTITIES, type ShopLine, hullForCrewSize, botDifficultyLadder, MODES, isModeId, type BotSkill, type ModeId, parseInputScheme } from '../../shared/constants/index.js';
 import { warmIslandGrounds } from '../../shared/terrainGrid.js';
 import { dedupeName } from '../../shared/names.js';
 import {
@@ -2282,6 +2282,11 @@ export class Match {
       case 'player_input': {
         const input = this.sanitizeInput(msg.payload);
         if (input) client.lastInput = this.carryUnreadOneShots(client, input);
+        // b3.5f (D13): the scheme rides the input so the scoreboard can show who
+        // plays with aim assist. Whitelisted here; anything else is ignored.
+        const scheme = parseInputScheme((msg.payload as { inputScheme?: unknown } | null)?.inputScheme);
+        const schemePlayer = scheme ? this.getPlayer(client.playerId) : null;
+        if (schemePlayer && !schemePlayer.isBot) schemePlayer.inputScheme = scheme!;
         break;
       }
       case 'shop_buy': {

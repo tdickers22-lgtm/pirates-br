@@ -262,6 +262,10 @@ export interface Player {
   knockbackVelocity: Vec3;
   isBot: boolean;
   kills: number;
+  /** b3.5f (D13): the input scheme this human last played on, echoed from
+   *  PlayerInput.inputScheme so the scoreboard can show who has aim assist
+   *  (touch and gamepad). Absent for bots and before the first input. */
+  inputScheme?: 'mouse' | 'gamepad' | 'touch';
   /** Consecutive pirate kills since last death; PvE kills do not count. */
   playerKillStreak: number;
   superCannonballs: number;
@@ -1510,6 +1514,9 @@ export interface PlayerInput {
   /** D20: the player's "Auto-load cannons" setting (absent = unchanged; the
    *  server default is OFF, the mouse+keyboard default). */
   autoLoadCannons?: boolean;
+  /** b3.5f: the client's active input scheme (mouse / gamepad / touch). Read
+   *  off the raw payload by Match.parseInputScheme; drives the scoreboard icon. */
+  inputScheme?: 'mouse' | 'gamepad' | 'touch';
   yaw: number;
   pitch: number;
   /** Radial inventory: 0 banana, 1 wood to ship, 2 coconut, 3 mango */

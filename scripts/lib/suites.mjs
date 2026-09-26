@@ -301,6 +301,8 @@ export const LOGIC = [
   quick(tsx('test-hud-visibility.mjs')),
   quick(tsx('test-crew-palette.mjs')),
   quick(tsx('test-captions.mjs')),
+  // b3.5f scoreboard + connection pill (vm:mechanicshud:4, D13): ordering, scheme icons, pill thresholds, wiring.
+  quick(tsx('test-scoreboard.mjs')),
   // b1.5b front door (online-09/16, vm:online:5, vm:audio:6): absolute OG/twitter
   // card on fly.toml's PIRATES_BR_PUBLIC_URL, og-card.jpg 1200x630 < 300 KB,
   // manifest + icons, credits.json fresh from every LICENSES.md, privacy line,

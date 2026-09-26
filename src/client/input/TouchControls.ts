@@ -157,6 +157,7 @@ export class TouchControls {
       if (spec.id === 'interact') this.interactBtn = btn;
     }
     root.appendChild(this.buildHelm());
+    root.appendChild(this.buildScoreboardButton());
     parent.appendChild(root);
     this.root = root;
     this.zone = zone;
@@ -343,6 +344,38 @@ export class TouchControls {
     };
   }
 
+  /** b3.5f: the "Crews" hold button (top row, after Special; every context).
+   *  The scoreboard row is reserved in the bindings table, so this does not go
+   *  through the virtual source: HudController reads touchScoreboardHeld(). */
+  private buildScoreboardButton(): HTMLButtonElement {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tc-btn tc-crews';
+    btn.dataset.touch = 'scoreboard';
+    btn.textContent = 'Crews';
+    btn.style.top = 'calc(12px + env(safe-area-inset-top))';
+    btn.style.left = 'calc(272px + env(safe-area-inset-left))';
+    btn.style.fontSize = '11px';
+    const ids = new Set<number>();
+    const up = (e: PointerEvent) => {
+      if (!ids.delete(e.pointerId) || ids.size > 0) return;
+      scoreboardHeld = false;
+      btn.classList.remove('pressed');
+    };
+    btn.addEventListener('pointerdown', (e) => {
+      if (!isFingerLike(e) && this.scheme.current !== 'touch') return;
+      e.preventDefault();
+      ids.add(e.pointerId);
+      try { btn.setPointerCapture(e.pointerId); } catch { /* synthetic pointer */ }
+      scoreboardHeld = true;
+      btn.classList.add('pressed');
+    });
+    btn.addEventListener('pointerup', up);
+    btn.addEventListener('pointercancel', up);
+    btn.addEventListener('lostpointercapture', up);
+    return btn;
+  }
+
   private bindHold(el: HTMLElement, action: BindingAction, touchOnly = false): () => void {
     const ids = new Set<number>();
     el.addEventListener('pointerdown', (e) => {
@@ -467,6 +500,7 @@ export class TouchControls {
   reset() {
     this.roles.clear();
     this.source.releaseAll();
+    scoreboardHeld = false;
     this.stopRing();
     this.stickBase?.classList.remove('shown');
     // Blur or leaving the match recentres even a latched wheel: the rudder
@@ -488,6 +522,10 @@ export class TouchControls {
 }
 
 /** A device that can deliver touches at all (phone, iPad, touch laptop). */
+/** b3.5f: true while a finger holds the touch "Crews" button. */
+let scoreboardHeld = false;
+export function touchScoreboardHeld(): boolean { return scoreboardHeld; }
+
 export function touchCapable(): boolean {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
   return (navigator.maxTouchPoints ?? 0) > 0 || 'ontouchstart' in window;
