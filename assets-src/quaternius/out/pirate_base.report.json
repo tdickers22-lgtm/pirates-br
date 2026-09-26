@@ -156,7 +156,34 @@
      "T_Eye_Normal_png.png",
      "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Eye_Normal.png"
     ]
-   ]
+   ],
+   "wardrobe": {
+    "hatLine": {
+     "backZ": 1.635809302330017,
+     "frontZ": 1.6718093156814575,
+     "normal": [
+      0.0,
+      0.15544404089450836,
+      0.987844705581665
+     ],
+     "origin": [
+      0.0,
+      -0.004551110323518515,
+      1.6563743352890015
+     ]
+    },
+    "nodes": {
+     "acc_earring": 400,
+     "acc_eyepatch": 982,
+     "hair_buns_hat": 836,
+     "hair_buzzedfemale_hat": 286,
+     "hair_long_hat": 1608,
+     "hat_bandana": 3268,
+     "hat_bicorn": 4698,
+     "hat_headscarf": 3268,
+     "hat_tricorn": 4672
+    }
+   }
   },
   "male": {
    "after": {
@@ -320,7 +347,34 @@
      "T_Hair_1_Normal_png.png",
      "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Hair_1_Normal.png"
     ]
-   ]
+   ],
+   "wardrobe": {
+    "hatLine": {
+     "backZ": 1.6371119022369385,
+     "frontZ": 1.673111915588379,
+     "normal": [
+      0.0,
+      0.16177423298358917,
+      0.9868277907371521
+     ],
+     "origin": [
+      0.0,
+      -0.01278033945709467,
+      1.657967209815979
+     ]
+    },
+    "nodes": {
+     "acc_earring": 400,
+     "acc_eyepatch": 982,
+     "hair_buzzed_hat": 282,
+     "hair_long_hat": 2152,
+     "hair_simpleparted_hat": 212,
+     "hat_bandana": 3268,
+     "hat_bicorn": 4698,
+     "hat_headscarf": 3268,
+     "hat_tricorn": 4672
+    }
+   }
   },
   "stout": {
    "after": {
@@ -483,7 +537,33 @@
      "T_Hair_1_Normal_png.png",
      "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Hair_1_Normal.png"
     ]
-   ]
+   ],
+   "wardrobe": {
+    "hatLine": {
+     "backZ": 1.6447713375091553,
+     "frontZ": 1.6807713508605957,
+     "normal": [
+      0.0,
+      0.17139917612075806,
+      0.9852015972137451
+     ],
+     "origin": [
+      0.0,
+      -0.011022930033504963,
+      1.6658005714416504
+     ]
+    },
+    "nodes": {
+     "acc_earring": 400,
+     "acc_eyepatch": 982,
+     "hair_buzzed_hat": 288,
+     "hair_simpleparted_hat": 218,
+     "hat_bandana": 3268,
+     "hat_bicorn": 4698,
+     "hat_headscarf": 3268,
+     "hat_tricorn": 4672
+    }
+   }
   }
  },
  "materials": {
@@ -565,6 +645,30 @@
    "a": "assets-src/quaternius/out/T_body_stout_BaseColor.png",
    "normal": "assets-src/quaternius/out/T_body_stout_Normal.png",
    "orm": "assets-src/quaternius/ubc/Base Characters/Godot - UE/T_Superhero_Male_Roughness.png"
+  },
+  "MI_wardrobe_band": {
+   "a": "assets-src/quaternius/out/T_wardrobe_band_BaseColor.png",
+   "normal": "assets-src/quaternius/out/T_wardrobe_band_Normal.png"
+  },
+  "MI_wardrobe_crew": {
+   "a": "assets-src/quaternius/out/T_wardrobe_crew_BaseColor.png",
+   "normal": "assets-src/quaternius/out/T_wardrobe_crew_Normal.png"
+  },
+  "MI_wardrobe_felt": {
+   "a": "assets-src/quaternius/out/T_wardrobe_felt_BaseColor.png",
+   "normal": "assets-src/quaternius/out/T_wardrobe_felt_Normal.png"
+  },
+  "MI_wardrobe_gold": {
+   "a": "assets-src/quaternius/out/T_wardrobe_gold_BaseColor.png",
+   "normal": "assets-src/quaternius/out/T_wardrobe_gold_Normal.png"
+  },
+  "MI_wardrobe_leather": {
+   "a": "assets-src/quaternius/out/T_wardrobe_leather_BaseColor.png",
+   "normal": "assets-src/quaternius/out/T_wardrobe_leather_Normal.png"
+  },
+  "MI_wardrobe_scarf": {
+   "a": "assets-src/quaternius/out/T_wardrobe_scarf_BaseColor.png",
+   "normal": "assets-src/quaternius/out/T_wardrobe_scarf_Normal.png"
   }
  },
  "skeleton": "Quaternius UE-style 65 minus 12 leaf plus eye_l/eye_r",

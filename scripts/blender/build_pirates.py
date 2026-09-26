@@ -12,6 +12,10 @@ Stages (one module each, run in this order; later slices append theirs):
   clips (b3.2b, _pirate_clips.py)  UAL1+UAL2 Standard retargeted onto the male rest, game clip ids, 30 fps grid,
                                    root motion only on roll/vault/slide, gap clips as keyed layers
                                    -> public/assets/models/pirate_clips.glb (also: python3 scripts/blender/_pirate_clips.py)
+  wardrobe I (b3.2c, _pirate_wardrobe.py)  rigid head-chain variants on every body: hat_tricorn, hat_bicorn,
+                                   hat_bandana, hat_headscarf, acc_eyepatch, acc_earring and a hat-safe cut
+                                   hair_<style>_hat per style (non-default nodes, 100% head);
+                                   --wardrobe-renders writes docs/asset-sheets/characters/wardrobe-i/.
 Inputs are restored by `node assets-src/quaternius/fetch.mjs` (sha256-pinned, CC0).
 """
 import json
@@ -24,6 +28,7 @@ from mathutils import Vector
 
 sys.path.insert(0, os.path.dirname(__file__))
 import _pirate_import as imp  # noqa: E402
+import _pirate_wardrobe as wardrobe  # noqa: E402
 
 REPO = imp.REPO
 OUT = os.path.join(REPO, "assets-src", "quaternius", "out")
@@ -74,7 +79,8 @@ def tint_factors(path):
     jl = struct.unpack_from("<I", buf, 12)[0]
     gltf = json.loads(buf[20:20 + jl])
     for m in gltf.get("materials", []):
-        t = (m.get("extras") or {}).get("hairTint")
+        ex = m.get("extras") or {}
+        t = ex.get("hairTint") or ex.get("wardrobeTint")   # b3.2c: wardrobe materials carry their tint the same way
         if t:
             m.setdefault("pbrMetallicRoughness", {})["baseColorFactor"] = [round(x, 4) for x in t] + [1.0]
     js = json.dumps(gltf, separators=(",", ":")).encode()
@@ -147,6 +153,62 @@ def render(path):
     bpy.ops.render.render(write_still=True)
     print("wrote", path)
 
+WARDROBE_SHEET = os.path.join(REPO, "docs", "asset-sheets", "characters", "wardrobe-i")
+WARDROBE_SETS = {   # body: (hat or None, accessories)
+    "a": {"male": ("hat_tricorn", ["acc_eyepatch"]), "female": ("hat_bicorn", ["acc_earring"]),
+          "stout": ("hat_bandana", ["acc_earring"])},
+    "b": {"male": ("hat_headscarf", ["acc_earring"]), "female": ("hat_tricorn", []),
+          "stout": ("hat_bicorn", ["acc_eyepatch"])},
+    "c": {"male": ("hat_tricorn", []), "female": ("hat_bicorn", []), "stout": ("hat_headscarf", ["acc_eyepatch"])},
+}
+WARDROBE_ANGLES = {"a": (25, 150), "b": (25, 150), "c": (0, 90)}   # c: straight front and profile
+
+
+def wardrobe_sheet(built):
+    """b3.2c review sheet: each body dressed, head and shoulders, front three-quarter and back three-quarter
+    (Cycles CPU 480 px tiles montaged to one PNG per set)."""
+    import numpy as np
+    os.makedirs(WARDROBE_SHEET, exist_ok=True)
+    setup_render(False)
+    sc = bpy.context.scene
+    sc.render.resolution_x = sc.render.resolution_y = 480
+    sc.cycles.samples = 16
+    for arm, _ in built.values():
+        arm.rotation_mode = "XYZ"
+    for key, cfg in WARDROBE_SETS.items():
+        tiles = []
+        for ang in WARDROBE_ANGLES[key]:
+            row = []
+            for b, (hat, acc) in cfg.items():
+                for bb, (arm, _) in built.items():
+                    arm.location.x = 0 if bb == b else 60
+                arm = built[b][0]
+                arm.rotation_euler.z = math.radians(ang)
+                defaults = {h.lower() for h in imp.DEFAULT_HAIR[b]}
+                show = {"body", "eyes", "brows"} | set(acc) | ({hat} if hat else set())
+                for h in defaults:
+                    show.add(f"{h}_hat" if hat and "beard" not in h else h)
+                for o in arm.children:
+                    o.hide_render = o.name[len(b) + 1:] not in show
+                bpy.context.view_layer.update()
+                camera((0, -1.25, imp.HEAD_Y + 0.03), (0, 0, imp.HEAD_Y + 0.0), lens=50)
+                path = os.path.join(WARDROBE_SHEET, f"_tile_{key}_{b}_{ang}.png")
+                render(path)
+                img = bpy.data.images.load(path)
+                px = np.array(img.pixels[:]).reshape(480, 480, 4)
+                bpy.data.images.remove(img)
+                os.remove(path)
+                row.append(px)
+                arm.rotation_euler.z = 0
+            tiles.append(np.concatenate(row, axis=1))
+        sheet = np.concatenate(tiles[::-1], axis=0)   # pixels are bottom-up: front row ends on top
+        out = bpy.data.images.new(f"wardrobe_{key}", sheet.shape[1], sheet.shape[0], alpha=True)
+        out.pixels.foreach_set(sheet.astype(np.float32).ravel())
+        out.filepath_raw = os.path.join(WARDROBE_SHEET, f"wardrobe-set-{key}-noon.png")
+        out.file_format = "PNG"
+        out.save()
+        print("wrote", out.filepath_raw)
+
 
 def main():
     bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -159,6 +221,7 @@ def main():
         rep = {}
         arm, meshes = imp.build_base(body_id, rep, do_retarget=not RAW, out_dir=OUT)
         imp.repoint_images(rep)
+        meshes = meshes + wardrobe.dress(arm, meshes, body_id, OUT, rep)
         report["bodies"][body_id] = rep[body_id] | {k: v for k, v in rep.items() if k != body_id}
         report["materials"].update(material_slots(meshes))
         export(arm, meshes, os.path.join(OUT, f"pirate_base_{body_id}.glb"))
@@ -172,6 +235,8 @@ def main():
         import _pirate_clips
         print("clips", json.dumps(_pirate_clips.build()))
 
+    if "--wardrobe-renders" in ARGS:
+        wardrobe_sheet(built)
     if "--renders" not in ARGS:
         return
     os.makedirs(SHEET, exist_ok=True)

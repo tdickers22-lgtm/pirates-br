@@ -559,6 +559,90 @@ if (argv.includes('--glb')) {
   }
 }
 
+// ── WARDROBE I (b3.2c, characters-01/03): rigid head-chain items and hat-safe hair ─────────────
+// Every body GLB carries the head wardrobe as separate variant nodes the client toggles: hat_tricorn,
+// hat_bicorn, hat_bandana, hat_headscarf, acc_eyepatch, acc_earring. Each is weighted 100% to the head
+// joint (rigid on the head chain: a look or a nod carries it, nothing stretches). Every hair style except
+// the beard has a hat-safe cut hair_<style>_hat that the client shows instead of the full style while a
+// hat is on. "No hair vertex outside a hat at rest" is measured, not declared: from the head centre (mean
+// of the head-weighted body vertices) a ray to every vertex of the cut (and of the head skin) may not
+// cross the hat's surface before it reaches the vertex (1 mm slack). Negative control: at least one FULL
+// style pokes through the tricorn on every body, so the ray test is able to fail.
+// Crew colour (characters-03): the tricorn braid, the bicorn cockade and the bandana use a material whose
+// extras.crewTint is true (a mask the client tints; the whole coat is no longer the crew colour).
+// Red: before b3.2c (no wardrobe nodes, no cuts).
+function pokeCount(hatV, pts, c) {
+  const S = 2; const NA = 180; const NE = 90; // 2 deg cells: azimuth x elevation from c
+  const ang = (p) => { const d = sub(p, c); const r = len(d); return [((Math.atan2(d[2], d[0]) * 180 / Math.PI) + 360) % 360, Math.asin(d[1] / r) * 180 / Math.PI + 90, r]; };
+  const grid = new Map(); const tris = hatV.tris ?? [];
+  tris.forEach((t, k) => {
+    const A = t.map((i) => ang(hatV[i].p));
+    let az = A.map((a) => a[0]); if (Math.max(...az) - Math.min(...az) > 180) az = az.map((a) => (a < 180 ? a + 360 : a));
+    const e0 = Math.max(0, Math.floor(Math.min(...A.map((a) => a[1])) / S) - 1); const e1 = Math.min(NE - 1, Math.floor(Math.max(...A.map((a) => a[1])) / S) + 1);
+    const polar = Math.max(...A.map((a) => a[1])) > 170 || Math.min(...A.map((a) => a[1])) < 10;
+    const a0 = polar ? 0 : Math.floor(Math.min(...az) / S) - 1; const a1 = polar ? NA - 1 : Math.floor(Math.max(...az) / S) + 1;
+    for (let e = e0; e <= e1; e++) for (let a = a0; a <= a1; a++) { const key = e * NA + ((a % NA) + NA) % NA; if (!grid.has(key)) grid.set(key, []); grid.get(key).push(k); }
+  });
+  let n = 0;
+  for (const p of pts) {
+    const [az, el, r] = ang(p); const cell = grid.get(Math.min(NE - 1, Math.floor(el / S)) * NA + Math.floor(az / S) % NA); if (!cell) continue;
+    const d = unit(sub(p, c));
+    for (const k of cell) { // Moller-Trumbore from c along d
+      const [a, b, e] = tris[k].map((i) => hatV[i].p); const e1 = sub(b, a); const e2 = sub(e, a);
+      const h = [d[1] * e2[2] - d[2] * e2[1], d[2] * e2[0] - d[0] * e2[2], d[0] * e2[1] - d[1] * e2[0]]; const det = dot(e1, h);
+      if (Math.abs(det) < 1e-12) continue;
+      const s = sub(c, a); const u = dot(s, h) / det; if (u < 0 || u > 1) continue;
+      const q = [s[1] * e1[2] - s[2] * e1[1], s[2] * e1[0] - s[0] * e1[2], s[0] * e1[1] - s[1] * e1[0]]; const v = dot(d, q) / det;
+      if (v < 0 || u + v > 1) continue;
+      const t = dot(e2, q) / det; if (t > 0 && t < r - 0.001) { n += 1; break; }
+    }
+  }
+  return n;
+}
+if (!argv.includes('--glb')) {
+  const HATS = ['hat_tricorn', 'hat_bicorn', 'hat_bandana', 'hat_headscarf'];
+  const ACC = ['acc_eyepatch', 'acc_earring'];
+  for (const b of BODIES) {
+    console.log(`\nwardrobe I (b3.2c): ${b}`);
+    const L = loadGlb(`${OUT}/pirate_base_${b}.glb`);
+    if (!L) { expect(`${b}: body GLB present`, false); continue; }
+    const { g, W } = L; const { gltf } = g;
+    const nodeOf = (name) => gltf.nodes.findIndex((n) => n.mesh !== undefined && n.name === name);
+    const verts = {};
+    for (const name of [...HATS, ...ACC]) {
+      const i = nodeOf(name);
+      const v = i >= 0 && gltf.nodes[i].skin !== undefined ? skinned(g, W, i, 'head') : null;
+      verts[name] = v;
+      const off = v ? v.filter((x) => x.wj < 0.999).length : -1;
+      expect(`${b}: ${name} is a skinned variant node weighted 100% to head (${v ? `${v.length - off}/${v.length}` : 'missing'})`, !!v && v.length > 0 && off === 0);
+    }
+    const hairs = gltf.nodes.map((n, i) => ({ n, i })).filter(({ n }) => n.mesh !== undefined && /^hair_/.test(n.name) && !/_hat$/.test(n.name) && !/beard/.test(n.name));
+    const cuts = [];
+    for (const { n } of hairs) {
+      const i = nodeOf(`${n.name}_hat`);
+      const v = i >= 0 ? skinned(g, W, i, 'head') : null;
+      expect(`${b}: hat-safe cut ${n.name}_hat exists, is not a default style and follows the head (${v ? v.filter((x) => x.wj >= 0.999).length : 0}/${v?.length ?? 0})`,
+        !!v && v.length > 0 && gltf.nodes[i].extras?.pirateDefault === false && v.every((x) => x.wj >= 0.999));
+      if (v) cuts.push({ name: `${n.name}_hat`, v });
+    }
+    const headSkin = L.body.filter((v) => v.j === 'head');
+    const c = headSkin.reduce((a, v) => [a[0] + v.p[0] / headSkin.length, a[1] + v.p[1] / headSkin.length, a[2] + v.p[2] / headSkin.length], [0, 0, 0]);
+    for (const h of HATS) {
+      if (!verts[h]) continue;
+      const bad = cuts.map((cu) => [cu.name, pokeCount(verts[h], cu.v.map((x) => x.p), c)]).filter(([, k]) => k > 0);
+      expect(`${b}: no hat-safe hair vertex outside ${h} at rest (${cuts.length} cuts)`, cuts.length === hairs.length && cuts.length > 0 && !bad.length, bad.map(([nm, k]) => `${nm} ${k}`).join(', '));
+      const skin = pokeCount(verts[h], headSkin.map((x) => x.p), c);
+      expect(`${b}: ${h} clears the head skin (${skin} vertices poke through)`, skin === 0);
+    }
+    if (verts.hat_tricorn) {
+      const full = hairs.map(({ n, i }) => [n.name, pokeCount(verts.hat_tricorn, skinned(g, W, i).map((x) => x.p), c)]);
+      expect(`${b}: negative control, a full style pokes through the tricorn (${full.map(([nm, k]) => `${nm} ${k}`).join(', ')})`, full.some(([, k]) => k > 0));
+    }
+    const crew = (name) => { const i = nodeOf(name); return i >= 0 && gltf.meshes[gltf.nodes[i].mesh].primitives.some((p) => gltf.materials?.[p.material]?.extras?.crewTint === true); };
+    expect(`${b}: crew colour is a mask material (extras.crewTint) on the tricorn, the bicorn and the bandana`, ['hat_tricorn', 'hat_bicorn', 'hat_bandana'].every(crew));
+  }
+}
+
 // ── CLIPS (b3.2b, animations-01/02, characters-05) ────────────────────────
 // Every clip id the player state machine (PlayerRigFactory: lowerClip / upperClip / setLayer / the death
 // clip per cause) can request exists in public/assets/models/pirate_clips.glb, is non-empty (>= 2 keys,
