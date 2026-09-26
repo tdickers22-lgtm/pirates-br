@@ -657,7 +657,8 @@ if (!argv.includes('--glb')) {
 // are committed under docs/asset-sheets/characters/wardrobe-ii/.
 // Red: before b3.2d (no garment nodes, no sheets).
 if (!argv.includes('--glb')) {
-  const SLOTS = { coat_frock: ['spine_02', 'spine_03', 'upperarm_l', 'upperarm_r', 'lowerarm_l', 'lowerarm_r'],
+  const SLOTS = { shirt_linen: ['spine_02', 'spine_03', 'upperarm_l', 'upperarm_r', 'lowerarm_l', 'lowerarm_r'],
+    coat_frock: ['spine_02', 'spine_03', 'upperarm_l', 'upperarm_r', 'lowerarm_l', 'lowerarm_r'],
     coat_jacket: ['spine_02', 'spine_03', 'upperarm_l', 'upperarm_r', 'lowerarm_l', 'lowerarm_r'],
     vest_waistcoat: ['spine_02', 'spine_03'], sash: ['pelvis', 'spine_01'], belt: ['pelvis', 'spine_01'],
     breeches_knee: ['thigh_l', 'thigh_r'], breeches_slops: ['thigh_l', 'thigh_r'],
@@ -799,7 +800,7 @@ if (!argv.includes('--glb')) {
 // with its V point and two front points) at most four. A rim that follows the body's face grid is a staircase with a spike every 1-2 cm (R2: torn paper).
 // Red: 3e017cda (boots_tall 18264, coat_frock 8876; coat fronts and vest V/armholes with dozens of spikes).
 if (!argv.includes('--glb')) {
-  const CAP = { boots_tall: 2400, boots_shoes: 1800, coat_frock: 6000, coat_jacket: 5000, vest_waistcoat: 3000,
+  const CAP = { shirt_linen: 3000, boots_tall: 2400, boots_shoes: 1800, coat_frock: 6000, coat_jacket: 5000, vest_waistcoat: 3000,
     breeches_knee: 4300, breeches_slops: 4300, sash: 2500, belt: 900, hat_tricorn: 2800, hat_bicorn: 2800 };
   // F8 gold: the buttons, buckles and earring rendered grey-silver next to the gold waistcoat (R2 face-1m-captain-noon-3q).
   // The gold class tint, in sRGB, must be a saturated gold (hue 35-50 deg, saturation >= 0.55). Red: 3e017cda (sat 0.40).
@@ -909,6 +910,62 @@ if (!argv.includes('--glb')) {
   expect('every requested clip is non-empty: >= 2 keys and >= 50 animated bones', !thin.length, thin.join(', '));
   expect('every requested clip on an exact 30 fps grid', !off.length, off.join(', '));
   expect(`every animated node is a bone of pirate_base_male (${bones.size} joints)`, bones.size >= 57 && !foreign.size, [...foreign].join(', '));
+}
+
+// ── R2 F2 (b3.2e first task): shirt / chemise layer and the front-torso skin fraction ─────────────
+// R2 re-review (4c8fecef): every pirate was bare-chested (the bosun's kit bra showed through the waistcoat V).
+// Every body carries a skinned shirt_linen slot (trunk + sleeves to the wrist, tucked under the breeches, open
+// placket); every R2 outfit wears it. Metric (the reviewer's emission-mask measure, as rays): at rest, parallel rays
+// from the front (-Z, glTF front = +Z) on a 1 cm grid over the trunk (x within 0.9x the shoulder joints, y from the
+// pelvis joint to neck_01); the fraction of rays whose FIRST hit is the body (skin, kit underwear) <= 0.10.
+// Red: 4c8fecef (no shirt node; captain/deckhand/bosun/gunner 0.12/0.21/0.46/0.49 in the reviewer's render).
+if (!argv.includes('--glb')) {
+  const OUTFITS = { captain: ['male', ['shirt_linen', 'coat_frock', 'vest_waistcoat', 'sash', 'breeches_knee', 'boots_tall']],
+    deckhand: ['stout', ['shirt_linen', 'coat_jacket', 'belt', 'breeches_slops', 'boots_shoes']],
+    bosun: ['female', ['shirt_linen', 'vest_waistcoat', 'sash', 'belt', 'breeches_knee', 'boots_tall']],
+    gunner: ['male', ['shirt_linen', 'vest_waistcoat', 'belt', 'breeches_slops', 'boots_shoes']] };
+  const cache = {};
+  const ray = (tris, x, y) => { // nearest +Z hit of the vertical line (x, y) against a triangle list, or -Infinity
+    let best = -Infinity;
+    for (const [a, b, c] of tris) {
+      const d0 = (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]);
+      const d1 = (c[0] - b[0]) * (y - b[1]) - (c[1] - b[1]) * (x - b[0]);
+      const d2 = (a[0] - c[0]) * (y - c[1]) - (a[1] - c[1]) * (x - c[0]);
+      if (!((d0 >= 0 && d1 >= 0 && d2 >= 0) || (d0 <= 0 && d1 <= 0 && d2 <= 0))) continue;
+      const den = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]); if (Math.abs(den) < 1e-12) continue;
+      const u = ((b[1] - c[1]) * (x - c[0]) + (c[0] - b[0]) * (y - c[1])) / den;
+      const v = ((c[1] - a[1]) * (x - c[0]) + (a[0] - c[0]) * (y - c[1])) / den;
+      best = Math.max(best, u * a[2] + v * b[2] + (1 - u - v) * c[2]);
+    }
+    return best;
+  };
+  const binned = (v, cell) => { const m = new Map(); for (const t of v.tris ?? []) { const P = t.map((k) => v[k].p);
+    const xs = P.map((p) => p[0]); const ys = P.map((p) => p[1]);
+    for (let i = Math.floor(Math.min(...xs) / cell); i <= Math.floor(Math.max(...xs) / cell); i++) for (let j = Math.floor(Math.min(...ys) / cell); j <= Math.floor(Math.max(...ys) / cell); j++) {
+      const k = `${i},${j}`; if (!m.has(k)) m.set(k, []); m.get(k).push(P); } } return m; };
+  for (const [outfit, [b, slots]] of Object.entries(OUTFITS)) {
+    console.log(`\nR2 F2 skin fraction: ${outfit} (${b})`);
+    cache[b] ??= loadGlb(`${OUT}/pirate_base_${b}.glb`);
+    const L = cache[b]; if (!L) { expect(`${outfit}: body GLB present`, false); continue; }
+    const { g, W } = L; const { gltf } = g;
+    const idx = (name) => gltf.nodes.findIndex((n) => n.mesh !== undefined && n.name === name);
+    const si = idx('shirt_linen');
+    expect(`${b}: shirt_linen is a skinned garment node (pirateDefault false)`, si >= 0 && gltf.nodes[si].skin !== undefined && gltf.nodes[si].extras?.pirateDefault === false);
+    const cell = 0.02;
+    const skin = binned(L.body, cell);
+    const cloth = slots.filter((s) => idx(s) >= 0).map((s) => binned(skinned(g, W, idx(s)), cell));
+    const cx = (L.joint('upperarm_l')[0] + L.joint('upperarm_r')[0]) / 2; const hx = 0.9 * Math.abs(L.joint('upperarm_l')[0] - cx);
+    const y0 = L.joint('pelvis')[1]; const y1 = L.joint('neck_01')[1];
+    let n = 0; let bare = 0;
+    for (let x = cx - hx; x <= cx + hx; x += 0.01) for (let y = y0; y <= y1; y += 0.01) {
+      const k = `${Math.floor(x / cell)},${Math.floor(y / cell)}`;
+      const zs = ray(skin.get(k) ?? [], x, y); const zc = Math.max(...cloth.map((m) => ray(m.get(k) ?? [], x, y)), -Infinity);
+      if (zs === -Infinity && zc === -Infinity) continue;
+      n += 1; if (zs > zc) bare += 1;
+    }
+    const f = n ? bare / n : 1;
+    expect(`${outfit}: front-torso skin fraction ${f.toFixed(3)} (${bare}/${n} rays) <= 0.10`, n > 500 && f <= 0.10);
+  }
 }
 
 console.log(`\n${checks} checks, ${failures} failed`);

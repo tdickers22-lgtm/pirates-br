@@ -307,6 +307,30 @@
       ],
       "tris": 2456
      },
+     "shirt_linen": {
+      "groups": [
+       "clavicle_l",
+       "clavicle_r",
+       "hand_l",
+       "hand_r",
+       "lowerarm_l",
+       "lowerarm_r",
+       "neck_01",
+       "pelvis",
+       "pinky_01_l",
+       "pinky_01_r",
+       "spine_01",
+       "spine_02",
+       "spine_03",
+       "thigh_l",
+       "thigh_r",
+       "thumb_01_l",
+       "thumb_01_r",
+       "upperarm_l",
+       "upperarm_r"
+      ],
+      "tris": 2932
+     },
      "vest_waistcoat": {
       "groups": [
        "clavicle_l",
@@ -639,6 +663,28 @@
       ],
       "tris": 2456
      },
+     "shirt_linen": {
+      "groups": [
+       "clavicle_l",
+       "clavicle_r",
+       "hand_l",
+       "hand_r",
+       "lowerarm_l",
+       "lowerarm_r",
+       "neck_01",
+       "pelvis",
+       "spine_01",
+       "spine_02",
+       "spine_03",
+       "thigh_l",
+       "thigh_r",
+       "thumb_01_l",
+       "thumb_01_r",
+       "upperarm_l",
+       "upperarm_r"
+      ],
+      "tris": 2552
+     },
      "vest_waistcoat": {
       "groups": [
        "clavicle_l",
@@ -969,6 +1015,28 @@
       ],
       "tris": 2456
      },
+     "shirt_linen": {
+      "groups": [
+       "clavicle_l",
+       "clavicle_r",
+       "hand_l",
+       "hand_r",
+       "lowerarm_l",
+       "lowerarm_r",
+       "neck_01",
+       "pelvis",
+       "spine_01",
+       "spine_02",
+       "spine_03",
+       "thigh_l",
+       "thigh_r",
+       "thumb_01_l",
+       "thumb_01_r",
+       "upperarm_l",
+       "upperarm_r"
+      ],
+      "tris": 2468
+     },
      "vest_waistcoat": {
       "groups": [
        "clavicle_l",
@@ -1104,6 +1172,10 @@
   "MI_wardrobe_leather": {
    "a": "assets-src/quaternius/out/T_wardrobe_leather_BaseColor.png",
    "normal": "assets-src/quaternius/out/T_wardrobe_leather_Normal.png"
+  },
+  "MI_wardrobe_linen": {
+   "a": "assets-src/quaternius/out/T_wardrobe_linen_BaseColor.png",
+   "normal": "assets-src/quaternius/out/T_wardrobe_linen_Normal.png"
   },
   "MI_wardrobe_scarf": {
    "a": "assets-src/quaternius/out/T_wardrobe_scarf_BaseColor.png",

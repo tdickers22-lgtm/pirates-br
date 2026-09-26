@@ -47,6 +47,7 @@ MATS = {  # class: (linear tint, roughness, metallic, crew mask)
     "canvas": ((0.36, 0.32, 0.25), 0.92, 0.0, False),       # slops, sailcloth duck, undyed
     "brocade": ((0.34, 0.20, 0.035), 0.75, 0.0, False),     # waistcoat, ochre damask
     "breeches": ((0.085, 0.058, 0.036), 0.88, 0.0, False),  # knee breeches, brown wool
+    "linen": ((0.50, 0.46, 0.38), 0.9, 0.0, False),        # R2 F2 shirt / chemise, undyed linen
 }
 
 
@@ -69,6 +70,8 @@ def _height(cls, n=512):
         return 0.5 * _noise(n, 0.12, 21) + 0.25 * np.sin(2 * math.pi * 64 * (x + y)) + 0.2 * _noise(n, 0.35, 22)
     if cls == "canvas":   # plain weave: warp x weft ridges + slub
         return 0.45 * np.sin(2 * math.pi * 72 * x) * np.sin(2 * math.pi * 72 * y) + 0.35 * _noise(n, 0.04, 23)
+    if cls == "linen":   # fine plain weave, softer and finer than the canvas duck, a little slub
+        return 0.3 * np.sin(2 * math.pi * 128 * x) * np.sin(2 * math.pi * 128 * y) + 0.25 * _noise(n, 0.03, 24) + 0.15 * _noise(n, 0.2, 25)
     if cls == "brocade":   # damask: a low motif (sin lattice) over a satin rib
         motif = np.cos(2 * math.pi * 6 * x) * np.cos(2 * math.pi * 6 * y) + 0.5 * np.cos(2 * math.pi * 12 * (x - y))
         return 0.6 * np.tanh(2 * motif) + 0.2 * np.sin(2 * math.pi * 96 * y)
@@ -96,12 +99,12 @@ def _textures(cls, out_dir):
     h = _height(cls)
     # R2 F8: at 1 m every cloth read as the same coarse stucco: cloth normal strength halved, felt near-smooth
     strength = {"felt": 0.45, "band": 0.8, "crew": 0.45, "scarf": 0.45, "leather": 1.6, "boot": 1.2, "gold": 0.5,
-                "wool": 0.5, "canvas": 0.55, "brocade": 0.5, "breeches": 0.5}.get(cls, 1.0)
+                "wool": 0.5, "canvas": 0.55, "brocade": 0.5, "breeches": 0.5, "linen": 0.4}.get(cls, 1.0)
     dx = (np.roll(h, -1, 1) - np.roll(h, 1, 1)) * 0.5 * strength
     dy = (np.roll(h, -1, 0) - np.roll(h, 1, 0)) * 0.5 * strength
     nrm = np.stack([-dx, dy, np.ones_like(h)], axis=2)
     nrm /= np.linalg.norm(nrm, axis=2, keepdims=True)
-    cloth = cls in ("crew", "scarf", "wool", "canvas", "brocade", "breeches")   # cotton: faint slub only (0.06 read as cork on the headscarf, set c)
+    cloth = cls in ("crew", "scarf", "wool", "canvas", "brocade", "breeches", "linen")   # cotton: faint slub only (0.06 read as cork on the headscarf, set c)
     alb = np.clip(0.82 + (0.02 if cloth else 0.06) * _noise(h.shape[0], 0.05, 11) + (0.01 if cloth else 0.03) * h, 0.6, 1.0)
     a = _save(os.path.join(out_dir, f"T_wardrobe_{cls}_BaseColor.png"), np.repeat(alb[:, :, None], 3, axis=2), False)
     nm = _save(os.path.join(out_dir, f"T_wardrobe_{cls}_Normal.png"), nrm * 0.5 + 0.5, True)

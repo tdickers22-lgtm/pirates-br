@@ -43,7 +43,7 @@ UP = Vector((0, 0, 1))
 HAND = ("hand", "thumb", "index", "middle", "ring", "pinky")
 NON_DEFORM = ("eye_", "lid_")
 CUR_BODY = []   # the Body being dressed (solidify reads its skin to thin the lining where the shell is tight)
-SLOTS = ("coat_frock", "coat_jacket", "vest_waistcoat", "sash", "belt", "breeches_knee", "breeches_slops",
+SLOTS = ("shirt_linen", "coat_frock", "coat_jacket", "vest_waistcoat", "sash", "belt", "breeches_knee", "breeches_slops",
          "boots_tall", "boots_shoes")
 
 
@@ -1266,11 +1266,58 @@ def boots(B, kind, out_dir):
     return finish(o, B, "feet")
 
 
+def shirt_linen(B, out_dir):
+    """R2 F2: the linen shirt every outfit wears first (no bare chest, no kit bra through the waistcoat V). Trunk +
+    full sleeves (the cuff shows ~2 cm past the coat's 0.93 sleeve end), tucked: the hem sits under the breeches'
+    waistband (breeches start at waist + 1 cm, 9-12 mm out; the shirt is 6 mm out), shallow open placket at the neck.
+    Laid inside every other layer (coat 24/13 mm, jacket 19/12, waistcoat 13 mm)."""
+    hem = B.hip - 0.02
+    zv = B.neck - 0.085
+
+    def keep(i):
+        p = B.P[i]
+        if B.w(i, *HAND) > 0.2 or B.w(i, "neck", "head") > 0.35 or p.z < hem - 0.015:
+            return False
+        if B.w(i, "upperarm", "lowerarm") > 0.3:
+            return B.frac(p, B.side(p)) < 0.98
+        if p.z > B.neck + 0.005:
+            return False
+        return not (p.y < B.cy and p.z > zv and abs(p.x - B.cx) < 0.035 * (p.z - zv) / max(0.03, B.neck - zv))
+
+    def off(i):
+        a = min(1.0, 1.5 * B.w(i, "upperarm", "lowerarm"))
+        return 0.0075 * a + 0.006 * (1 - a)
+    bm, src = shell(B, keep, off, smooth=4)
+    bnd = [v for v in bm.verts if v.is_boundary]
+    wrist = [v for v in bnd if B.w(v[src], "upperarm", "lowerarm") > 0.3 and B.frac(v.co, B.side(v.co)) > 0.7]
+    for v in wrist:
+        s = B.side(v.co)
+        e, h = B.forearm(s)
+        v.co -= (h - e) * (B.frac(v.co, s) - 0.98)
+    for v in bnd:
+        if v not in wrist and v.co.z < B.waist:
+            v.co.z = hem
+    fair_rims(B, bm, src, off)
+    orient(B, bm)
+    o = to_obj("shirt_linen", bm, ["linen", "linen"], out_dir)
+    decimate(o, 0.42)
+    solidify(o, 0.0015)
+    bridge_folds(o, B, ["spine_02", "spine_03", "upperarm_l", "upperarm_r", "lowerarm_l", "lowerarm_r"])
+    refair_outer(o, B, max_corners=2, open_corners=0)
+    if bridge_folds(o, B, ["spine_02", "spine_03", "upperarm_l", "upperarm_r"], passes=4):   # as upper(): the re-fair can uncover a fold
+        refair_outer(o, B, max_corners=2, open_corners=0, passes=80)
+    # the stout's shoulder fold: one decimated face chord under the skin seen from the bone (gate 1/1115 probes)
+    o["heldOut"] = hold_out_radial(o, B, bones=("spine_02", "spine_03", "upperarm_l", "upperarm_r", "lowerarm_l",
+                                                "lowerarm_r"), outer=0.003, lining=0.0015)
+    transfer_weights(o, B)
+    return finish(o, B, "shirt")
+
+
 def dress(arm, meshes, body_id, out_dir, report):
     body = next(m for m in meshes if m.name == "body")
     B = Body(arm, body)
     CUR_BODY[:] = [B]
-    new = [coat_frock(B, out_dir), coat_jacket(B, out_dir), vest_waistcoat(B, out_dir), sash(B, out_dir),
+    new = [shirt_linen(B, out_dir), coat_frock(B, out_dir), coat_jacket(B, out_dir), vest_waistcoat(B, out_dir), sash(B, out_dir),
            belt(B, out_dir), breeches(B, "knee", out_dir), breeches(B, "slops", out_dir),
            boots(B, "tall", out_dir), boots(B, "shoes", out_dir)]
     report.setdefault(body_id, {})["wardrobeII"] = {
@@ -1282,10 +1329,10 @@ def dress(arm, meshes, body_id, out_dir, report):
 
 # ── review: posed weight QA (Workbench) and the R2 sheets (Cycles) in a fresh scene ─────────────
 OUTFITS = {   # name: (body, nodes)
-    "captain": ("male", ["hat_tricorn", "coat_frock", "vest_waistcoat", "sash", "breeches_knee", "boots_tall", "acc_earring"]),
-    "deckhand": ("stout", ["hat_bandana", "coat_jacket", "belt", "breeches_slops", "boots_shoes"]),
-    "bosun": ("female", ["hat_bicorn", "vest_waistcoat", "sash", "belt", "breeches_knee", "boots_tall"]),
-    "gunner": ("male", ["hat_headscarf", "vest_waistcoat", "belt", "breeches_slops", "boots_shoes", "acc_eyepatch"]),
+    "captain": ("male", ["hat_tricorn", "shirt_linen", "coat_frock", "vest_waistcoat", "sash", "breeches_knee", "boots_tall", "acc_earring"]),
+    "deckhand": ("stout", ["hat_bandana", "shirt_linen", "coat_jacket", "belt", "breeches_slops", "boots_shoes"]),
+    "bosun": ("female", ["hat_bicorn", "shirt_linen", "vest_waistcoat", "sash", "belt", "breeches_knee", "boots_tall"]),
+    "gunner": ("male", ["hat_headscarf", "shirt_linen", "vest_waistcoat", "belt", "breeches_slops", "boots_shoes", "acc_eyepatch"]),
 }
 POSES = [("idle", 10), ("crouch_idle", 10), ("aim_pistol_up", 10), ("helm", 10), ("walk", 5), ("cutlass_heavy", 12)]
 
