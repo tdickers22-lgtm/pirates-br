@@ -34,7 +34,7 @@ let failures = 0;
 function check(name, ok, detail = '') {
   checks++;
   if (!ok) failures++;
-  console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? `  (${detail})` : ''}`);
+  console.log(`  ${ok ? '✓' : '✗ FAIL:'} ${name}${detail ? `  (${detail})` : ''}`);
 }
 
 // seeded rng (mulberry32) so the 1,000 crews are the same every run
