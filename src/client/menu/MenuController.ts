@@ -918,6 +918,17 @@ export class MenuController {
       scaleVal.textContent = `${scale.value}%`;
       save({ hudTextScale: Number(scale.value) / 100 });
     });
+    // Captions (b3.5e, crossdevice-16): CueCaptions reads activeA11ySettings().captions on every cue.
+    const captions = document.createElement('select');
+    captions.id = 'settings-captions';
+    captions.setAttribute('aria-label', 'Captions');
+    for (const [value, text] of [['off', 'Off'], ['key', 'Key sounds'], ['all', 'All sounds']] as const) {
+      const o = document.createElement('option');
+      o.value = value; o.textContent = text;
+      captions.append(o);
+    }
+    captions.value = current.captions;
+    captions.addEventListener('change', () => save({ captions: captions.value as A11ySettings['captions'] }));
     const scaleWrap = document.createElement('span');
     scaleWrap.style.cssText = 'display:flex;flex:1;align-items:center;gap:6px;';
     scaleWrap.append(scale, scaleVal);
@@ -925,6 +936,7 @@ export class MenuController {
       row('Colour-Blind Mode', 'Recolour crew colours on the HUD for your colour vision. Every crew dye is already chosen to stay distinct for all three types.', vision),
       row('Reduce Flashing', 'Blinking and pulsing HUD warnings play once instead of looping.', flashing),
       row('HUD Text Size', 'Scale the in-match HUD.', scaleWrap),
+      row('Captions', 'Show a line with a direction arrow for game sounds: water rushing in, cannon fire, footsteps behind you, the bell, the storm closing.', captions),
     );
   }
 

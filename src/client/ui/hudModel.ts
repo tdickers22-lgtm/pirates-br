@@ -483,11 +483,13 @@ export interface A11ySettings {
   reducedFlashing: boolean;
   /** HUD text multiplier, HUD_TEXT_SCALE_MIN..MAX. */
   hudTextScale: number;
+  /** Closed captions for curated audio cues (b3.5e, CueCaptions.ts): off, key cues only, or all. */
+  captions: 'off' | 'key' | 'all';
 }
 
 export const HUD_TEXT_SCALE_MIN = 0.85;
 export const HUD_TEXT_SCALE_MAX = 1.5;
-export const A11Y_DEFAULTS: A11ySettings = { colorVision: 'normal', reducedFlashing: false, hudTextScale: 1 };
+export const A11Y_DEFAULTS: A11ySettings = { colorVision: 'normal', reducedFlashing: false, hudTextScale: 1, captions: 'off' };
 const VISION_IDS: readonly VisionMode[] = ['normal', 'deut', 'prot', 'trit'];
 
 export function parseA11ySettings(raw: string | null): A11ySettings {
@@ -502,6 +504,7 @@ export function parseA11ySettings(raw: string | null): A11ySettings {
     colorVision,
     reducedFlashing: rec.reducedFlashing === true,
     hudTextScale: Math.min(HUD_TEXT_SCALE_MAX, Math.max(HUD_TEXT_SCALE_MIN, scale)),
+    captions: rec.captions === 'key' || rec.captions === 'all' ? rec.captions : 'off',
   };
 }
 

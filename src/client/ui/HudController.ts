@@ -4,6 +4,7 @@
  * through a narrow `HudView` handed in by Game; it never touches the scene.
  */
 import { braceCatch, idealBrace } from '../../shared/sailing.js';
+import { mountCueCaptions } from './CueCaptions';
 import { breathPlan, hudMessagePlan, hudVisibility, crosshairMode, shipCardNear, floodCard, bilgeGaugeHidden, BILGE_GAUGE_PREF_KEY, TIER_SEVERITY, hudCrewColor, activeA11ySettings, type HudMessagePlan, type HudPlayerState, type HudElementId } from './hudModel';
 import * as THREE from 'three';
 import { BOT_EARLY_PEACE_SECONDS, ECONOMY, FIRST_SAIL_ASSIST, KILL_STREAK_LADDER, PLAYER, RESPAWN_HOLD_MAX_SECONDS, SHIP, STORM_ARC_SECONDS, STORM_PHASES, WEAPONS } from '../../shared/constants/index.js';
@@ -361,6 +362,7 @@ export class HudController {
   constructor(private readonly view: HudView) {
     this.watchFooterHeight();
     this.mountBilgeGaugeSetting();
+    mountCueCaptions();
   }
 
   /** Settings > "Show bilge gauge" (b2.2h, PLAN D15: the gauge stays, secondary,

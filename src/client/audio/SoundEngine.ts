@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import type { Vec3 } from '../../shared/types/index.js';
 import { finiteClamp } from '../../shared/utils/index.js';
+import { cueCaptions, emitCaption, type CaptionCueId } from '../ui/CueCaptions.js';
+import { activeA11ySettings } from '../ui/hudModel.js';
 import { AudioLifecycle, audioParamStats, finiteDistance, finitePos, safeSet } from './audioLifecycle.js';
 import { AUDIO_BUSES, buildAudioCore, combatDuckGains, type AudioBusName, type AudioCoreNodes } from './AudioCore.js';
 import { DECODED_CAP_BYTES, SampleBank, decodeAudioDataCompat } from './SampleBank.js';
@@ -1036,6 +1038,7 @@ export class SoundEngine {
       this.listenerFwd3.set(forward.x, forward.y, forward.z);
     }
     this.listenerKnown = true;
+    cueCaptions.setListener(this.listenerPos, this.listenerFwd.x, this.listenerFwd.z);
     // b2.4c: world PannerNodes hear from here, every frame (Game calls setListenerFromCamera).
     applyListener(this.ctx?.listener, this.listenerPos, this.listenerFwd3);
   }
@@ -1201,6 +1204,7 @@ export class SoundEngine {
 
   /** Three-hit hammering burst for a full repair action. */
   playRepairSequence(): void {
+    this.cue('hammering');
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     const offsets = [0, 0.24, 0.46];
@@ -1211,6 +1215,7 @@ export class SoundEngine {
   // ── Digging ──────────────────────────────────────────────────────
   /** Each strike is a metallic ping into a soft dirt thud — fire on every animation strike. */
   playDigStrike(): void {
+    this.cue('digging');
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     // Shovel scrape
@@ -1247,6 +1252,7 @@ export class SoundEngine {
   /** Felled palm hitting the ground — soft heavy earth thud + frond rustle.
    *  @param distance metres from the listener; rolls off like other spatials. */
   playTreeFallThud(distance = 0, pos?: SoundPos): void {
+    this.cue('tree_falling', pos, distance);
     if (!this.ctx || !this.busDry) return;
     if (distance > 110) return;
     const now = this.ctx.currentTime;
@@ -1264,6 +1270,7 @@ export class SoundEngine {
   /** Windup growl — low sawtooth slide under a noise rumble (the dodge cue).
    *  @param distance metres from the listener; rolls off like other spatials. */
   playSharkGrowl(distance = 0, pos?: SoundPos): void {
+    this.cue('shark', pos, distance);
     if (!this.ctx || !this.busDry) return;
     if (distance > 90) return;
     const now = this.ctx.currentTime;
@@ -1275,6 +1282,7 @@ export class SoundEngine {
 
   /** Lunge bite — sharp noise snap over two low body tones. */
   playSharkChomp(distance = 0, pos?: SoundPos): void {
+    this.cue('shark_bite', pos, distance);
     if (!this.ctx || !this.busDry) return;
     if (distance > 90) return;
     const now = this.ctx.currentTime;
@@ -1306,6 +1314,7 @@ export class SoundEngine {
 
   // ── Treasure chests ──────────────────────────────────────────────
   playChestPickup(): void {
+    this.cue('chest_lifted');
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     // b2.4f: coins shifting inside as it is heaved up, over a procedural heave-grunt.
@@ -1344,6 +1353,7 @@ export class SoundEngine {
   }
 
   playChestOpen(): void {
+    this.cue('chest_opened');
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     // b2.4f: recorded latch, lid creak and the coins inside; a short procedural reveal chime
@@ -1377,6 +1387,7 @@ export class SoundEngine {
    * squeaks — a continuous slide sounds like a synth portamento, not a hinge.
    */
   playDoorCreak(opening: boolean): void {
+    this.cue('door_creak');
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     // b2.4f: recorded door open / close; the squeak train is the fallback.
@@ -1462,6 +1473,7 @@ export class SoundEngine {
 
   /** Heavier stinger when you actually killed someone. */
   playKill(): void {
+    this.cue('pirate_down');
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     // Bell-toll body + descending growl + impact noise
@@ -1553,6 +1565,7 @@ export class SoundEngine {
    * @param distance metres from the listener (0 = your own weapon).
    */
   playGunshot(kind: GunshotKind = 'flintlock', distance = 0, pos?: SoundPos): void {
+    this.cue('gunshot', pos, distance);
     this.noteCombatDistance(distance);
     if (!this.ctx || !this.busDry) return;
     if (!this.throttle('gunshot')) return;
@@ -1619,6 +1632,7 @@ export class SoundEngine {
    *   over 120-220 m while the low distant thump fades in (b2.4c, audio-10: no 140 m switch).
    */
   playCannonFire(distance = 0, pos?: SoundPos): void {
+    this.cue('cannon_fire', pos, distance);
     this.noteCombatDistance(distance);
     const ctx = this.ctx;
     if (!ctx || !this.busDry) return;
@@ -1750,6 +1764,7 @@ export class SoundEngine {
 
   /** Respawn / revive beacon shimmer at a world position. */
   playRespawnBeacon(distance = 0, pos?: SoundPos): void {
+    this.cue('respawn_beacon', pos, distance);
     if (!this.ctx || !this.busDry) return;
     if (distance > 220) return;
     const now = this.ctx.currentTime;
@@ -1790,6 +1805,7 @@ export class SoundEngine {
    * @param distance metres from the listener (0 = local).
    */
   playSplash(intensity: number, distance = 0, pos?: SoundPos): void {
+    this.cue('splash', pos, distance);
     if (!this.ctx || !this.busDry) return;
     if (!this.throttle('splash')) return;
     const now = this.ctx.currentTime;
@@ -1817,6 +1833,7 @@ export class SoundEngine {
   // passes the station's world point: anchor/capstan at the bow, wheel at the helm, sail rope at
   // the sail station, load/ram at the gun). No pos = centred on the listener, as before.
   playAnchorChange(dropped: boolean, pos?: SoundPos, distance = 0): void {
+    this.cue(dropped ? 'anchor_dropped' : 'anchor_raised', pos, distance);
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.22, 'foley');
@@ -1923,6 +1940,7 @@ export class SoundEngine {
 
   /** Cannon load + ram (b2.4e): the ball clinks into the bore, the rammer seats it twice. */
   playCannonLoad(pos?: SoundPos, distance = 0): void {
+    this.cue('cannon_loaded', pos, distance);
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.2, 'foley');
@@ -2009,6 +2027,7 @@ export class SoundEngine {
    * @param distance metres from the listener (0 = your own feet)
    */
   playFootstep(surface: FootstepSurface, running = false, distance = 0, pos?: SoundPos): void {
+    this.cue('footsteps', pos, distance);
     if (!this.ctx || !this.busDry) return;
     if (distance > 30) return;
     if (!this.throttle('footstep')) return;
@@ -2103,6 +2122,7 @@ export class SoundEngine {
 
   /** Deep ship's horn — the "match is live" call, under/before the fanfare. */
   playMatchStartHorn(): void {
+    this.cue('match_horn');
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
     const ctx = this.ctx;
@@ -2674,6 +2694,7 @@ export class SoundEngine {
    * @param speed ball speed (m/s), muzzle speed by default.
    */
   playCannonballWhistle(distance = 0, pos?: SoundPos, delaySeconds = 0, speed = CANNON_MUZZLE_SPEED): void {
+    this.cue('cannonball_incoming', pos, distance);
     this.noteCombatDistance(distance);
     const ctx = this.ctx;
     const noise = this.noise;
@@ -2735,6 +2756,7 @@ export class SoundEngine {
 
   /** Cannonball smashing a hull — deep thud under a burst of wood splinters. */
   playHullImpact(distance = 0, pos?: SoundPos): void {
+    this.cue('hull_struck', pos, distance);
     this.noteCombatDistance(distance);
     if (!this.ctx || !this.busDry) return;
     if (!this.throttle('hullImpact')) return;
@@ -2770,6 +2792,7 @@ export class SoundEngine {
    * @param distance metres from the listener (0 = your own ship)
    */
   playShipImpact(kind: 'ram' | 'ground' | 'rock', speed: number, distance = 0, pos?: SoundPos): void {
+    this.cue(kind === 'ram' ? 'ships_collide' : 'hull_grounding', pos, distance);
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
     const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.28, 'impact');
@@ -2847,6 +2870,7 @@ export class SoundEngine {
 
   /** Rotating whoosh of chainshot spinning on its chain — deliberate pitch wobble. */
   playChainshotWhirr(distance = 0, pos?: SoundPos): void {
+    this.cue('chainshot', pos, distance);
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
     const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.22);
@@ -2862,6 +2886,7 @@ export class SoundEngine {
 
   /** Canvas tearing when chainshot rips a sail. */
   playSailRip(distance = 0, pos?: SoundPos): void {
+    this.cue('sail_torn', pos, distance);
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
     const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.24);
@@ -2881,6 +2906,7 @@ export class SoundEngine {
 
   /** Powder-keg fuse hiss. Call once when the fuse lights, passing its burn time. */
   playKegFuse(duration = 1.6, distance = 0, pos?: SoundPos): void {
+    this.cue('keg_fuse', pos, distance);
     if (!this.ctx || !this.busDry) return;
     if (distance > 40) return;
     const now = this.ctx.currentTime;
@@ -2897,6 +2923,7 @@ export class SoundEngine {
 
   /** Powder-keg detonation — sub drop, blast body, debris patter, and a rolling tail. */
   playKegExplosion(distance = 0, pos?: SoundPos): void {
+    this.cue('explosion', pos, distance);
     this.noteCombatDistance(distance);
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
@@ -2928,6 +2955,7 @@ export class SoundEngine {
   // ── Burning-ship fire crackle (looped, max 2 concurrent) ─────────
   /** Start a fire crackle loop keyed by ship id. Past two fires the oldest is stolen. */
   startFire(id: string, distance = 0): void {
+    this.cue('fire', null, distance);
     const ctx = this.ctx;
     const bed = this.busBed;
     if (!ctx || !bed || !this.noise) return;
@@ -3012,6 +3040,55 @@ export class SoundEngine {
     this.setLayer('waterfall', 'bed.waterfall', lv, { type: 'lowpass', freq: 900 + 5200 * near, q: 0.5, procGain: 0.115, sampleGain: 0.5 }, 0.6);
   }
 
+  // ── Captions (b3.5e, crossdevice-16) ───────────────────────────
+  /** Caption a curated cue (CueCaptions.ts). Runs BEFORE any "no AudioContext" return, so a muted
+   *  phone that never unlocked audio still reads what it cannot hear. Never throws into the caller. */
+  private cue(id: CaptionCueId, pos?: SoundPos | null, distance?: number): void {
+    try {
+      emitCaption(id, pos && finitePos(pos) ? pos : null, typeof distance === 'number' && Number.isFinite(distance) ? distance : undefined);
+    } catch { /* captions are cosmetic */ }
+  }
+
+  /** shipId -> holeId -> the flood frame it was last seen in (a hole absent from a frame is closed). */
+  private readonly captionHoles = new Map<string, Map<number, number>>();
+  private captionFloodFrame = 0;
+
+  /** "Water rushing in": caption each NEW open breach on the hull underfoot or within 60 m. */
+  private captionBreaches(frame: FloodAudioFrame): void {
+    // Captions off (the default): zero work, the flood frame is not walked twice.
+    if (!frame || !finitePos(frame.listener) || activeA11ySettings().captions === 'off') {
+      if (this.captionHoles.size) this.captionHoles.clear();
+      return;
+    }
+    try {
+      const f = ++this.captionFloodFrame;
+      const L = frame.listener;
+      for (const ship of frame.ships) {
+        if (!ship || typeof ship.id !== 'string' || ship.alive === false) continue;
+        const own = ship.id === frame.aboardShipId;
+        if (!own && !(Math.hypot(ship.position.x - L.x, ship.position.z - L.z) <= 60)) continue;
+        let holes = this.captionHoles.get(ship.id);
+        const first = !holes;
+        if (!holes) { holes = new Map(); this.captionHoles.set(ship.id, holes); }
+        for (const e of frame.emitters(ship.id) ?? []) {
+          if (!(e.strength > 0)) continue;
+          // A hull first heard already holed (joined late, sailed into range) is not a NEW breach.
+          if (!holes.has(e.holeId) && !first) this.cue('water_rushing', e.worldPos, own ? undefined : Math.hypot(e.worldPos.x - L.x, e.worldPos.z - L.z));
+          holes.set(e.holeId, f);
+        }
+      }
+      for (const [id, holes] of this.captionHoles) {
+        for (const [hole, seen] of holes) if (seen !== f) holes.delete(hole);
+        if (holes.size === 0 && !this.captionHoleShipSeen(frame, id)) this.captionHoles.delete(id);
+      }
+    } catch { /* captions are cosmetic */ }
+  }
+
+  private captionHoleShipSeen(frame: FloodAudioFrame, id: string): boolean {
+    for (const ship of frame.ships) if (ship && ship.id === id) return true;
+    return false;
+  }
+
   // ── Flooding (b2.4d, audio-02) ──────────────────────────────────
   /**
    * Drive the SoT-style flooding sound once per frame: a positioned gush loop on each breach
@@ -3019,6 +3096,7 @@ export class SoundEngine {
    * founder one-shots. Replaces the single centred startFlooding/updateFlooding noise loop.
    */
   updateFlood(frame: FloodAudioFrame): void {
+    this.captionBreaches(frame);
     if (!this.ctx || !frame || !finitePos(frame.listener)) return;
     try {
       if (!this.floodAudio) this.floodAudio = new FloodAudio(this.floodHost());
@@ -3032,6 +3110,7 @@ export class SoundEngine {
 
   /** Bucket scoop (dip) and fling (water over the rail), sampled with the procedural fallback. */
   playBucket(kind: 'scoop' | 'fling', pos?: SoundPos | null): void {
+    if (kind === 'fling') this.cue('bailing', pos);
     if (!this.ctx) return;
     if (!this.floodAudio) this.floodAudio = new FloodAudio(this.floodHost());
     this.floodAudio.bucket(kind === 'scoop' ? 'scoop' : 'fling', finitePos(pos) ? (pos as FloodVec) : null);
@@ -3558,6 +3637,7 @@ export class SoundEngine {
    * voice is two or three oscillator/noise nodes that free themselves.
    */
   playAnimalVoice(type: 'pig' | 'chicken' | 'crab' | 'gull', pos: SoundPos, alerted = false): void {
+    this.cue('animal', pos);
     const ctx = this.ctx;
     if (!ctx || !this.busDry) return;
     const now = ctx.currentTime;
@@ -3657,6 +3737,7 @@ export class SoundEngine {
    *  nominal), a bright strike transient, and a very long decay. Distance rolls
    *  the top off and pushes the tolls further apart. */
   playWreckBell(distance = 400): void {
+    this.cue('ship_bell', null, distance);
     if (!this.ctx || !this.busDry) return;
     const ctx = this.ctx;
     const now = ctx.currentTime;
@@ -3795,6 +3876,7 @@ export class SoundEngine {
 
   /** One thunder crack + rolling rumble. distance in metres varies delay, brightness, and length. */
   playThunder(distance = 300): void {
+    this.cue('thunder', null, distance);
     // (delay/brightness live in thunderArrivalDelay + THUNDER_MAX_DISTANCE_M
     //  below, so scripts/test-storm-visuals.mjs can grade them with no ctx.)
     if (!this.ctx || !this.busDry) return;
@@ -3832,6 +3914,7 @@ export class SoundEngine {
   // ── Stingers ─────────────────────────────────────────────────────
   /** Ominous rising swell for a storm-zone shrink warning. < 2.5s. */
   playStormShrink(): void {
+    this.cue('storm_closing');
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
     this.playTone(now, 55, 110, 1.6, 0.3, 'sawtooth', 0.4);
@@ -3983,6 +4066,7 @@ export class SoundEngine {
    * (`bounty_raised`, `wreck_event`) and Game.ts fires this from each.
    */
   playEventSting(kind: 'bounty' | 'wreck' = 'bounty'): void {
+    this.cue(kind === 'wreck' ? 'wreck_rising' : 'bounty_posted');
     const ctx = this.ctx;
     if (!ctx || !this.busDry) return;
     const now = ctx.currentTime;
