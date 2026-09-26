@@ -502,17 +502,41 @@ function makePrimitiveWeaponMesh(weaponId: WeaponInstance['weaponId']): THREE.Gr
 
 export type PocketPreviewKind = 'banana' | 'wood' | 'coconut' | 'mango' | 'meat' | 'powder_keg' | 'shovel' | 'chest' | 'bucket' | 'compass' | 'spyglass' | 'lantern' | 'axe';
 
-/** Pocket kinds that come out of build_tools.py (b2.3h), same frame as the primitive. */
-const TOOL_GLB_FOR: Partial<Record<PocketPreviewKind, ToolGlbName>> = { bucket: 'tool_bucket', wood: 'tool_planks' };
+/**
+ * Pocket kinds that come out of build_tools.py (b2.3h flood tools, b3.4g kit),
+ * each in the same frame as its primitive below, which stays only as the
+ * queue-window fallback (userData.toolGlbPending until the file lands). A
+ * `[file, node]` pair keeps one part of a multi-part file (tool_food).
+ */
+const TOOL_GLB_FOR: Partial<Record<PocketPreviewKind, ToolGlbName | readonly [ToolGlbName, string]>> = {
+  bucket: 'tool_bucket', wood: 'tool_planks',
+  spyglass: 'tool_spyglass', compass: 'tool_compass', lantern: 'tool_lantern', shovel: 'tool_shovel', axe: 'tool_axe',
+  banana: ['tool_food', 'food-banana'], coconut: ['tool_food', 'food-coconut'], mango: ['tool_food', 'food-mango'], meat: ['tool_food', 'food-meat'],
+  powder_keg: 'tool_keg', chest: 'tool_chest',
+};
+
+/** Kinds whose primitive carries the pirate's hands, a fuse spark or a glow light (userData.pocketKeep / lights); the GLB replaces only the object. */
+const POCKET_WITH_HANDS: ReadonlySet<PocketPreviewKind> = new Set<PocketPreviewKind>(['powder_keg', 'chest']);
 
 export function makePocketPreviewMesh(kind: PocketPreviewKind, lod: 0 | 1 | 2 = 0): THREE.Group {
-  const toolGlb = TOOL_GLB_FOR[kind];
-  if (toolGlb) {
-    const glb = cloneToolGlb(toolGlb, lod);
-    if (glb) return glb;
+  const entry = TOOL_GLB_FOR[kind];
+  const toolGlb = entry === undefined ? undefined : typeof entry === 'string' ? entry : entry[0];
+  const glb = entry === undefined ? null : typeof entry === 'string' ? cloneToolGlb(entry, lod) : cloneToolGlb(entry[0], lod, entry[1]);
+  if (glb && !POCKET_WITH_HANDS.has(kind)) return glb;
+  const group = buildPocketPrimitive(kind);
+  if (glb) {
+    // keep the hands/sleeves, swap the primitive object for the GLB
+    for (const c of [...group.children]) if (!c.userData.pocketKeep && !(c as THREE.Light).isLight) group.remove(c);
+    group.add(glb);
+    group.userData.toolGlb = toolGlb;
+    return group;
   }
-  const group = new THREE.Group();
   if (toolGlb) group.userData.toolGlbPending = toolGlb;
+  return group;
+}
+
+function buildPocketPrimitive(kind: PocketPreviewKind): THREE.Group {
+  const group = new THREE.Group();
   const yellow = new THREE.MeshStandardMaterial({ color: 0xf0c040, roughness: 0.42 });
   const husk = new THREE.MeshStandardMaterial({ color: 0x4a3320, roughness: 0.88 });
   const woodMat = new THREE.MeshStandardMaterial({ color: 0x7a4e28, roughness: 0.9 });
@@ -560,6 +584,7 @@ export function makePocketPreviewMesh(kind: PocketPreviewKind, lod: 0 | 1 | 2 = 
       new THREE.MeshBasicMaterial({ color: 0xffa23a }),
     );
     spark.position.set(0.078, 0.275, 0.02);
+    spark.userData.pocketKeep = true;
     group.add(spark);
 
     const sparkLight = new THREE.PointLight(0xff8a2a, 0.75, 0.7);
@@ -571,11 +596,13 @@ export function makePocketPreviewMesh(kind: PocketPreviewKind, lod: 0 | 1 | 2 = 
       const hand = new THREE.Mesh(new THREE.SphereGeometry(0.036, 8, 7), skinMat);
       hand.position.set(side * 0.13, -0.035, 0.052);
       hand.scale.set(1.25, 0.82, 0.9);
+      hand.userData.pocketKeep = true;
       group.add(hand);
 
       const sleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.032, 0.18, 8), husk);
       sleeve.position.set(side * 0.18, -0.14, 0.09);
       sleeve.rotation.z = side * 0.42;
+      sleeve.userData.pocketKeep = true;
       group.add(sleeve);
     }
   } else if (kind === 'banana') {
@@ -694,6 +721,7 @@ export function makePocketPreviewMesh(kind: PocketPreviewKind, lod: 0 | 1 | 2 = 
       const hand = new THREE.Mesh(new THREE.SphereGeometry(0.05, 10, 8), skinMat);
       hand.position.set(side * 0.22, -0.18, 0.18);
       hand.scale.set(1.1, 0.85, 1.0);
+      hand.userData.pocketKeep = true;
       group.add(hand);
     }
   } else if (kind === 'bucket') {

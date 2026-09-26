@@ -87,7 +87,10 @@ export function hudAnchorLocal(
  * .sharedGeometry: never dispose it); materials are copied per clone because
  * applyViewmodelMaterialSettings turns depthTest off on what it is handed.
  */
-export type ToolGlbName = 'tool_bucket' | 'tool_planks' | 'tool_hammer';
+export type ToolGlbName = 'tool_bucket' | 'tool_planks' | 'tool_hammer'
+  // b3.4g: the rest of the held kit, same frames as makePocketPreviewMesh's primitives
+  | 'tool_spyglass' | 'tool_compass' | 'tool_lantern' | 'tool_shovel' | 'tool_axe'
+  | 'tool_food' | 'tool_keg' | 'tool_chest';
 const toolScenes = new Map<ToolGlbName, THREE.Group>();
 const toolLoading = new Set<ToolGlbName>();
 let toolLoader: GLTFLoader | null = null;
@@ -110,8 +113,26 @@ export function registerToolGlb(name: ToolGlbName, scene: THREE.Group): void {
   toolScenes.set(name, scene);
 }
 
-/** A clone of one LOD of the tool, or null while the file is in flight. */
-export function cloneToolGlb(name: ToolGlbName, lod: 0 | 1 | 2 = 0): THREE.Group | null {
+/** Kept (unbaked) nodes get the look the primitive had; everything else is the atlas. */
+const KEPT_TOOL_MATERIAL: Record<string, () => THREE.Material> = {
+  'bucket-water': () => new THREE.MeshStandardMaterial({
+    color: 0x2f7a8c, roughness: 0.12, metalness: 0.05, transparent: true, opacity: 0.86,
+  }),
+  'compass-glass': () => new THREE.MeshStandardMaterial({
+    color: 0xbfe0ff, roughness: 0.1, metalness: 0.1, transparent: true, opacity: 0.3, depthWrite: false,
+  }),
+  'lantern-glass': () => new THREE.MeshStandardMaterial({
+    color: 0xffd27a, roughness: 0.15, transparent: true, opacity: 0.5, emissive: 0xff9a2e, emissiveIntensity: 1.8, depthWrite: false,
+  }),
+  'lantern-flame': () => new THREE.MeshBasicMaterial({ color: 0xffcf6a }),
+};
+
+/**
+ * A clone of one LOD of the tool, or null while the file is in flight.
+ * `only` keeps a single top-level part of a multi-part file (tool_food holds
+ * food-banana / food-coconut / food-mango / food-meat, each on the origin).
+ */
+export function cloneToolGlb(name: ToolGlbName, lod: 0 | 1 | 2 = 0, only?: string): THREE.Group | null {
   const src = toolScenes.get(name);
   if (!src) { requestToolGlb(name); return null; }
   const root = src.clone(true);
@@ -122,11 +143,12 @@ export function cloneToolGlb(name: ToolGlbName, lod: 0 | 1 | 2 = 0): THREE.Group
     if (!(o as THREE.Mesh).isMesh) return;
     if (level !== lod) { drop.push(o); return; }
     if (m) o.name = o.name.slice(0, -m[0].length);
+    if (only && o.name !== only) { drop.push(o); return; }
     const mesh = o as THREE.Mesh;
-    if (o.name === 'bucket-water') {
-      mesh.material = new THREE.MeshStandardMaterial({
-        color: 0x2f7a8c, roughness: 0.12, metalness: 0.05, transparent: true, opacity: 0.86,
-      });
+    const kept = KEPT_TOOL_MATERIAL[o.name];
+    if (kept) {
+      mesh.material = kept();
+      if (o.name !== 'bucket-water') { mesh.castShadow = false; return; }
     } else {
       mesh.material = Array.isArray(mesh.material) ? mesh.material.map((x) => x.clone()) : mesh.material.clone();
     }

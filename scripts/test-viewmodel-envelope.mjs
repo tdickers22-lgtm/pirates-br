@@ -133,6 +133,43 @@ for (const [weaponId, file] of Object.entries(HERO)) {
     Math.abs(box.min.z - primitiveWeaponBox('flintlock').min.z) < 1e-9);
 }
 
+// b3.4g: the held kit (build_tools.py) is NOT refitted: each tool GLB is built
+// in its primitive's frame and cloned as-is, so the envelope is graded raw. A
+// tool may not reach more than TOOL_SLACK past any face of the primitive it
+// replaces (the near plane, the hands and the carry poses were tuned on those),
+// and its longest side stays within 0.75-1.3x the primitive's.
+const { makePocketPreviewMesh } = await import('../src/client/rendering/factories/WeaponMeshFactory.ts');
+const TOOL_SLACK = 0.04;
+const TOOLS = {
+  spyglass: ['tool_spyglass.glb'], compass: ['tool_compass.glb'], lantern: ['tool_lantern.glb'],
+  shovel: ['tool_shovel.glb'], axe: ['tool_axe.glb'], powder_keg: ['tool_keg.glb'], chest: ['tool_chest.glb'],
+  banana: ['tool_food.glb', 'food-banana'], coconut: ['tool_food.glb', 'food-coconut'],
+  mango: ['tool_food.glb', 'food-mango'], meat: ['tool_food.glb', 'food-meat'],
+};
+console.log('Every held tool GLB lands in the envelope of the primitive it replaces');
+for (const [kind, [file, only]] of Object.entries(TOOLS)) {
+  const prim = makePocketPreviewMesh(kind);
+  prim.updateMatrixWorld(true);
+  const primBox = new THREE.Box3();
+  prim.traverse((o) => {
+    if (!o.isMesh || o.userData.pocketKeep) return;
+    o.geometry.computeBoundingBox();
+    primBox.union(o.geometry.boundingBox.clone().applyMatrix4(o.matrixWorld));
+  });
+  const json = readGlbJson(file);
+  // LOD0 only, and one part of a multi-part file
+  for (const n of json.nodes) if (n.mesh != null && (/_lod\d$/.test(n.name ?? '') || (only && n.name !== only))) delete n.mesh;
+  const box = glbBox(json);
+  if (MUTATE === 'toolshift') box.translate(new THREE.Vector3(0, 0, -0.1));
+  const reach = Math.max(...['x', 'y', 'z'].flatMap((k) => [primBox.min[k] - box.min[k], box.max[k] - primBox.max[k]]));
+  const size = (b) => Math.max(b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z);
+  const ratio = size(box) / size(primBox);
+  console.log(`  ${kind.padEnd(11)} reach past primitive ${(reach * 1000).toFixed(1)} mm  size ratio ${ratio.toFixed(2)}`);
+  expect(`${kind}: ${file}${only ? ` (${only})` : ''} stays within ${TOOL_SLACK * 1000} mm of the primitive's box`, reach <= TOOL_SLACK,
+    `reaches ${(reach * 1000).toFixed(1)} mm past it`);
+  expect(`${kind}: longest side 0.75-1.3x the primitive's`, ratio >= 0.75 && ratio <= 1.3, `ratio ${ratio.toFixed(2)}`);
+}
+
 console.log(`\n${checks} checks, ${failures} failed`);
 if (checks === 0) { console.error('VACUOUS: nothing graded'); process.exit(1); }
 process.exit(failures > 0 ? 1 : 0);

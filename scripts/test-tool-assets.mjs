@@ -64,7 +64,18 @@ function nodes(g) {
 
 const lodOf = (name) => { const m = /_lod(\d)$/.exec(name); return m ? Number(m[1]) : 0; };
 const BANDS = [[3000, 10000], [1500, 3000], [150, 700]];
-const NAMED = { tool_bucket: ['bucket-water'], tool_planks: [], tool_hammer: ['hammer-head', 'hammer-haft'] };
+const NAMED = {
+  tool_bucket: ['bucket-water'], tool_planks: [], tool_hammer: ['hammer-head', 'hammer-haft'],
+  // b3.4g: the rest of the held kit (named nodes are the animation/material API)
+  tool_spyglass: ['spyglass-eyepiece', 'spyglass-body', 'spyglass-tube-1', 'spyglass-tube-2'],
+  tool_compass: ['compass-body', 'compass-needle', 'compass-glass'],
+  tool_lantern: ['lantern-body', 'lantern-glass', 'lantern-flame'],
+  tool_shovel: ['shovel-body'],
+  tool_axe: ['axe-head', 'axe-haft'],
+  tool_food: ['food-banana', 'food-coconut', 'food-mango', 'food-meat'],
+  tool_keg: ['keg-body', 'keg-fuse'],
+  tool_chest: ['chest-body', 'chest-lid'],
+};
 const MAX_BYTES = 800 * 1024; // unpacked v1; b3.1a (meshopt + KTX2) shrinks them
 
 const parsed = {};
@@ -112,12 +123,67 @@ if (P?.has('planks-body')) {
   expect('planks: 0.24 x 0.40 bundle lying flat (primitive frame)', w > 0.22 && w < 0.28 && l > 0.38 && l < 0.46 && h < 0.1, `${w.toFixed(3)} x ${h.toFixed(3)} x ${l.toFixed(3)}`);
 }
 
+// b3.4g pivots: the same frames as the primitives in makePocketPreviewMesh
+const box = (g, n) => g?.get(n)?.box;
+const cz = (b) => (b.min[2] + b.max[2]) / 2, cy = (b) => (b.min[1] + b.max[1]) / 2;
+const SG = parsed.tool_spyglass;
+if (SG?.has('spyglass-eyepiece') && SG.has('spyglass-tube-2')) {
+  const eye = box(SG, 'spyglass-eyepiece'), obj = box(SG, 'spyglass-tube-2'), t1 = box(SG, 'spyglass-tube-1'), body = box(SG, 'spyglass-body');
+  expect('spyglass: eyepiece toward -Z (faces the camera after rotation.y = PI), objective toward +Z',
+    eye.max[2] < obj.min[2] && eye.min[2] < -0.15 && obj.max[2] > 0.24, `eye z ${eye.min[2].toFixed(3)}..${eye.max[2].toFixed(3)}, objective ..${obj.max[2].toFixed(3)}`);
+  expect('spyglass: tubes stack eyepiece < body < tube-1 < tube-2 along +Z on the axis',
+    cz(eye) < cz(body) && cz(body) < cz(t1) && cz(t1) < cz(obj) && Math.abs(eye.min[0] + eye.max[0]) < 0.004 && Math.abs(obj.min[1] + obj.max[1]) < 0.004);
+}
+const CP = parsed.tool_compass;
+if (CP?.has('compass-needle') && CP.has('compass-body')) {
+  const n = box(CP, 'compass-needle'), c = box(CP, 'compass-body');
+  expect('compass: needle centred on the spin axis (origin), north +Y, in front of the dial (-Z)',
+    Math.abs(n.min[0] + n.max[0]) < 0.004 && Math.abs(n.min[1] + n.max[1]) < 0.004 && n.max[1] > 0.04 && n.max[2] < -0.005 && n.min[2] > c.min[2],
+    `needle x ${n.min[0].toFixed(3)}..${n.max[0].toFixed(3)} y ${n.min[1].toFixed(3)}..${n.max[1].toFixed(3)} z ${n.min[2].toFixed(3)}..${n.max[2].toFixed(3)}`);
+}
+const LT = parsed.tool_lantern;
+if (LT?.has('lantern-body') && LT.has('lantern-flame')) {
+  const b = box(LT, 'lantern-body'), f = box(LT, 'lantern-flame'), gl = box(LT, 'lantern-glass');
+  expect('lantern: Y up, base y ~-0.155, flame inside the glass', Math.abs(b.min[1] + 0.155) < 0.01 && b.max[1] > 0.2 && f.min[1] > gl.min[1] && f.max[1] < gl.max[1], `base ${b.min[1].toFixed(3)} top ${b.max[1].toFixed(3)}`);
+}
+const SH = parsed.tool_shovel;
+if (SH?.has('shovel-body')) {
+  const b = box(SH, 'shovel-body');
+  expect('shovel: grip at -Z, blade toward +Z (primitive frame -0.45..0.50)', b.min[2] < -0.43 && b.max[2] > 0.47 && b.max[0] - b.min[0] > 0.16, `z ${b.min[2].toFixed(3)}..${b.max[2].toFixed(3)}`);
+}
+const AX = parsed.tool_axe;
+if (AX?.has('axe-head') && AX.has('axe-haft')) {
+  const h = box(AX, 'axe-head'), f = box(AX, 'axe-haft');
+  expect('axe: head at z ~0.19 on the haft end, bit DOWN (-Y) to ~-0.17', Math.abs(cz(h) - 0.2) < 0.03 && h.min[1] < -0.15 && f.min[2] < -0.28, `head z ${cz(h).toFixed(3)} y ${h.min[1].toFixed(3)}`);
+}
+const KG = parsed.tool_keg;
+if (KG?.has('keg-body') && KG.has('keg-fuse')) {
+  const b = box(KG, 'keg-body'), f = box(KG, 'keg-fuse');
+  expect('keg: body y -0.125..0.125 (radius <= 0.135), fuse out of the top (+Y)', Math.abs(b.min[1] + 0.125) < 0.006 && b.max[0] < 0.136 && f.max[1] > 0.18, `body y ${b.min[1].toFixed(3)}..${b.max[1].toFixed(3)}, fuse top ${f.max[1].toFixed(3)}`);
+}
+const CH = parsed.tool_chest;
+if (CH?.has('chest-body') && CH.has('chest-lid')) {
+  const b = box(CH, 'chest-body'), l = box(CH, 'chest-lid');
+  expect('chest: body 0.46 x 0.30 from y ~-0.19, lid dome above it', Math.abs(b.min[1] + 0.19) < 0.012 && cy(l) > cy(b) && l.max[1] > 0.2 && b.max[0] - b.min[0] > 0.44 && b.max[0] - b.min[0] < 0.5, `body y ${b.min[1].toFixed(3)}, lid top ${l.max[1].toFixed(3)}`);
+}
+const FD = parsed.tool_food;
+if (FD) for (const n of NAMED.tool_food) {
+  const b = box(FD, n);
+  if (b) expect(`food: ${n} centred near the origin, hand-sized (<= 0.42 m, the primitive meat is 0.40)`, Math.max(...[0, 1, 2].map((i) => b.max[i] - b.min[i])) <= 0.42 && [0, 1, 2].every((i) => Math.abs(b.min[i] + b.max[i]) / 2 < 0.08));
+}
+
 const wmf = fs.readFileSync('src/client/rendering/factories/WeaponMeshFactory.ts', 'utf8');
 const mmf = fs.readFileSync('src/client/rendering/factories/MiscMeshFactory.ts', 'utf8');
 expect('WeaponMeshFactory clones tool_bucket / tool_planks for the bucket and wood kinds',
-  /bucket: 'tool_bucket'/.test(wmf) && /wood: 'tool_planks'/.test(wmf) && /cloneToolGlb\(toolGlb, lod\)/.test(wmf));
+  /bucket: 'tool_bucket'/.test(wmf) && /wood: 'tool_planks'/.test(wmf) && /cloneToolGlb\(entry, lod\)/.test(wmf));
 expect('MiscMeshFactory: the carpenter\'s hammer is tool_hammer.glb', /cloneToolGlb\('tool_hammer', lod\)/.test(mmf));
+for (const [kind, file] of [['spyglass', 'tool_spyglass'], ['compass', 'tool_compass'], ['lantern', 'tool_lantern'], ['shovel', 'tool_shovel'], ['axe', 'tool_axe'],
+  ['banana', 'tool_food'], ['coconut', 'tool_food'], ['mango', 'tool_food'], ['meat', 'tool_food'], ['powder_keg', 'tool_keg'], ['chest', 'tool_chest']]) {
+  expect(`WeaponMeshFactory: pocket kind ${kind} clones ${file}`, new RegExp(`${kind}: \\[?'${file}'`).test(wmf));
+}
+expect('MiscMeshFactory: ToolGlbName covers the b3.4g kit, clones can keep one food node', /'tool_chest'/.test(mmf) && /only\?: string/.test(mmf));
+expect('keg / chest keep the carrying hands when the GLB replaces the primitive', /pocketKeep/.test(wmf));
 
 console.log(`\n${checks - failures}/${checks} checks`);
 if (failures) { console.error(`FAIL: ${failures} tool asset check(s)`); process.exit(1); }
-console.log('PASS: flood-loop tool GLBs in band, named, pivoted, wired');
+console.log('PASS: tool GLBs (flood loop + b3.4g kit) in band, named, pivoted, wired');
