@@ -20,6 +20,8 @@
 //   [g] IK grips come out of the GLB (wheel handles, capstan bar ends, breech)
 //   [h] clear() does not dispose the library's shared geometry
 //   [i] late mount: a hull built before the library loaded swaps on update
+//   [j] late mounts pay the per-frame first-draw allowance: six galleons whose
+//       hardware lands on the same frame spread over frames, never a burst
 //
 // RED ON HEAD: ShipRenderer has no setHardwareSource and mounts nothing.
 // Mutation: PIRATES_BR_MUTATE=hw:off (no source) and hw:wheelsign (negated
@@ -36,7 +38,7 @@ const { ShipRenderer } = await import('../src/client/rendering/ShipRenderer.ts')
 const { SHIP, SHIP_STATS } = await import('../src/shared/constants/index.ts');
 const { helmWheelRotZ } = await import('../src/client/rendering/signConventions.ts');
 const { farSwapDistance } = await import('../src/client/world/island/InstanceLod.ts');
-const { openFirstDrawBudgetForSettle } = await import('../src/client/rendering/FirstDrawBudget.ts');
+const { openFirstDrawBudgetForSettle, beginFirstDrawFrame, firstDrawRemaining } = await import('../src/client/rendering/FirstDrawBudget.ts');
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DIR = path.join(ROOT, 'public/assets/models');
@@ -311,6 +313,42 @@ expect('[h] clear() leaves the library GLB geometry alive', disposed.length === 
   const after = named(sr.shipMeshes.get(ship.id).detailRoot, 'cannon_body').length;
   console.log(`  cannon_body before load ${before}, after ${after}`);
   expect('[i] a hull built in the queue window swaps to the GLBs once they load', before === 0 && after === SHIP_STATS.brigantine.cannonCount * 2);
+}
+
+// ── [j] late mounts pay the first-draw allowance ────────────────────────────
+// The world set lands on one frame; every hull in view mounts its GLBs then.
+// A galleon's hardware is ~20 meshes, so six hulls on one frame is ~120 first
+// draws against an allowance of 48 unless the mount is charged to it.
+{
+  let loaded = false;
+  const { sr } = renderer('high', stubSource(() => loaded));
+  const ships = Array.from({ length: 6 }, (_, i) => ({ ...fixtureShip('galleon', `hw-burst-${i}`), position: { x: i * 30, y: 0, z: 0 } }));
+  for (let i = 0; i < 40; i++) sr.update(ships, [], 3 + i * 0.001, 0.5, 0, near);
+  loaded = true;
+  const hwMeshes = (m) => {
+    let n = 0;
+    for (const p of m.hardware?.parts ?? []) for (const o of [p.near, p.far]) {
+      if (o?.visible) o.traverse((x) => { if (x.isMesh) n += 1; });
+    }
+    return n;
+  };
+  const mounted = new Set();
+  let worst = 0, worstShips = 0, frames = 0, allowance = 0;
+  for (; frames < 30 && mounted.size < ships.length; frames++) {
+    beginFirstDrawFrame();
+    allowance = firstDrawRemaining();
+    sr.update(ships, [], 4 + frames * 0.016, 0.016, 0, near);
+    let landed = 0, n = 0;
+    for (const s of ships) {
+      const m = sr.shipMeshes.get(s.id);
+      if (m.hardware && !mounted.has(s.id)) { mounted.add(s.id); landed += hwMeshes(m); n += 1; }
+    }
+    if (landed > worst) { worst = landed; worstShips = n; }
+  }
+  openFirstDrawBudgetForSettle();
+  console.log(`  6 galleons: worst frame ${worst} new hardware meshes over ${worstShips} hull(s), allowance ${allowance}, all mounted after ${frames} frame(s)`);
+  expect('[j] no frame mounts more hardware meshes than the allowance (one oversized hull alone excepted)', worst <= allowance || worstShips === 1, `${worst} meshes over ${worstShips} hulls > ${allowance}`);
+  expect('[j] every hull still mounts (within 30 frames)', mounted.size === ships.length, `${mounted.size}/${ships.length}`);
 }
 
 console.log(`\n${checks} checks, ${failures} failed`);

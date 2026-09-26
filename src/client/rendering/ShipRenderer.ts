@@ -16,7 +16,7 @@ import { getHullProfile, hullSurfacePointAt, stationSurfaceAt } from '../../shar
 import type { HullProfile } from '../../shared/hull.js';
 import type { RenderQuality } from './Renderer.js';
 import { registerBudgetLight } from './LightBudget.js';
-import { showWhenAffordable } from './FirstDrawBudget.js';
+import { firstDrawFrameUntouched, firstDrawRemaining, showWhenAffordable, spendFirstDraw } from './FirstDrawBudget.js';
 import { farSwapDistance, FAR_SWAP_HYSTERESIS } from '../world/island/InstanceLod.js';
 
 /** Storm sea-state source accepted by update(): either a precomputed 0..1
@@ -391,6 +391,8 @@ export class ShipRenderer {
   private hardwareSource: ShipHardwareSource | null = null;
   /** Grip anchors per hardware file, in GLB units (computed once per file). */
   private readonly hardwareTips = new Map<string, THREE.Vector3[]>();
+  /** Meshes per hardware file (near / far), counted once: the late mount's price. */
+  private readonly hardwareMeshCount = new Map<string, number>();
   setHardwareSource(src: ShipHardwareSource | null): void { this.hardwareSource = src; }
   /** One reused frame record for every hull's wake — filled in place each
    *  update so driving twelve wakes allocates nothing. */
@@ -2870,6 +2872,28 @@ export class ShipRenderer {
     return g;
   }
 
+  private hardwareMeshes(name: ShipHardwareName, far: boolean): number {
+    const key = far ? `${name}_far` : name;
+    let n = this.hardwareMeshCount.get(key);
+    if (n === undefined) {
+      const src = this.hardwareSource;
+      const g = src ? (far ? src.cloneFar(name) : src.clone(name)) : null;
+      n = 0;
+      g?.traverse((o) => { if ((o as THREE.Mesh).isMesh) n! += 1; });
+      if (far && !g) n = this.hardwareMeshes(name, false); // no far sibling: the near file stays up
+      this.hardwareMeshCount.set(key, n);
+    }
+    return n;
+  }
+
+  /** Meshes a late mount makes visible on this hull at this distance. */
+  private hardwareMountCost(mesh: ShipMeshGroup, distSq: number): number {
+    const swap = farSwapDistance(this.quality);
+    const far = this.quality === 'low' || distSq > swap * swap;
+    return mesh.cannonMeshes.length * this.hardwareMeshes('cannon', far)
+      + this.hardwareMeshes('wheel', far) + this.hardwareMeshes('capstan', far);
+  }
+
   /** Grip anchors for a spoked file (wheel handles, capstan bars), in GLB units. */
   private tipsOf(name: 'wheel' | 'capstan', node: THREE.Object3D, plane: 'xy' | 'xz'): THREE.Vector3[] {
     let tips = this.hardwareTips.get(name);
@@ -3661,7 +3685,18 @@ void main() {
       mesh.proxyRoot.visible = !detailNear;
       // b3.4e: the queue-window fallback gives way once the library has the
       // hardware; after that only the near/far sibling swap runs.
-      if (!mesh.hardware && detailNear && this.hardwareReady()) this.mountHardware(mesh);
+      // The world set lands on ONE frame, and every hull in view mounts then:
+      // six galleons were ~114 first draws on a single frame against an
+      // allowance of 48. The late mount is a first appearance like any other,
+      // so it pays the shared allowance and waits a frame when it cannot (a
+      // hull costlier than the whole allowance lands on a frame of its own).
+      if (!mesh.hardware && detailNear && this.hardwareReady()) {
+        const price = this.hardwareMountCost(mesh, distSq);
+        if (price <= firstDrawRemaining() || firstDrawFrameUntouched()) {
+          spendFirstDraw(price);
+          this.mountHardware(mesh);
+        }
+      }
       if (mesh.hardware && detailNear) this.updateHardwareLod(mesh, distSq);
       const extrapolation = Math.min(0.14, snapshotAge + dt * 0.5);
       // Local storm sea-state feeds the SAME boosted Gerstner field the ocean
