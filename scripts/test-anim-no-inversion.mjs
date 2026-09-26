@@ -893,7 +893,162 @@ console.log('First-person viewmodel');
   }
 }
 
+// ── b3.3e CAMERA-SIDE AND INPUT (vm:animations:4/5/6): the view rolls with the
+// deck it stands on, a footfall and a landing move the eye DOWN, the spyglass
+// sways around its target, every look device agrees on "right" and "up", and
+// the sail's belly is on the lee side of the apparent wind.
+console.log('\nb3.3e camera side: deck roll, head bob, landing dip, spyglass sway');
+{
+  const CM = await import('../src/client/core/cameraMotion.ts');
+  const gameSrc = src('src/client/core/Game.ts');
+  // Deck roll: the lens up must stand on the drawn deck normal, at any look yaw.
+  const cam = new THREE.PerspectiveCamera(74, 16 / 9, 0.1, 100);
+  const imageAngle = (camQ, n) => {
+    const f = V(0, 0, -1).applyQuaternion(camQ);
+    const up = V(0, 1, 0).applyQuaternion(camQ);
+    const np = n.clone().sub(f.clone().multiplyScalar(n.dot(f))).normalize();
+    return Math.atan2(up.clone().cross(np).dot(f), up.dot(np));
+  };
+  let worst = 0; let headAft = 0; let headFwd = 0; let cases = 0; let aftSign = 0;
+  for (const shipYaw of [0.3, 1.9, -2.4]) {
+    for (const [roll, pitch] of [[0.3, 0], [-0.3, 0], [0.2, 0.12], [-0.25, -0.1], [0, 0.15]]) {
+      const pose = { position: { x: 0, y: 0, z: 0 }, rotation: shipYaw, pitch, roll };
+      const o = toShipWorld3({ x: 0, y: 0, z: 0 }, pose); const u = toShipWorld3({ x: 0, y: 1, z: 0 }, pose);
+      const n = V(u.x - o.x, u.y - o.y, u.z - o.z).normalize();
+      for (let k = 0; k < 8; k++) {
+        const rel = (k * Math.PI) / 4; const yaw = shipYaw + rel;
+        for (const lp of [-0.4, 0, 0.4]) {
+          cam.position.set(0, 0, 0); cam.quaternion.identity();
+          cam.lookAt(Math.sin(yaw) * Math.cos(lp), Math.sin(lp), Math.cos(yaw) * Math.cos(lp));
+          const q0 = cam.quaternion.clone();
+          const a = CM.deckCameraRoll(q0, n);
+          cam.rotateZ(a);
+          const err = Math.abs(imageAngle(cam.quaternion, n));
+          worst = Math.max(worst, err); cases += 1;
+          const tilt = Math.abs(imageAngle(q0, n));
+          const head = q0.clone(); cam.quaternion.copy(head); cam.rotateZ(-roll);
+          const headErr = Math.abs(imageAngle(cam.quaternion, n));
+          if (k === 4 && pitch === 0 && lp === 0) { headAft = Math.max(headAft, headErr - tilt); aftSign += Math.sign(a) === Math.sign(-roll) ? 0 : 1; }
+          if (k === 0 && pitch === 0 && lp === 0) headFwd = Math.max(headFwd, headErr);
+        }
+      }
+    }
+  }
+  expect(`deck roll: the lens up stands on the drawn deck normal at 8 look yaws x 3 pitches x 5 attitudes (${cases} cases, <= 0.01 rad)`,
+    worst <= 0.01, `worst ${worst.toFixed(4)} rad`);
+  expect('deck roll: looking aft the roll is the OPPOSITE sign of the bow-view roll (heel follows the view)', aftSign >= 6, `${aftSign}/6 aft cases flipped`);
+  expect('negative control: HEAD -hull.roll matches at the bow but rolls AGAINST the heel facing aft',
+    headFwd < 0.02 && headAft > 0.2, `bow err ${headFwd.toFixed(3)} aft extra err ${headAft.toFixed(3)}`);
+  expect('Game rolls the view with deckCameraRoll (no bare -hull.roll)',
+    /deckCameraRoll\(/.test(gameSrc) && !/clamp\(-hull\.roll/.test(gameSrc));
+
+  // Head bob: lowest on the audible footfall, never above the standing eye.
+  const bobs = []; for (let i = 0; i <= 40; i++) bobs.push(CM.headBobOffset(i / 40, 5, 5));
+  const minAt = bobs.indexOf(Math.min(...bobs)) / 40;
+  expect('head bob: never lifts the eye above standing (<= 0 over the stride)', bobs.every((b) => b <= 1e-9), `max ${Math.max(...bobs).toFixed(4)}`);
+  expect('head bob: the eye is lowest ON the footfall (stride 0 or 1) and level mid-stride',
+    (minAt === 0 || minAt === 1) && Math.abs(CM.headBobOffset(0.5, 5, 5)) < 1e-6 && CM.headBobOffset(0, 5, 5) < -0.01,
+    `min at ${minAt} depth ${CM.headBobOffset(0, 5, 5).toFixed(3)} m`);
+  expect('head bob: standing still does not bob; a crouch-walk bobs less than a run',
+    CM.headBobOffset(0, 0, 5) === 0 && Math.abs(CM.headBobOffset(0, 2.75, 5)) < Math.abs(CM.headBobOffset(0, 5, 5)));
+  expect('Game bobs the eye on the footstep stride clock', /headBobOffset\(/.test(gameSrc) && /FOOTSTEP_STRIDE_M/.test(gameSrc));
+
+  // Landing dip: the knees take the fall, the eye drops then recovers.
+  const dips = []; for (let i = 0; i <= 60; i++) dips.push(CM.landingDipOffset(i * 0.01, 9));
+  const peakI = dips.indexOf(Math.min(...dips));
+  expect('landing dip: the eye goes DOWN (<= 0 at every age) and the dip is real (>= 8 cm at 9 m/s)',
+    dips.every((d) => d <= 1e-9) && Math.min(...dips) <= -0.08, `peak ${Math.min(...dips).toFixed(3)} m`);
+  expect('landing dip: bottoms out within 0.12 s and is back within 5% by 0.6 s',
+    peakI * 0.01 <= 0.12 && Math.abs(dips[60]) < 0.05 * Math.abs(dips[peakI]), `peak at ${(peakI * 0.01).toFixed(2)} s, 0.6 s ${dips[60].toFixed(4)}`);
+  expect('landing dip: a harder fall dips deeper; a step off (<= 3 m/s) does not dip',
+    CM.landingDipOffset(0.07, 12) < CM.landingDipOffset(0.07, 6) && CM.landingDipOffset(0.07, 3) === 0);
+  expect('Game dips the eye on the local landing thud', /landingDipOffset\(/.test(gameSrc));
+
+  // Spyglass sway: breathes AROUND the target, never drifts off it.
+  let sy = 0; let sp = 0; let peak = 0; let n = 0; const s = { yaw: 0, pitch: 0 };
+  const T = Math.PI * 2 * 10;
+  for (let t = 0; t < T; t += 0.01) { CM.spyglassSway(t, false, s); sy += s.yaw; sp += s.pitch; peak = Math.max(peak, Math.hypot(s.yaw, s.pitch)); n += 1; }
+  const bias = Math.hypot(sy / n, sp / n);
+  expect('spyglass sway: zero-mean over its window (bias < 5% of the amplitude)', bias < 0.05 * CM.SPYGLASS_SWAY_RAD, `bias ${bias.toExponential(2)} rad`);
+  expect('spyglass sway: alive but bounded (0.4-1.0 x SPYGLASS_SWAY_RAD)', peak >= 0.4 * CM.SPYGLASS_SWAY_RAD && peak <= CM.SPYGLASS_SWAY_RAD * 1.001,
+    `peak ${peak.toExponential(2)} rad`);
+  CM.spyglassSway(1.3, true, s); const crouchA = Math.hypot(s.yaw, s.pitch); CM.spyglassSway(1.3, false, s);
+  expect('spyglass sway: crouching steadies the glass', crouchA < Math.hypot(s.yaw, s.pitch));
+  expect('Game sways the scoped view with spyglassSway', /spyglassSway\(/.test(gameSrc));
+}
+
+console.log('\nb3.3e look devices: stick and touch look signs, per-scheme invert-Y');
+{
+  const listeners = new Map();
+  const add = (type, fn) => { if (!listeners.has(type)) listeners.set(type, []); listeners.get(type).push(fn); };
+  const body = { addEventListener: add, requestPointerLock: () => undefined };
+  const saved = { document: globalThis.document, window: globalThis.window };
+  globalThis.document = { body, activeElement: null, pointerLockElement: null, visibilityState: 'visible', exitPointerLock: () => {}, addEventListener: add };
+  globalThis.window = { addEventListener: add, location: { search: '' } };
+  try {
+    const { InputManager } = await import('../src/client/input/InputManager.ts');
+    const { lookStep } = await import('../src/client/input/GamepadSource.ts');
+    const input = new InputManager();
+    input.init(body);
+    input.setPlayContext('foot');
+    const fwd = () => { const y = input.getYaw(); const p = input.getPitch(); return V(Math.sin(y) * Math.cos(p), Math.sin(p), Math.cos(y) * Math.cos(p)); };
+    // Game's camera: lookAt(forward) with world up, so screen right = forward x up.
+    const move = (fn) => { input.setLook(0.7, 0); const f0 = fwd(); const right = f0.clone().cross(V(0, 1, 0)).normalize(); fn(); const f1 = fwd(); return { right: f1.clone().sub(f0).dot(right), up: f1.y - f0.y }; };
+    const pad = (x, y) => move(() => { const st = lookStep(x, y, 1 / 30); input.applyPadLook(st.dx, st.dy); });
+    const touch = (dx, dy) => move(() => input.applyTouchLook(dx, dy));
+    const mouse = (dx, dy) => move(() => input['applyLookDelta'](dx, dy));
+    input.applyControlSettings({ invertY: { mouse: false, gamepad: false, touch: false } });
+    const pr = pad(1, 0); const pu = pad(0, -1); const tr = touch(40, 0); const tu = touch(0, -40); const mr = mouse(40, 0); const mu = mouse(0, -40);
+    expect('stick right turns the view right; stick up (axes[3] < 0) raises the gaze', pr.right > 0.01 && Math.abs(pr.up) < 1e-9 && pu.up > 0.01,
+      `right ${pr.right.toFixed(3)} up ${pu.up.toFixed(3)}`);
+    expect('touch drag right turns right; drag up raises the gaze (same as the mouse)', tr.right > 0.01 && tu.up > 0.01 && mr.right > 0.01 && mu.up > 0.01,
+      `touch r ${tr.right.toFixed(3)} u ${tu.up.toFixed(3)} mouse r ${mr.right.toFixed(3)} u ${mu.up.toFixed(3)}`);
+    input.applyControlSettings({ invertY: { mouse: false, gamepad: true, touch: false } });
+    const ipu = pad(0, -1); const ipr = pad(1, 0); const tuPad = touch(0, -40); const muPad = mouse(0, -40);
+    expect('invert-Y (gamepad): stick up LOWERS the gaze, yaw untouched, touch and mouse unaffected',
+      ipu.up < -0.01 && ipr.right > 0.01 && tuPad.up > 0.01 && muPad.up > 0.01, `pad up ${ipu.up.toFixed(3)} touch up ${tuPad.up.toFixed(3)}`);
+    input.applyControlSettings({ invertY: { mouse: false, gamepad: false, touch: true } });
+    const itu = touch(0, -40); const itr = touch(40, 0); const puTouch = pad(0, -1);
+    expect('invert-Y (touch): drag up LOWERS the gaze, yaw untouched, the stick unaffected',
+      itu.up < -0.01 && itr.right > 0.01 && puTouch.up > 0.01, `touch up ${itu.up.toFixed(3)} pad up ${puTouch.up.toFixed(3)}`);
+  } finally {
+    globalThis.document = saved.document; globalThis.window = saved.window;
+  }
+}
+
+console.log('\nb3.3e sail belly vs the apparent wind (the contract the b4 cloth inherits)');
+{
+  const { makeBillowedSailGeometry } = await import('../src/client/rendering/ship/geometry.ts');
+  const { braceCatch } = await import('../src/shared/sailing.ts');
+  const g = makeBillowedSailGeometry(6, 8, 10, 7);
+  const zs = g.attributes.position.array.filter((_, i) => i % 3 === 2);
+  const meanZ = zs.reduce((a, b) => a + b, 0) / zs.length;
+  expect('square sail geometry bellies toward its local +Z (the face the trim pivot turns to the wind)', meanZ > 0.05, `mean z ${meanZ.toFixed(3)} m`);
+  let worst = 1; let cases = 0;
+  for (let h = 0; h < 8; h++) {
+    const shipRot = -Math.PI + (h * Math.PI) / 4 + 0.2;
+    for (const offWind of [0.9, 1.4, 2.0, 2.6, 3.0, -1.2, -1.9, -2.7]) {
+      // offWind = where the wind blows FROM relative to the bow; direction is where it blows TO.
+      const windDir = shipRot + offWind + Math.PI;
+      const signedRelative = Math.atan2(Math.sin(windDir - shipRot), Math.cos(windDir - shipRot));
+      let best = -1; let brace = 0;
+      for (let a = -1.5; a <= 1.5; a += 0.01) { const c = braceCatch(a, signedRelative); if (c > best) { best = c; brace = a; } }
+      if (best < 0.3) continue;
+      const spd = 6; const aw = apparentWindLocal(windDir, 0.9, shipRot, Math.sin(shipRot) * spd, Math.cos(shipRot) * spd);
+      const ship = new THREE.Object3D(); ship.rotation.y = shipRot;
+      const pivot = new THREE.Object3D(); pivot.rotation.y = THREE.MathUtils.clamp(brace, -1.15, 1.15); ship.add(pivot);
+      const sail = new THREE.Object3D(); sail.rotation.order = 'YXZ'; sail.rotation.x = 0.055; pivot.add(sail);
+      ship.updateMatrixWorld(true);
+      const belly = V(0, 0, 1).transformDirection(sail.matrixWorld);
+      const app = V(Math.sin(shipRot + aw.localYaw), 0, Math.cos(shipRot + aw.localYaw));
+      worst = Math.min(worst, belly.dot(app)); cases += 1;
+    }
+  }
+  expect(`drawing sails belly to leeward of the apparent wind (belly . apparent > 0) at 8 headings (${cases} trimmed cases)`, cases >= 30 && worst > 0,
+    `worst ${worst.toFixed(3)}`);
+}
+
 const ms = performance.now() - t0;
 console.log(`\n${checks - failures}/${checks} checks, ${ms.toFixed(0)} ms`);
 if (failures) { console.error(`FAIL: ${failures} inversion check(s)`); process.exit(1); }
-console.log('PASS: nothing inverted (wheel, flag, foliage, heel, head pitch, new-skeleton knees/elbows/head on 3 bodies, low-tier e2e, viewmodel recoil/ribbon/draw)');
+console.log('PASS: nothing inverted (wheel, flag, foliage, heel, head pitch, new-skeleton knees/elbows/head on 3 bodies, low-tier e2e, viewmodel recoil/ribbon/draw, deck roll, head bob, landing dip, spyglass sway, stick/touch look + invert-Y, sail belly)');

@@ -88,6 +88,7 @@ import { buildMermaidMesh, hudAnchorLocal, makeNameplateSprite, makeProjectileMe
 import type { PocketPreviewKind } from '../rendering/factories/WeaponMeshFactory.js';
 import { glyph, installGlyphs, keys } from '../ui/InputGlyphs.js';
 import { framePacer } from './framePacer.js';
+import { deckCameraRoll, headBobOffset, landingDipOffset, spyglassSway } from './cameraMotion.js';
 
 /** b3.3d: a breach staggers crew within this distance (m) of the ball's strike. */
 const BREACH_STAGGER_RADIUS = 7;
@@ -619,6 +620,11 @@ export class Game {
   private cameraShake = 0;        // trauma 0..1, decays each frame
   private cameraShakeCannon = 0;  // brief own-cannon FOV pop 0..1
   private cameraRoll = 0;         // smoothed deck-roll coupling (rad)
+  /** Seconds since the local pirate's last hard landing, and that fall's speed (b3.3e landing dip). */
+  private landingDipAge = Infinity;
+  private landingDipFall = 0;
+  private readonly scopeSway = { yaw: 0, pitch: 0 };
+  private readonly tempDeckNormal = new THREE.Vector3();
   private prevOwnHullTotal = 4;   // sum of local ship hull sections for hit detection
   private prevOwnShipId: string | null = null;
   private readonly tempShakeVec = new THREE.Vector3();
@@ -6695,6 +6701,18 @@ export class Game {
       let eyeHeight = swimming
         ? PLAYER.HEIGHT * 0.56
         : player.crouching ? PLAYER.EYE_Y - PLAYER.CROUCH_DROP : PLAYER.EYE_Y;
+      // b3.3e: the eye dips on the audible footfall and when the knees take a
+      // landing, never rises above the standing eye. Off while aiming or scoped
+      // (a bobbing sight line is a miss), at a station, climbing or swimming.
+      this.landingDipAge += this.presentDt;
+      if (player.state === 'alive' && !swimming && !player.atHelm && !player.atCannon && !player.atCrowNest
+        && player.mastClimb === null) {
+        eyeHeight += landingDipOffset(this.landingDipAge, this.landingDipFall);
+        if (!aimingFirearm && !spyglassActive && !scopedFov && Math.abs(player.velocity.y ?? 0) < 2.2) {
+          const stride01 = (this.footstepDistance.get(player.id) ?? 0) / Game.FOOTSTEP_STRIDE_M;
+          eyeHeight += headBobOffset(stride01, Math.hypot(player.velocity.x, player.velocity.z), PLAYER.MOVE_SPEED);
+        }
+      }
       if (downed) {
         eyeHeight = THREE.MathUtils.lerp(eyeHeight, 0.3, this.localDeathBlend)
           + Math.sin(this.ocean.getTime() * 0.9) * 0.02 * this.localDeathBlend;
@@ -6710,6 +6728,15 @@ export class Game {
         .clone()
         .addScaledVector(forward, scopedFov ? 64 : aimingFirearm ? 28 : swimming ? 18 : 14)
         .add(new THREE.Vector3(0, swimming ? -0.04 : scopedFov ? 0.05 : 0, 0));
+      if (spyglassActive) {
+        // Handheld glass: a zero-mean breathing sway around the target (b3.3e).
+        const sway = spyglassSway(this.ocean.getTime(), player.crouching, this.scopeSway);
+        const cy = Math.cos(yaw); const sy = Math.sin(yaw);
+        // +sway.yaw turns left (yaw grows leftward); screen right is (-cos, 0, sin).
+        lookTarget.x += cy * sway.yaw * 64;
+        lookTarget.z -= sy * sway.yaw * 64;
+        lookTarget.y += sway.pitch * 64;
+      }
       // ── SPECTATE LIFT ──────────────────────────────────────────────────────
       // Eliminated, the eye stayed 34 cm above the spot you fell — which for
       // three deaths out of four is UNDER the swell, and the death screen was a
@@ -6831,10 +6858,17 @@ export class Game {
     // ROLL_SMOOTH_TAU 0.15 → alpha = 1 − exp(−dt/tau), frame-rate independent.
     // Capped well inside the server's own ±0.55 so a founder cannot roll the
     // horizon past vertical.
+    // b3.3e: the roll is the drawn deck normal seen THROUGH THE LENS, not the
+    // hull's roll angle. -hull.roll was right only facing the bow: facing aft it
+    // rolled the view against the heel, and over the rail the hull's pitch
+    // (what tilts that horizon) never reached the camera.
     let rollTarget = 0;
     if (onDeck && trackedShip) {
       const hull = this.readShipRenderPose(trackedShip);
-      rollTarget = THREE.MathUtils.clamp(-hull.roll, -0.5, 0.5);
+      const o = toShipWorld3({ x: 0, y: 0, z: 0 }, { position: hull, rotation: hull.yaw, pitch: hull.pitch, roll: hull.roll });
+      const u = toShipWorld3({ x: 0, y: 1, z: 0 }, { position: hull, rotation: hull.yaw, pitch: hull.pitch, roll: hull.roll });
+      this.tempDeckNormal.set(u.x - o.x, u.y - o.y, u.z - o.z).normalize();
+      rollTarget = THREE.MathUtils.clamp(deckCameraRoll(camera.quaternion, this.tempDeckNormal), -0.5, 0.5);
     }
     const rollAlpha = 1 - Math.exp(-this.frameDt / 0.15);
     this.cameraRoll += (rollTarget - this.cameraRoll) * rollAlpha;
@@ -7549,6 +7583,7 @@ export class Game {
         const fall = this.footFallSpeed.get(player.id) ?? 0;
         this.footFallSpeed.delete(player.id);
         if (fall > 3) this.audio.playFootLanding(this.getFootstepSurface(player), fall, distance, isLocal ? undefined : player.position);
+        if (fall > 3 && isLocal) { this.landingDipAge = 0; this.landingDipFall = fall; }
       }
       if ((!grounded && !climbing) || speed < 0.55) {
         this.footstepDistance.set(player.id, 0);
