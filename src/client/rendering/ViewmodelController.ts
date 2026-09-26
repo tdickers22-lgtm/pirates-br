@@ -508,12 +508,12 @@ export class ViewmodelController {
         };
       case 'wood':
         return {
-          right: { pos: [0.14, -0.05, 0.1], rot: [0.5, 0.2, 0.12], scale: 1.2 },
-          left: { pos: [-0.14, -0.05, 0.1], rot: [0.5, -0.2, -0.12], scale: 1.2 },
+          right: { pos: [0.14, -0.03, 0.04], rot: [0.5, 0.2, 0.12], scale: 1.2 },
+          left: { pos: [-0.14, -0.03, 0.04], rot: [0.5, -0.2, -0.12], scale: 1.2 },
         };
       default:
         // Food and everything else: one cupped hand under the item.
-        return { right: { pos: [0.02, -0.08, 0.03], rot: [0.28, 0.12, 0.1], scale: 1.2 }, left: null };
+        return { right: { pos: [0.02, -0.07, 0.03], rot: [0.28, 0.12, 0.1], scale: 1.2 }, left: null };
     }
   }
 
@@ -1425,23 +1425,40 @@ export class ViewmodelController {
     const eatProgress = usingPreview
       ? 1 - THREE.MathUtils.clamp(this.view.pocketUsePreviewTimer / previewDuration, 0, 1)
       : 0;
-    const biteArc = Math.sin(eatProgress * Math.PI);
-    const toMouth = kind === 'wood' ? 0 : THREE.MathUtils.smoothstep(eatProgress, 0.1, 0.72);
-
     // Lift the lantern up into view when raised (ATTACK held), matching the light flare.
     const lanternLift = kind === 'lantern' ? this.view.lanternRaise01 : 0;
+    const pose = ViewmodelController.pocketPreviewPose(kind, eatProgress, { bob, sway, lanternLift });
     this.localViewPocketRoot.visible = true;
-    this.localViewPocketRoot.position.set(
-      -0.34 + sway * 0.5 + toMouth * 0.22 - lanternLift * 0.14,
-      -0.38 + bob + toMouth * 0.3 + biteArc * 0.035 + lanternLift * 0.44,
-      -0.52 + toMouth * 0.22 + lanternLift * 0.17,
-    );
-    this.localViewPocketRoot.rotation.set(
-      -0.12 + bob * 1.2 - toMouth * 0.46 - lanternLift * 0.38,
+    this.localViewPocketRoot.position.set(pose[0], pose[1], pose[2]);
+    this.localViewPocketRoot.rotation.set(pose[3], pose[4], pose[5]);
+    return true;
+  }
+
+  /**
+   * Pocket-preview root pose (supply-wheel hold and the use preview: eat / place wood), pure so
+   * test-fp-arms can raster the hands through it at every phase of the bite.
+   */
+  static pocketPreviewPose(
+    kind: PocketPreviewKind,
+    eatProgress: number,
+    s: { bob: number; sway: number; lanternLift: number },
+  ): Pose6 {
+    const { bob, sway, lanternLift } = s;
+    const biteArc = Math.sin(eatProgress * Math.PI);
+    const toMouth = kind === 'wood' ? 0 : THREE.MathUtils.smoothstep(eatProgress, 0.1, 0.72);
+    // The hold used to sit at y -0.38 / z -0.52 (the item's centre on the bottom edge), which put every
+    // palm under the item at ndc y -1.2..-1.5: carried planks and food showed no hand at all until
+    // halfway through the bite. The hold now rides 20 cm higher (item centre ndc y ~ -0.5, palm ~ -0.75)
+    // and the mouth end of the bite stays where it was; planks are carried two-handed across the middle.
+    const baseX = kind === 'wood' ? -0.16 : -0.34;
+    return [
+      baseX + sway * 0.5 + toMouth * 0.22 - lanternLift * 0.14,
+      -0.18 + bob + toMouth * 0.1 + biteArc * 0.035 + lanternLift * 0.24,
+      -0.5 + toMouth * 0.16 + lanternLift * 0.15,
+      -0.12 + bob * 1.2 - toMouth * 0.3 - lanternLift * 0.38,
       0.22 + sway * 0.4 + toMouth * 0.22,
       0.08 + biteArc * 0.12,
-    );
-    return true;
+    ];
   }
 
   /**

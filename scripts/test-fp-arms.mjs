@@ -183,10 +183,34 @@ const toolState = { bob: 0, sway: 0, time: 0, firing: false, bailScoopProgress: 
 for (const kind of ['bucket', 'lantern', 'compass', 'spyglass', 'shovel', 'axe']) {
   states.push([`tool ${kind}`, P.toolPose(kind, toolState), VM.ViewmodelController.pocketGrips(kind)]);
 }
-// Carried wood / food ride the pocket-preview root, whose rest pose is composed inline in ViewmodelController
-// (bite arc, lantern lift, supply-wheel slot); they are graded by the viewmodel-states browser probe, not here.
+// Carried wood / food ride the pocket-preview root (supply-wheel hold, then the use preview): graded at the hold
+// and at 10 / 50 / 90 % of the bite. Their hands must be on screen by the PALM too (the grip origin inside the
+// frame), since a fist whose knuckles alone poke up from the bottom edge still passes a coverage floor.
+const palmStates = new Set();
+for (const kind of ['wood', 'banana', 'coconut', 'mango', 'meat']) {
+  for (const phase of [0, 0.1, 0.5, 0.9]) {
+    const name = `pocket ${kind} ${phase ? `bite ${phase * 100}%` : 'hold'}`;
+    palmStates.add(name);
+    states.push([name, VM.ViewmodelController.pocketPreviewPose(kind, phase, { bob: 0, sway: 0, lanternLift: 0 }), VM.ViewmodelController.pocketGrips(kind)]);
+  }
+}
+function palmNdc(rootPose, g) {
+  const root = new THREE.Object3D();
+  root.position.set(rootPose[0], rootPose[1], rootPose[2]);
+  root.rotation.set(rootPose[3], rootPose[4], rootPose[5]);
+  root.updateMatrixWorld(true);
+  const v = new THREE.Vector3(...g.pos).applyMatrix4(root.matrixWorld);
+  return [(v.x / -v.z) / (t * ASPECT), (v.y / -v.z) / t];
+}
 let worst = 0;
 for (const [name, pose, grips] of states) {
+  if (palmStates.has(name)) {
+    for (const key of ['right', 'left']) {
+      if (!grips[key]) continue;
+      const [x, y] = palmNdc(pose, grips[key]);
+      expect(`${name}: ${key} palm inside the frame (|ndc| <= 0.95)`, Math.abs(x) <= 0.95 && Math.abs(y) <= 0.95, `ndc ${x.toFixed(2)}, ${y.toFixed(2)}`);
+    }
+  }
   if (pose.some((x) => !Number.isFinite(x))) { expect(`${name}: pose is finite`, false); continue; }
   const { total, perHand } = coverage(pose, grips);
   worst = Math.max(worst, total);

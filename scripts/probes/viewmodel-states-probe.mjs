@@ -212,6 +212,9 @@ const record = async (label, snap) => {
   report.handVisibility.push({ label, ...snap, drawnHands: rows.length, offScreen: off, coverage: +cov.coverage.toFixed(4), fpTris: fp.drawnFpTris, primitive });
   if (cov.coverage > COVERAGE_CAP) gateFails.push(`${label}: hands cover ${(cov.coverage * 100).toFixed(1)}% > 45%`);
   if (primitive.length) gateFails.push(`${label}: primitive hand drawn (${primitive.join(' ')})`);
+  // A drawn (gripping) hand whose palm is outside the frame is the carried-wood / food defect: a hold
+  // with nobody holding it. Every visible view hand must have its palm on screen.
+  if (off.length) gateFails.push(`${label}: gripping hand off screen (${off.join(' ')})`);
   if (fp.drawnFpTris > 4000) gateFails.push(`${label}: fp_arms ${fp.drawnFpTris} tris > 4000`);
   console.log(`${label.padEnd(26)} weap=${snap.weaponId ?? '-'} pocket=${snap.pocketKind ?? '-'} st=${snap.state} cov=${(cov.coverage * 100).toFixed(1)}% fp=${fp.drawnFpTris}t hands=${rows.map((h) => `${h.root}.${h.hand}${h.onScreen ? '' : '!OFF'}${JSON.stringify(h.ndc.slice(0, 2))}`).join(' ') || '**NONE**'}`);
 };
@@ -342,13 +345,35 @@ console.log('\n── pockets ──');
 for (const kind of run('pockets') ? ['wood', 'banana', 'coconut', 'mango', 'meat'] : []) {
   await ensureAshore();
   await equipSlot(0);
-  await page.evaluate((k) => { const g = window.__piratesBR; g.pocketUsePreviewKind = k; g.pocketUsePreviewTimer = 60; }, kind);
-  await wait(900);
-  const snap = await handProbe();
-  if (snap.pocketKind !== kind) console.log(`  !! pocket ${kind}: viewmodel shows ${snap.pocketKind}`);
-  await record(`pocket-${kind}`, snap);
-  await shot(`p-${kind}`);
-  await page.evaluate(() => { const g = window.__piratesBR; g.pocketUsePreviewKind = null; g.pocketUsePreviewTimer = 0; });
+  // The controller decrements pocketUsePreviewTimer every frame, so a plain assignment only ever shows the
+  // start of the bite. Pin it with a getter (setter swallowed) at the hold and at 10 / 50 / 90 % of the
+  // preview (0.82 s food, 0.45 s wood), then restore a plain data property.
+  const duration = kind === 'wood' ? 0.45 : 0.82;
+  for (const frac of [1, 0.9, 0.5, 0.1]) {
+    await page.evaluate(([k, v]) => {
+      const g = window.__piratesBR;
+      g.pocketUsePreviewKind = k;
+      Object.defineProperty(g, 'pocketUsePreviewTimer', { configurable: true, enumerable: true, get: () => v, set: () => {} });
+    }, [kind, duration * frac]);
+    await wait(300);
+    // A new pocket kind draws in from below over VIEW_DRAW_TIME (root dropped 0.3 m at the start); software GL
+    // frames are slow enough that a fixed wait can still catch the draw-in, so wait for it to finish.
+    for (let i = 0; i < 40; i++) {
+      if (await page.evaluate(() => (window.__piratesBR.viewmodel.localViewPocketDrawTimer ?? 1) >= 1)) break;
+      await wait(150);
+    }
+    const snap = await handProbe();
+    if (snap.pocketKind !== kind) gateFails.push(`pocket ${kind}: viewmodel shows ${snap.pocketKind}`);
+    const tag = frac === 1 ? 'hold' : `bite${Math.round((1 - frac) * 100)}`;
+    await record(`pocket-${kind}-${tag}`, snap);
+    await shot(`p-${kind}-${tag}`);
+  }
+  await page.evaluate(() => {
+    const g = window.__piratesBR;
+    delete g.pocketUsePreviewTimer;
+    g.pocketUsePreviewTimer = 0;
+    g.pocketUsePreviewKind = null;
+  });
   await wait(300);
 }
 if (run('cutlass')) {
@@ -559,16 +584,21 @@ try {
         const L = { sloop: 12, brigantine: 16, galleon: 22 }[sh.type] ?? 12;
         const lz = L * 0.42;
         const cos = Math.cos(sh.rotation), sin = Math.sin(sh.rotation);
-        const wx = sh.position.x + lz * sin;
-        const wz = sh.position.z + lz * cos;
-        const dx = wx - me.position.x, dz = wz - me.position.z;
-        g.input.setLook(Math.atan2(dx, dz), -0.45);
-        const d = Math.hypot(dx, dz);
-        if (d > 0.7) g.input.keys.add('KeyW'); else g.input.keys.delete('KeyW');
         const ldx = me.position.x - sh.position.x, ldz = me.position.z - sh.position.z;
+        const myX = ldx * cos - ldz * sin, myZ = ldx * sin + ldz * cos;
+        // The centreline forward of the mainmast is blocked (the walk used to stall at local z -1, 6 m
+        // short): run up the starboard side lane at x 1.4 and only cut to the centreline past the mast.
+        const [tx, tz] = lz - myZ > 1.8 ? [1.4, Math.min(lz - 1, myZ + 2)] : [0, lz];
+        const wx = sh.position.x + tx * cos + tz * sin;
+        const wz = sh.position.z - tx * sin + tz * cos;
+        const dx = wx - me.position.x, dz = wz - me.position.z;
+        const ax = sh.position.x + lz * sin - me.position.x, az = sh.position.z + lz * cos - me.position.z;
+        g.input.setLook(Math.atan2(dx, dz), -0.45);
+        const d = Math.hypot(ax, az);
+        if (d > 0.7) g.input.keys.add('KeyW'); else g.input.keys.delete('KeyW');
         return {
           d: +d.toFixed(2), state: me.state, onShip: !!me.onShipId,
-          local: [+(ldx * cos - ldz * sin).toFixed(2), +(ldx * sin + ldz * cos).toFixed(2)],
+          local: [+myX.toFixed(2), +myZ.toFixed(2)],
           prompt: document.getElementById('interact-prompt')?.textContent ?? '',
         };
       });
