@@ -40,6 +40,7 @@ import type { Player } from '../../../shared/types/index.js';
 import { assets, type AssetName } from '../../assets/AssetLibrary.js';
 import type { RenderQuality } from '../QualityPreference.js';
 import { AVATAR_RIG } from './PlayerMeshFactory.js';
+import { attachFaceRig, updateFaceRig, triggerJaw, nearestWithin, FACE, type FaceRig, type Vec3 } from '../character/faceRig.js';
 import { pitchUpToBoneX } from '../signConventions.js';
 import { mixerIntervalFor } from './characterVariants.js';
 
@@ -177,7 +178,16 @@ export type PlayerRig = {
   /** Her skinned parts, so the shadow toggle is a loop over 7 and not a
    *  traverse of the whole body every frame. */
   skins: THREE.Mesh[];
+  /** Eyes, lids and jaw (b3.2g); null on a rig without eye/lid bones (v1). */
+  face: FaceRig | null;
 };
+
+/** Where every rigged pirate stood when last updated, so a remote pirate can
+ *  find the nearest other one to look at (b3.2g). Entries older than
+ *  GAZE_STALE_MS are ignored and pruned. */
+const gazeSeen = new Map<string, Vec3 & { at: number }>();
+const GAZE_STALE_MS = 500;
+const gazeScratch: Vec3[] = [];
 
 /** True when the GLB is loaded AND actually carries skin + clips. */
 export function rigAssetReady(): boolean {
@@ -291,8 +301,18 @@ export function makePlayerRig(
     swingFlip: 0,
     casting: true,
     skins: [],
+    face: attachFaceRig(root, h ^ 0x5bd1e995),
   };
-  root.traverse((o) => { if ((o as THREE.Mesh).isMesh) rig.skins.push(o as THREE.Mesh); });
+  // Brows and lash cards never cast (R1 F3: extras.castShadow=false), so they
+  // stay out of the shadow-LOD loop too.
+  root.traverse((o) => {
+    if (!(o as THREE.Mesh).isMesh) return;
+    if (o.userData?.castShadow === false || /^brows/.test(o.name) || /^brows/.test(o.parent?.name ?? '')) {
+      o.castShadow = false;
+      return;
+    }
+    rig.skins.push(o as THREE.Mesh);
+  });
   group.userData.rig = rig;
   // Game and PlayerAnimator both branch on `animation.variant`; keeping the
   // same shape (with an EMPTY parts table) means the procedural animator bails
@@ -423,11 +443,13 @@ export function updatePlayerRig(
   if (cutlassSwing > 0.001 && rig.prevSwing <= 0.001) {
     rig.swingFlip ^= 1;
     rig.oneShot = 0.62;
+    if (rig.face) triggerJaw(rig.face);
   }
   rig.prevSwing = cutlassSwing;
   if (player.health < rig.prevHealth - 0.5 && player.state !== 'downed' && rig.oneShot <= 0) {
     setLayer(rig, 'upper', 'hit_front');
     rig.oneShot = 0.34;
+    if (rig.face) triggerJaw(rig.face);
   }
   rig.prevHealth = player.health;
   rig.oneShot = Math.max(0, rig.oneShot - dt);
@@ -475,6 +497,7 @@ export function updatePlayerRig(
     // here reads as a glance rather than as an owl.
     headBone.rotation.y = rig.headClipY + THREE.MathUtils.clamp(lookYaw, -0.6, 0.6);
   }
+  if (rig.face) updateRigFace(rig.face, mesh, player, dt, cameraDistSq, lookPitch, lookYaw);
   if (rig.bones.hips) rig.hipsClipZ = rig.bones.hips.rotation.z;
   if (rig.bones.spine) rig.spineClipZ = rig.bones.spine.rotation.z;
 
@@ -563,5 +586,46 @@ export function playRigDeath(mesh: THREE.Group, cause: string, dt: number): bool
     rig.headClipX = rig.bones.head.rotation.x;
     rig.headClipY = rig.bones.head.rotation.y;
   }
+  // Dead eyes are shut and still (b3.2g).
+  if (rig.face) updateFaceRig(rig.face, dt, { yaw: 0, pitch: 0 }, { yaw: 0, pitch: 0 }, true);
   return true;
+}
+
+/**
+ * FACE (b3.2g, characters-04). The local pirate's eyes go to the aim point:
+ * they take whatever the head's +-0.6 / +-0.5 clamp could not. A remote pirate
+ * looks at the nearest other pirate inside 8 m, or along her aim when nobody
+ * is near. Eyes lead the head by 80 ms and clamp at yaw +-0.5, pitch +-0.35
+ * (faceRig.ts); blinks and the jaw run only inside FACE_LOD_M.
+ */
+function updateRigFace(
+  face: FaceRig, mesh: THREE.Group, player: Player, dt: number,
+  cameraDistSq: number, lookPitch: number, lookYaw: number,
+): void {
+  const now = performance.now();
+  const p = player.position;
+  gazeSeen.set(player.id, { x: p.x, y: p.y, z: p.z, at: now });
+  const head = {
+    yaw: THREE.MathUtils.clamp(lookYaw, -0.6, 0.6),
+    pitch: THREE.MathUtils.clamp(lookPitch, -0.5, 0.5),
+  };
+  let want = { yaw: lookYaw, pitch: lookPitch };
+  if (cameraDistSq > 1) {
+    gazeScratch.length = 0;
+    for (const [id, o] of gazeSeen) {
+      if (now - o.at > GAZE_STALE_MS) { gazeSeen.delete(id); continue; }
+      if (id !== player.id) gazeScratch.push(o);
+    }
+    const t = nearestWithin(p, gazeScratch, FACE.LOOK_RANGE_M);
+    if (t) {
+      const dx = t.x - p.x, dz = t.z - p.z;
+      want = {
+        yaw: Math.atan2(dx, dz) - mesh.rotation.y,
+        pitch: Math.atan2(t.y - p.y, Math.hypot(dx, dz)),
+      };
+    }
+  }
+
+  const near = cameraDistSq <= FACE.FACE_LOD_M * FACE.FACE_LOD_M;
+  updateFaceRig(face, dt, want, head, false, near);
 }

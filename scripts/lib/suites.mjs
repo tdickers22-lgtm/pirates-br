@@ -172,6 +172,11 @@ export const LOGIC = [
   // tricorn|bicorn + frock coat (frock is captain-only), shirt always, hat -> hair_<style>_hat, every node
   // exists in pirate_base_<body>.glb, >= 200 combos, archetypes == BOT_PERSONALITIES, mixer LOD bands. ~0.2 s.
   quick(tsx('test-character-variants.mjs')),
+  // test-face-rig (b3.2g, characters-04): faceRig.ts eye clamps (yaw +-0.5, pitch +-0.35), sign on real
+  // bones (target above = gaze up, head-relative), 80 ms lead, blink schedule (2-6 s, 120 ms, fully shut
+  // frame, 10 % doubles, no triples, dead = shut), lids by extras.closeDeg about +X, jaw envelope, 8 m
+  // nearest target, asset contract (eye/lid joints + closeDeg in pirate_base_<body>.glb). ~0.3 s.
+  quick(tsx('test-face-rig.mjs')),
   quick(tsx('test-ship-dynamics.mjs')),
   quick(tsx('test-ship-ladder.mjs')),
   quick(tsx('test-server-fixes.mjs')),
