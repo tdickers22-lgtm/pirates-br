@@ -33,6 +33,7 @@
  * b3.2f): full rate inside 15 m, 15 Hz inside 40 m, 5 Hz beyond (never frozen:
  * a frozen pirate slides across the deck). A pirate is 2,780 tris in 7 draws against 22-26 draws today.
  */
+import { restoreContactClipPose } from '../character/ikSolvers.js';
 import * as THREE from 'three';
 import { clone as cloneSkinnedScene } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import type { Player } from '../../../shared/types/index.js';
@@ -378,6 +379,7 @@ export function updatePlayerRig(
   if (headBone) { headBone.rotation.x = rig.headClipX; headBone.rotation.y = rig.headClipY; }
   if (rig.bones.hips) rig.bones.hips.rotation.z = rig.hipsClipZ;
   if (rig.bones.spine) rig.bones.spine.rotation.z = rig.spineClipZ;
+  restoreContactClipPose(rig.root); // b3.3c: the station IK writes absolutely, same contract
   rig.pending += dt;
   // 1e-6: twelve 1/60 frames sum to 0.19999..., which would miss the 5 Hz step
   if (rig.pending + 1e-6 >= mixerIntervalFor(cameraDistSq)) {
