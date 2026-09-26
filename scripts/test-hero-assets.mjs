@@ -36,6 +36,16 @@
 //       the file is a handful of draws.
 //   [h] FAR LOD. Ship hardware is instanced on every hull, so each piece ships a
 //       `<name>_far.glb` under 45% of its triangles (LOD1 at 60 m).
+//   [k] SINGLE-SIDED (assets-15, b3.4c). Every hero is a closed solid, so a
+//       doubleSided material rasterises and shades its back faces for nothing,
+//       on the viewmodel that covers a third of a phone screen. Only a CARD
+//       material (a pane, a sail, a flag: name matches CARD_MATERIAL) may be
+//       doubleSided. The 2026-09 atlas pass exported every hero doubleSided, so
+//       the files still to be rebuilt (b3.4e-h, through _pbr.apply_baked /
+//       _atlas v2, which set backface culling) are listed in DOUBLE_SIDED_PENDING.
+//       The list only shrinks: a listed file that is already single-sided FAILS
+//       as stale (drop the row in the rebuild commit), an unlisted doubleSided
+//       hero fails, and a name that is not in the roster fails.
 //
 // Mutation proof: PIRATES_BR_MUTATE_HERO=cutlass:tris tightens the cutlass band
 // to an impossible window (ratchet ignored), and the gate must go red.
@@ -164,6 +174,12 @@ const HERO = [
       Math.abs(b.get('ship_lantern_body').max[1]) < 0.04 && b.get('ship_lantern_body').min[1] < -0.4]] },
 ];
 
+// [k] files still exported doubleSided by the 2026-09 atlas pass. SHRINK ONLY (see the header).
+export const DOUBLE_SIDED_PENDING = ['cutlass', 'flintlock', 'flintknock', 'blunderbuss', 'eye_of_reach',
+  'cannon', 'wheel', 'capstan', 'ship_lantern'];
+export const CARD_MATERIAL = /(glass|pane|card|sail|canvas|flag|leaf|flame)/i;
+const pending = new Set(DOUBLE_SIDED_PENDING);
+
 // [a] band source: the `tris` literals above are the pre-D27 bands, kept ONLY as the no-regress
 // floor for files the test-asset-tiers ratchet still lists as off-band (see the header).
 const ratchet = new Set(RATCHET);
@@ -181,6 +197,8 @@ if (mutate) {
   const [file, what] = mutate.split(':');
   const row = HERO.find((h) => h.file === file);
   if (row && what === 'tris') { row.tris = [1, 2]; console.log(`  ! mutation: ${file} triangle band -> ${row.tris}`); }
+  if (row && what === 'twosided') { pending.delete(file); console.log(`  ! mutation: ${file} dropped from DOUBLE_SIDED_PENDING`); }
+  if (what === 'stale') { pending.add(file); console.log(`  ! mutation: ${file} added to DOUBLE_SIDED_PENDING`); }
 }
 
 console.log(`HERO GLB census — ${HERO.length} files\n`);
@@ -206,6 +224,16 @@ for (const h of HERO) {
   expect(`[f] ${h.file}: no skins, no animations`, s.skins === 0 && s.anims === 0);
   expect(`[g] ${h.file}: ${s.prims} primitives ≤ ${h.nodes.length + 1}`, s.prims <= h.nodes.length + 1,
     'the atlas exists so the file draws in a handful of calls');
+  {
+    const two = (g.json.materials || []).filter((m) => m.doubleSided && !CARD_MATERIAL.test(m.name || ''));
+    if (pending.has(h.file)) {
+      expect(`[k] ${h.file}: still doubleSided, so its DOUBLE_SIDED_PENDING row is live (rebuild pending)`, two.length > 0,
+        'the file is single-sided now: drop it from DOUBLE_SIDED_PENDING in the rebuild commit (the list only shrinks)');
+    } else {
+      expect(`[k] ${h.file}: every non-card material single-sided (doubleSided false)`, two.length === 0,
+        `doubleSided: ${two.map((m) => m.name).join(', ')} — closed solids cull back faces (use_backface_culling)`);
+    }
+  }
   if (h.far) {
     const farFile = `${h.file}_far.glb`;
     if (!fs.existsSync(path.join(DIR, farFile))) { expect(`[h] ${farFile}: present (LOD1 at 60 m)`, false); continue; }
@@ -213,6 +241,10 @@ for (const h of HERO) {
     expect(`[h] ${h.file}_far: ${fs2.tris} tris ≤ 45% of ${s.tris}`, fs2.tris <= s.tris * 0.45,
       'a far LOD that saves nothing is a second upload for nothing');
   }
+}
+
+for (const f of pending) {
+  expect(`[k] DOUBLE_SIDED_PENDING row '${f}' names a hero in the roster`, HERO.some((h) => h.file === f));
 }
 
 console.log(`\n${checks} checks, ${failures} failed`);

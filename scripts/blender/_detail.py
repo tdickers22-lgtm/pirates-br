@@ -741,4 +741,243 @@ def ship_asset(coll, name, spec=None, ao=None, tint_seed=5, join_all=True,
     return info
 
 
+# ── ship_asset_v2 (b3.4c; assets-14): model -> UV -> bake -> LODs -> export -> verify -> sheet ──
+# The caller MODELS (with _hires) and picks the texturing: uv='atlas' bakes the objects' PBR sources
+# (or `highs`) into one per-asset atlas (_atlas.pbr_atlas); uv='trim' means the caller already ran
+# _trim.trim_uv, so the objects share a family trim material and nothing is baked per asset.
+# LODs follow the b3.4a contract read by test-asset-tiers: `<name>_lods.glb` next to `<name>.glb`,
+# nodes named `<name>_LOD1`, `<name>_LOD2`, `<name>_far`, each strictly coarser, each a SURFACE
+# (welded before decimating: the split-vertex rock lesson; build_far_lods.py / test-far-lod-integrity).
+LOD_MIN_AREA = 0.92         # test-far-lod-integrity MIN_AREA_KEEP
+LOD_MAX_AREA = 1.08         # more surface than the source = collapsed spikes / folded faces
+
+
+def lod_integrity(src, lod):
+    """Welded surface stats of two objects (world space): boundary loops, area, tris, and whether
+    `lod` is the same closed surface as `src`, cheaper."""
+    def measure(ob):
+        dg = bpy.context.evaluated_depsgraph_get()
+        ev = ob.evaluated_get(dg)
+        me = ev.to_mesh()
+        bm = bmesh.new()
+        bm.from_mesh(me)
+        bm.transform(ob.matrix_world)
+        ev.to_mesh_clear()
+        bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=1e-4)
+        bmesh.ops.triangulate(bm, faces=bm.faces)
+        area = sum(f.calc_area() for f in bm.faces)
+        bnd = [e for e in bm.edges if len(e.link_faces) == 1]
+        parent = {}
+
+        def find(a):
+            while parent.get(a, a) != a:
+                a = parent[a]
+            return a
+        for e in bnd:
+            a, b = find(e.verts[0].index), find(e.verts[1].index)
+            parent.setdefault(a, a)
+            parent.setdefault(b, b)
+            parent[a] = b
+        loops = len({find(e.verts[0].index) for e in bnd})
+        out = {'tris': len(bm.faces), 'area': area, 'loops': loops}
+        bm.free()
+        return out
+    s, l = measure(src), measure(lod)
+    keep = l['area'] / max(s['area'], 1e-12)
+    return {'src': s, 'lod': l, 'area_keep': keep, 'tri_keep': l['tris'] / max(s['tris'], 1),
+            'ok': l['loops'] <= s['loops'] and LOD_MIN_AREA <= keep <= LOD_MAX_AREA and l['tris'] < s['tris']}
+
+
+def lod_chain(objs, name, ratios=(0.4, 0.12, 0.03), min_tris=(0, 0, 0), adaptive=True):
+    """LOD1 / LOD2 / far copies of the (joined) objects: weld, triangulate, Collapse-decimate to the
+    ratio of LOD0 triangles (never below min_tris). Returns [(label, obj)]."""
+    labels = ('LOD1', 'LOD2', 'far')
+    src = []
+    for o in objs:
+        c = o.copy()
+        c.data = o.data.copy()
+        for col in o.users_collection:
+            col.objects.link(c)
+        src.append(c)
+    if len(src) > 1:
+        with bpy.context.temp_override(active_object=src[0], object=src[0], selected_objects=src,
+                                       selected_editable_objects=src):
+            bpy.ops.object.join()
+    base = src[0]
+    bm = bmesh.new()
+    bm.from_mesh(base.data)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=1e-4)
+    bmesh.ops.triangulate(bm, faces=bm.faces)
+    n0 = len(bm.faces)
+    bm.to_mesh(base.data)
+    bm.free()
+    out, cap = [], n0
+    for label, r, mn in zip(labels, ratios, min_tris):
+        r = max(r, mn / max(n0, 1))
+        while True:
+            c = base.copy()
+            c.data = base.data.copy()
+            for col in base.users_collection:
+                col.objects.link(c)
+            c.name = c.data.name = f'{name}_{label}'
+            mod = c.modifiers.new('lod', 'DECIMATE')
+            mod.decimate_type = 'COLLAPSE'
+            mod.ratio = r
+            mod.use_collapse_triangulate = True
+            with bpy.context.temp_override(object=c, active_object=c):
+                bpy.ops.object.modifier_apply(modifier=mod.name)
+            c.data.shade_smooth()
+            if not adaptive:
+                break
+            # Adaptive: the requested ratio is a TARGET, the surface is the contract. A Collapse that
+            # opens a hole or eats > 8% of the area (thin hoops and caps at ~3%) is retried coarser-less
+            # (x1.4) until it is the same surface, never past 90% of the level above.
+            ig = lod_integrity(base, c)
+            if ig['ok'] or r >= 0.9 * cap / n0:
+                break
+            bpy.data.objects.remove(c)
+            r = min(r * 1.4, 0.9 * cap / n0)
+        cap = len(c.data.polygons)
+        c['lod_ratio'] = round(r, 4)
+        out.append((label, c))
+    bpy.data.objects.remove(base)
+    return out
+
+
+def _glb_json(path):
+    import json as _json
+    import struct as _struct
+    with open(path, 'rb') as f:
+        f.read(12)
+        ln, _ = _struct.unpack('<II', f.read(8))
+        return _json.loads(f.read(ln))
+
+
+def _export(objs, path):
+    bpy.ops.object.select_all(action='DESELECT')
+    for o in objs:
+        o.select_set(True)
+    bpy.context.view_layer.objects.active = objs[0]
+    bpy.ops.export_scene.gltf(filepath=path, export_format='GLB', use_selection=True,
+                              export_image_format='AUTO', export_apply=True)
+    return path
+
+
+def contact_sheet(objs, path, res=(960, 320)):
+    """One Workbench (textured, CPU-cheap) shot of the given objects side by side, left to right."""
+    scn = bpy.context.scene
+    prev = [(o, o.location.copy()) for o in objs]
+    x = 0.0
+    for o in objs:
+        bb = [o.matrix_world @ Vector(c) for c in o.bound_box]
+        w = max(v.x for v in bb) - min(v.x for v in bb)
+        o.location.x += x - min(v.x for v in bb)
+        x += w * 1.25
+    bpy.context.view_layer.update()
+    pts = [o.matrix_world @ Vector(c) for o in objs for c in o.bound_box]
+    lo = Vector([min(p[i] for p in pts) for i in range(3)])
+    hi = Vector([max(p[i] for p in pts) for i in range(3)])
+    ctr, ext = (lo + hi) / 2, (hi - lo)
+    cd = bpy.data.cameras.new('_cs_cam')
+    cd.type = 'ORTHO'
+    cd.ortho_scale = max(ext.x, ext.z * res[0] / res[1]) * 1.1
+    cam = bpy.data.objects.new('_cs_cam', cd)
+    scn.collection.objects.link(cam)
+    cam.location = ctr + Vector((0, -10, 1.5))
+    cam.rotation_euler = (ctr - cam.location).to_track_quat('-Z', 'Y').to_euler()
+    prev_cam, prev_eng = scn.camera, scn.render.engine
+    scn.camera = cam
+    scn.render.engine = 'BLENDER_WORKBENCH'
+    scn.display.shading.light = 'STUDIO'
+    scn.display.shading.color_type = 'TEXTURE'
+    scn.render.resolution_x, scn.render.resolution_y = res
+    scn.render.resolution_percentage = 100
+    scn.render.filepath = path
+    bpy.ops.render.render(write_still=True)
+    scn.camera, scn.render.engine = prev_cam, prev_eng
+    bpy.data.objects.remove(cam)
+    for o, loc in prev:
+        o.location = loc
+    return path
+
+
+def ship_asset_v2(objs, name, uv='atlas', highs=None, tier='near', samples=16, glb_dir=None, bake_dir=None,
+                  lods=(0.4, 0.12, 0.03), min_tris=(0, 0, 0), sheet=None, licensed=(), cards=()):
+    """model -> UV -> bake -> LODs -> export -> verify -> contact sheet. Returns a report dict with
+    'glb', 'lods_glb', 'materials', 'lods' ([(label, tris, integrity)]), 'ok', 'errors'."""
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    import _pbr as P
+    import _atlas as A
+    objs = [o for o in objs if o.type == 'MESH']
+    glb_dir = glb_dir or _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '..', '..',
+                                       'public', 'assets', 'models')
+    errors = []
+    # UV + bake
+    if uv == 'atlas':
+        A.pbr_atlas([o for o in objs if o.name not in cards], name, highs=highs, tier=tier, samples=samples,
+                    out_dir=bake_dir)
+    elif uv != 'trim':
+        raise ValueError(f'ship_asset_v2 {name}: uv must be atlas or trim, got {uv!r}')
+    ids = set(licensed)
+    for o in objs:
+        for m in o.data.materials:
+            if m is not None:
+                ids |= {i for i in str(m.get('pbr_sources', '')).split(',') if i}
+                if m.get('pbr_source'):
+                    ids.add(m['pbr_source'])
+    P.require_licensed(sorted(ids))
+    # LODs
+    chain = lod_chain(objs, name, lods, min_tris) if lods else []
+    # export
+    glb = _export(objs, _os.path.join(glb_dir, f'{name}.glb'))
+    lods_glb = _export([c for _, c in chain], _os.path.join(glb_dir, f'{name}_lods.glb')) if chain else None
+    # verify (the FILE, not the scene)
+    gj = _glb_json(glb)
+    mats = gj.get('materials', [])
+    for m in mats:
+        card = any(m.get('name', '').startswith(c) for c in cards)
+        pmr = m.get('pbrMetallicRoughness', {})
+        if m.get('doubleSided') and not card:
+            errors.append(f"material {m.get('name')} is doubleSided on a closed mesh")
+        if not card and not ('normalTexture' in m and 'occlusionTexture' in m and 'baseColorTexture' in pmr
+                             and 'metallicRoughnessTexture' in pmr):
+            errors.append(f"material {m.get('name')} lacks baseColor + normal + ORM")
+    lod_rep, joined = [], None
+    if chain:
+        src = []
+        for o in objs:
+            c = o.copy()
+            c.data = o.data.copy()
+            for col in o.users_collection:
+                col.objects.link(c)
+            src.append(c)
+        if len(src) > 1:
+            with bpy.context.temp_override(active_object=src[0], object=src[0], selected_objects=src,
+                                           selected_editable_objects=src):
+                bpy.ops.object.join()
+        joined = src[0]
+        prev_tris = None
+        for label, c in chain:
+            integ = lod_integrity(joined, c)
+            lod_rep.append((label, integ['lod']['tris'], integ))
+            if not integ['ok']:
+                errors.append(f"{label}: loops {integ['lod']['loops']} (src {integ['src']['loops']}), "
+                              f"area {integ['area_keep']:.3f}, tris {integ['lod']['tris']}")
+            if prev_tris is not None and integ['lod']['tris'] >= prev_tris:
+                errors.append(f'{label} is not coarser than the level above ({integ["lod"]["tris"]} >= {prev_tris})')
+            prev_tris = integ['lod']['tris']
+        bpy.data.objects.remove(joined)
+    if sheet:
+        contact_sheet(objs[:1] + [c for _, c in chain], sheet)
+    for _, c in chain:
+        bpy.data.objects.remove(c)
+    rep = {'glb': glb, 'lods_glb': lods_glb, 'materials': mats, 'lods': lod_rep, 'errors': errors,
+           'ok': not errors, 'sheet': sheet}
+    print(f"SHIP_V2 {name}: {len(mats)} material(s), LODs "
+          + ', '.join(f'{l} {t}' for l, t, _ in lod_rep) + (f"; ERRORS {errors}" if errors else '; verified'))
+    return rep
+
+
 print("detail helpers loaded")

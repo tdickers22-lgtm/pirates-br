@@ -14,3 +14,6 @@ Model kits (Quaternius and similar) are in `LICENSES.md` next to this file.
 |---|---|---|---|---|---|---|---|
 | `brown_planks_03` | Brown Planks 03 | https://polyhaven.com/a/brown_planks_03 | Rob Tuytel | CC0 1.0 | Diffuse, nor_gl, arm (1k) | 2026-09-26 | scripts/blender/test_pipeline_smoke.py (barrel staves); wood source for b3.4c+ trim sheets |
 | `rust_coarse_01` | Rust Coarse 01 | https://polyhaven.com/a/rust_coarse_01 | Dimitrios Savva, Rico Cilliers | CC0 1.0 | Diffuse, nor_gl, arm (1k) | 2026-09-26 | scripts/blender/test_pipeline_smoke.py (iron hoops); iron source for b3.4c+ trim sheets |
+| `castle_wall_slates` | Castle Wall Slates | https://polyhaven.com/a/castle_wall_slates | Rob Tuytel | CC0 1.0 | Diffuse, nor_gl, arm (1k) | 2026-09-26 | scripts/blender/_trim.py stone family (ashlar, ledge, rubble, plinth) and shingle family (slate) |
+| `rough_linen` | Rough Linen | https://polyhaven.com/a/rough_linen | Rico Cilliers, colormass | CC0 1.0 | Diffuse, nor_gl, arm (1k) | 2026-09-26 | scripts/blender/_trim.py canvas family (panel, plain, hem, patch) |
+| `hessian_230` | Hessian 230 | https://polyhaven.com/a/hessian_230 | Rico Cilliers, colormass | CC0 1.0 | Diffuse, nor_gl, arm (1k) | 2026-09-26 | scripts/blender/_trim.py rope family (rope_thick, rope_thin, lashing, whipping) |

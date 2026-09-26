@@ -106,7 +106,7 @@ def atlas_unwrap(objs, angle_deg=66.0, island_margin=0.02):
 
 
 def hero_atlas(coll, name, size=512, samples=1, roughness=0.62, metallic=0.0,
-               angle_deg=66.0, island_margin=0.02, margin_px=6, keep=()):
+               angle_deg=66.0, island_margin=0.02, margin_px=6, keep=(), double_sided=False):
     """AO x tint x albedo -> one `atlas_<name>` image; returns (image, material).
     Run after bake_ao + tint_pass, before join/export.
 
@@ -156,6 +156,8 @@ def hero_atlas(coll, name, size=512, samples=1, roughness=0.62, metallic=0.0,
         bpy.data.materials.remove(amat)
     amat = bpy.data.materials.new(f'Atlas_{name}')
     amat.use_nodes = True
+    # assets-15: hero assets are closed solids; glTF doubleSided follows backface culling.
+    amat.use_backface_culling = not double_sided
     nt = amat.node_tree
     bsdf = nt.nodes.get('Principled BSDF')
     bsdf.inputs['Roughness'].default_value = roughness
@@ -198,6 +200,55 @@ def hero_atlas(coll, name, size=512, samples=1, roughness=0.62, metallic=0.0,
     print(f'ATLAS {name}: {size}x{size} baked from {n_mats} materials '
           f'on {len(objs)} objects -> Atlas_{name}')
     return img, amat
+
+
+# ── v2: PBR atlas (b3.4c; assets-02) ─────────────────────────
+# v1 above bakes palette x AO into one flat albedo (metallic 0, roughness 0.62, no normal map), which is
+# why steel, brass and wood read as the same matte plastic. v2 keeps the one-layout / one-material idea
+# but bakes the PBR sources (`_pbr.source_material` / `metal_material`, or `highs` for a high->low
+# normal) into baseColor + tangent normal + ORM through `_pbr.bake_pbr`. The named nodes survive: every
+# object keeps its own mesh and name (hammer, trigger, barrel...), shares one UV layout, and gets the one
+# `PBR_<name>` material (single-sided). COLOR_0 goes white exactly as in v1 (AO lives in the ORM).
+def _white_col(objs):
+    for obj in objs:
+        attr = obj.data.color_attributes.get('Col')
+        if attr is not None:
+            obj.data.color_attributes.active_color = attr
+            for d in attr.data:
+                d.color = (1.0, 1.0, 1.0, 1.0)
+
+
+def pbr_atlas(objs, name, highs=None, tier='near', samples=16, out_dir=None, cage_offset=0.02,
+              angle_deg=66.0, island_margin=0.02):
+    """Smart-UV `objs` into ONE shared layout, bake their PBR materials (or `highs`) onto a joined
+    temporary copy, and give every object the single baked material. Returns (bake result, material)."""
+    import tempfile
+    import _pbr as P
+    objs = [o for o in objs if o.type == 'MESH']
+    if not objs:
+        raise RuntimeError(f'pbr_atlas: {name} has no meshes')
+    P.smart_uv(objs, angle_deg, island_margin)
+    tmp = []
+    for o in objs:
+        c = o.copy()
+        c.data = o.data.copy()
+        for col in o.users_collection:
+            col.objects.link(c)
+        tmp.append(c)
+    base = tmp[0]
+    with bpy.context.temp_override(active_object=base, object=base, selected_objects=tmp,
+                                   selected_editable_objects=tmp):
+        bpy.ops.object.join()
+    base.name = f'_atlas_{name}'
+    out_dir = out_dir or os.path.join(tempfile.gettempdir(), 'pbr_atlas')
+    res = P.bake_pbr(base, highs, out_dir, name, tier=tier, samples=samples, cage_offset=cage_offset)
+    mat = P.apply_baked(base, res['paths'], name)
+    bpy.data.objects.remove(base)
+    for o in objs:
+        o.data.materials.clear()
+        o.data.materials.append(mat)
+    _white_col(objs)
+    return res, mat
 
 
 # ── hero authoring frame ─────────────────────────────────────

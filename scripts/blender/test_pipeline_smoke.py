@@ -5,12 +5,18 @@
   _pbr     PolyHaven CC0 wood + iron by id (cached; the second fetch makes no request), licence rows,
            box projection on smart UVs, cage bake high -> low: BaseColor / Normal / ORM
   export   one glTF material with baseColor + normal + occlusion + metallicRoughness, single-sided
+  b3.4c    _trim: the wood_iron family sheet (strips, periodic, cached) and a TRIM-SHEET barrel that
+           exports ONE material through _detail.ship_asset_v2 (UV -> LODs -> export -> verify ->
+           contact sheet); its <name>_lods.glb re-imported FROM THE FILE passes LOD integrity
+           (welded, no new boundary loop, >= 92% area, strictly coarser); _atlas.pbr_atlas keeps
+           named nodes on one single-sided PBR material
 
 and every step is graded on its SIDE EFFECT (the PNG pixels, the GLB JSON), not a return value.
 Must finish in < 90 s headless. Exit 0 only when every check passes.
 
   /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup -P scripts/blender/test_pipeline_smoke.py
-  PIRATES_BR_MUTATE=smoke:<flat|nometal|twosided|segments|unlicensed> ... proves the matching check goes red.
+  PIRATES_BR_MUTATE=smoke:<flat|nometal|twosided|segments|unlicensed|trimleak|lodhole|lodflat>
+  ... proves the matching check goes red.
 
 Machine protection (COMMON.md): headless, Cycles CPU, 512^2 far-tier bake at 8 samples, one process.
 """
@@ -214,6 +220,133 @@ try:
     check(not m0.get('doubleSided', False), 'GLB: single-sided (doubleSided false)')
     check(len(gj.get('images', [])) in (3,), 'GLB: 3 images (ORM shared by occlusion + metalRough)',
           f'{len(gj.get("images", []))}')
+
+    # ── b3.4c: family trim sheet ──
+    import _trim as TR
+    import _detail as D
+    import _atlas as A
+    sheet = TR.build_sheet('wood_iron', tier='far', samples=8)
+    check(all(os.path.getsize(p) > 1000 for p in sheet['paths'].values()) and sheet['size'] == 512,
+          'trim sheet wood_iron: basecolor + normal + ORM at the far tier',
+          f"{'cache hit' if sheet['cached'] else 'baked %.1f s, %d high objects' % (sheet['seconds'], sheet['high_objects'])}")
+    rng = sheet['strips']
+    tn, tcov = load(sheet['paths']['normal'])
+    to, _ = load(sheet['paths']['orm'])
+    S = sheet['size']
+    tn, to = tn.reshape(S, S, 4), to.reshape(S, S, 4)
+
+    def rows(strip, inner=0.25):  # image rows of a strip's middle (inner) or its edges
+        v0, v1 = rng[strip]
+        a, b = int(v0 * S), int(v1 * S)
+        m = int((b - a) * inner)
+        return slice(a + m, b - m), list(range(a + 2, a + 2 + max(2, m // 2))) + list(range(b - 2 - max(2, m // 2), b - 2))
+    mid, edge = rows('plank')
+    tilt_edge = float(np.abs(tn[edge, :, 1] - 0.5).mean())
+    tilt_mid = float(np.abs(tn[mid, :, 1] - 0.5).mean())
+    check(tilt_edge > tilt_mid + 0.03, 'trim normal: plank strip edges are bevelled (normals tilt at the strip edges)',
+          f'|G-0.5| edge {tilt_edge:.3f} vs middle {tilt_mid:.3f}')
+    im, _ = rows('iron_band')
+    pm, _ = rows('plank')
+    check(float((to[im, :, 2] > 0.5).mean()) > 0.8 and float((to[pm, :, 2] > 0.5).mean()) < 0.05,
+          'trim ORM: iron strips metal, plank strips not',
+          f'iron {(to[im, :, 2] > 0.5).mean():.2f}, plank {(to[pm, :, 2] > 0.5).mean():.2f}')
+    col0, col1 = tn[mid, :4, :3], tn[mid, -4:, :3]
+    check(float(np.abs(col0.mean(axis=1) - col1.mean(axis=1)).mean()) < 0.08, 'trim sheet tiles in U (left and right edges agree)',
+          f'mean |L-R| {np.abs(col0.mean(axis=1) - col1.mean(axis=1)).mean():.3f}')
+    t2 = time.time()
+    again = TR.build_sheet('wood_iron', tier='far', samples=8)
+    check(again['cached'] and again['key'] == sheet['key'], 'second build_sheet is a cache hit',
+          f'{time.time() - t2:.2f} s')
+
+    # ── b3.4c: trim-sheet barrel through ship_asset_v2 ──
+    tb_wood = bpy.data.materials.new('tb_wood')
+    tb_iron = bpy.data.materials.new('tb_iron')
+    tb = [H.lathe('tb_body', prof, n_lo, material=tb_wood)]
+    for k, zc in enumerate((0.07, 0.2, HGT - 0.2, HGT - 0.07)):
+        rz = R0 + (R1 - R0) * (1 - ((zc / HGT) * 2 - 1) ** 2)
+        ring = [(rz + 0.004, zc - 0.022), (rz + 0.012, zc - 0.018), (rz + 0.012, zc + 0.018),
+                (rz + 0.004, zc + 0.022)]
+        tb.append(H.lathe(f'tb_hoop{k}', ring, n_lo, closed=True, material=tb_iron))
+    H.bevel(tb[0], 0.008, segments=2, angle_deg=35)
+    trim_barrel = H.join(tb, 'smoke_trim_barrel')
+    per = TR.trim_uv(trim_barrel, {'tb_wood': 'plank', 'tb_iron': 'iron_band'}, sheet,
+                     run={'plank': 'z', 'iron_band': 'ring'}, pad_px=-40 if 'trimleak' in MUT else TR.PAD_PX)
+    me = trim_barrel.data
+    leak = 0
+    strip_of = {}
+    for poly in me.polygons:
+        vs = [me.uv_layers.active.data[li].uv[1] for li in poly.loop_indices]
+        inside = [s for s, (a, b) in rng.items() if a - 1e-6 <= min(vs) and max(vs) <= b + 1e-6]
+        leak += 0 if inside else 1
+        strip_of[inside[0] if inside else None] = strip_of.get(inside[0] if inside else None, 0) + 1
+    check(leak == 0 and set(strip_of) == {'plank', 'iron_band'},
+          'trim UVs: every face inside its strip (staves on plank, hoops on iron_band)',
+          f'{per}; faces outside a strip: {leak}')
+    if 'twosided' in MUT:
+        trim_barrel.data.materials[0].use_backface_culling = False
+    lods = (0.4, 0.12, 0.03)
+    rep = D.ship_asset_v2([trim_barrel], 'smoke_trim_barrel', uv='trim', glb_dir=OUT, lods=lods,
+                          min_tris=(0, 0, 60), sheet=os.path.join(OUT, 'smoke_trim_barrel_sheet.png'),
+                          licensed=[WOOD, IRON])
+    gt = D._glb_json(rep['glb'])
+    tm = gt.get('materials', [])
+    t0m = tm[0] if tm else {}
+    check(len(tm) == 1 and 'normalTexture' in t0m and 'occlusionTexture' in t0m
+          and {'baseColorTexture', 'metallicRoughnessTexture'} <= set(t0m.get('pbrMetallicRoughness', {}))
+          and len(gt.get('images', [])) == 3 and not t0m.get('doubleSided', False),
+          'trim-sheet barrel exports ONE material (sheet baseColor + normal + ORM, single-sided)',
+          f"{len(tm)} material(s) {[m.get('name') for m in tm]}, {len(gt.get('images', []))} images, "
+          f"doubleSided {t0m.get('doubleSided', False)}; ship_asset_v2 errors {rep['errors']}")
+    check(os.path.exists(rep['sheet']) and os.path.getsize(rep['sheet']) > 5000, 'ship_asset_v2 wrote a contact sheet',
+          rep['sheet'])
+    check(rep['ok'], 'ship_asset_v2 verify step passes (materials + in-scene LOD integrity)',
+          '; '.join(rep['errors']) or ', '.join(f'{l} {t} tris' for l, t, _ in rep['lods']))
+
+    # LOD integrity graded on the FILES: re-import LOD0 and <name>_lods.glb
+    if 'lodhole' in MUT or 'lodflat' in MUT:
+        import bmesh as _bm
+        bpy.ops.import_scene.gltf(filepath=rep['lods_glb'])
+        for o in list(bpy.context.selected_objects):
+            if o.name.endswith('LOD2') and 'lodhole' in MUT:
+                b = _bm.new()
+                b.from_mesh(o.data)
+                _bm.ops.delete(b, geom=b.faces[:6], context='FACES')
+                b.to_mesh(o.data)
+                b.free()
+            if o.name.endswith('far') and 'lodflat' in MUT:
+                for v in o.data.vertices:
+                    v.co.z *= 0.2
+        D._export(list(bpy.context.selected_objects), rep['lods_glb'])
+        for o in list(bpy.context.selected_objects):
+            bpy.data.objects.remove(o)
+    before = set(bpy.data.objects)
+    bpy.ops.import_scene.gltf(filepath=rep['glb'])
+    src_obj = next(o for o in set(bpy.data.objects) - before if o.type == 'MESH')
+    before = set(bpy.data.objects)
+    bpy.ops.import_scene.gltf(filepath=rep['lods_glb'])
+    got = {o.name.rsplit('_', 1)[-1].split('.')[0]: o for o in set(bpy.data.objects) - before if o.type == 'MESH'}
+    check(sorted(got) == ['LOD1', 'LOD2', 'far'], '<name>_lods.glb holds LOD1 / LOD2 / far nodes (b3.4a contract)',
+          ', '.join(sorted(o.name for o in got.values())))
+    prev = None
+    for label, r in zip(('LOD1', 'LOD2', 'far'), lods):
+        if label not in got:
+            continue
+        ig = D.lod_integrity(src_obj, got[label])
+        coarser = prev is None or ig['lod']['tris'] < prev
+        check(ig['ok'] and coarser, f'LOD file integrity {label}: welded, no new boundary loop, 92-108% area, coarser',
+              f"tris {ig['lod']['tris']} ({ig['tri_keep']:.2f} of {ig['src']['tris']}), area {ig['area_keep']:.3f}, "
+              f"loops {ig['lod']['loops']} (src {ig['src']['loops']})")
+        prev = ig['lod']['tris']
+
+    # ── b3.4c: _atlas v2 keeps named nodes on one single-sided PBR material ──
+    a_body = H.lathe('atlas_body', prof, 16, material=wood)
+    a_hoop = H.lathe('atlas_hoop', [(R1 + 0.004, 0.2), (R1 + 0.012, 0.21), (R1 + 0.012, 0.24), (R1 + 0.004, 0.25)],
+                     16, closed=True, material=iron)
+    ares, amat = A.pbr_atlas([a_body, a_hoop], 'smoke_atlas', tier='far', samples=4, out_dir=OUT)
+    same = a_body.data.materials[0] == a_hoop.data.materials[0] == amat and len(a_body.data.materials) == 1
+    check(same and amat.use_backface_culling and a_body.name == 'atlas_body' and a_hoop.name == 'atlas_hoop',
+          '_atlas v2: named nodes survive, one PBR material shared, single-sided',
+          f"{amat.name}, maps {sorted(ares['paths'])}")
 except Exception as e:
     import traceback
     traceback.print_exc()
