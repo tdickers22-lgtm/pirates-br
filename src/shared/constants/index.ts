@@ -1448,7 +1448,10 @@ export const BOT_ENGAGE_SHRINK_MULT = 1.2;
  *  to hunt at once, so nine crews met over one hull and eight of them watched.
  *  Phases 0-2 carry the wreck window, so that is where the cap opens — and it is
  *  still a cap: half the lobby, not the lobby. */
-export const BOT_MAX_HUNTERS_BY_PHASE = [5, 7, 7, 7, 8, 8, 10];
+/*  b3.5c: 5/7/7/7 let 26 of 38 founders in 150-300 s be PvP (mean 7.25 afloat
+ *  at 300 s against 9.6-10.4); 2/3 in phases 0-1 lands 10.25. [2,3,5,6,4,5,10]
+ *  was tried for the mid lulls and made 480/600/end worse. */
+export const BOT_MAX_HUNTERS_BY_PHASE = [2, 3, 4, 5, 6, 8, 10];
 /** During early peace a bot only answers ships that shot at it inside this range. */
 export const BOT_DEFEND_RANGE = 260;
 
@@ -1505,7 +1508,12 @@ export const BERTH_FRAME_LATERAL_SLACK = 45;
  *  they still bounce off, lose way and get shoved back toward deep water, they
  *  just don't drown for it. A bot helm running a shoal at t=40 s is a pathing
  *  miss the player never sees, and it was quietly deleting 10% of the lobby. */
-export const BOT_GROUNDING_FORGIVENESS_SECONDS = BOT_EARLY_PEACE_SECONDS;
+/*  b3.5c: it now runs through storm phase 2 (to 520 s), not just the 150 s peace.
+ *  Founder attribution in pacing-sim showed ONE size-1 keel breach sinking a
+ *  solo bot at 190-220 s with its hand alive on deck (bots do not patch while
+ *  they sail): 11 of 38 founders in 150-300 s across the 8 seeds were keel
+ *  breaches, 7 more in 300-480 s. Humans aboard still forfeit it. */
+export const BOT_GROUNDING_FORGIVENESS_SECONDS = Math.max(BOT_EARLY_PEACE_SECONDS, 520);
 
 // ── Bot seamanship ───────────────────────────────────────────
 /** How far ahead a bot helm probes for land / sea rocks along its heading.

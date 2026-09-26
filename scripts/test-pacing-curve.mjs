@@ -63,9 +63,11 @@ await Promise.all(Array.from({ length: Math.min(CONC, SEEDS.length) }, async () 
     const r = rows[i];
     console.log(`  seed ${r.seed}: ` + MARKS.map((m) => `${m}=${r.marks[m]}`).join(' ')
       + `  | ${r.endReason === 'timeout' ? 'did not end' : `ended ${r.endReason}`} at ${r.endT.toFixed(0)} s`
-      + `  | founders ${r.sinks.map((t) => t.toFixed(0)).join(',')}  | kills ${r.kills.length}`);
+      + `  | founders ${r.sinks.map((t) => t.toFixed(0)).join(',')}  | kills ${r.kills.length}`
+      + `  | why ${Object.entries((r.causes ?? []).reduce((a, c) => ({ ...a, [c.cause]: (a[c.cause] ?? 0) + 1 }), {})).map(([k, v]) => `${k} ${v}`).join(', ')}`);
   }
 }));
+if (process.env.PACING_DUMP) (await import('node:fs')).writeFileSync(process.env.PACING_DUMP, JSON.stringify(rows, null, 1));
 const mean = {};
 for (const m of MARKS) mean[m] = rows.reduce((s, r) => s + r.marks[m], 0) / rows.length;
 console.log(`arc (mean afloat): ` + MARKS.map((m) => `${m}s=${mean[m].toFixed(2)}`).join('  ')

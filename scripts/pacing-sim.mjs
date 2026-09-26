@@ -66,6 +66,30 @@ export function simulateMatch({ matchId, minutes, mode = MODE, botCount, marks =
     return n;
   };
   let killsPrev = pvpKills();
+  // WHY each hull founders (b3.5c): the open breaches by source at the moment
+  // she goes, whether a rival had powder in her in the last 55 s (the same
+  // window that credits a sink), whether she was outside the ring, and where
+  // her crew was. Tuning without this moved the wrong knob once already.
+  const causes = [];
+  const origSink = match['startShipSinking'].bind(match);
+  match['startShipSinking'] = (ship, rapid = false, by = null) => {
+    if (ship.alive && !ship.sinking) {
+      const holes = {};
+      for (const h of ship.holes ?? []) if (!h.patched) holes[h.source ?? '?'] = (holes[h.source ?? '?'] ?? 0) + (h.size ?? 1);
+      const st = state.storm;
+      const dist = Math.hypot(ship.position.x - st.centerX, ship.position.z - st.centerZ);
+      const crew = state.players.filter((p) => p.shipId === ship.id);
+      const recent = match['shipLastDamagedByPlayer']?.get?.(ship.id);
+      const top = Object.entries(holes).sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'none';
+      const cause = by ? 'pvp' : ship.ownerId && crew.every((p) => p.state === 'eliminated') ? 'crewless'
+        : dist > st.safeRadius ? `ring:${top}` : top;
+      causes.push({ t: Math.round(match['t']), cause, holes, by: by ? 'rival' : null,
+        hostileAge: recent ? Math.round(match['t'] - recent.at) : null,
+        outside: Math.round(dist - st.safeRadius), aground: !!ship.aground,
+        crew: crew.map((p) => `${p.state}${p.onShipId === ship.id ? '@deck' : ''}`).join('|') });
+    }
+    return origSink(ship, rapid, by);
+  };
   let next = 0;
   for (let i = 0; i < steps; i++) {
     match['tick']();
@@ -83,7 +107,7 @@ export function simulateMatch({ matchId, minutes, mode = MODE, botCount, marks =
   const endReason = state.phase === 'ended' ? (match['endReason'] ?? 'unknown') : 'timeout';
   const endT = match['t'];
   match.stop?.();
-  return { matchId, seed, marks: at, endT, endAlive, endReason, sinks, kills };
+  return { matchId, seed, marks: at, endT, endAlive, endReason, sinks, kills, causes };
 }
 
 /** Longest stretch after `from` with no founder and no PvP kill, up to the end
