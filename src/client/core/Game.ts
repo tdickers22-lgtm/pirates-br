@@ -1,5 +1,6 @@
 import { lateJoinNotice } from '../menu/queueText.js';
-import { locomotionFacing } from '../rendering/character/locomotion.js';
+import { locomotionFacing, queueStagger, setHoldImmersion } from '../rendering/character/locomotion.js';
+import { holdSpeedCap, sampleHoldWater } from '../../shared/flooding/hullVolume.js';
 import { ballisticPositionAt, projectileGravity } from '../../shared/ballistics.js';
 import * as THREE from 'three';
 import { ECONOMY, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, SHOP_PRICES, SHOP_QUANTITIES, WEAPONS, WILDLIFE, type ShopLine } from '../../shared/constants/index.js';
@@ -88,6 +89,10 @@ import type { PocketPreviewKind } from '../rendering/factories/WeaponMeshFactory
 import { glyph, installGlyphs, keys } from '../ui/InputGlyphs.js';
 import { framePacer } from './framePacer.js';
 
+/** b3.3d: a breach staggers crew within this distance (m) of the ball's strike. */
+const BREACH_STAGGER_RADIUS = 7;
+/** b3.3d: the anchor only "bites" (and lurches the crew) above this hull speed (m/s). */
+const ANCHOR_BITE_MIN_SPEED = 1.2;
 const CLIENT_INPUT_SEND_INTERVAL = 1 / 45;
 const CLIENT_INPUT_HEARTBEAT_INTERVAL = 0.2;
 /** Nobody else's keys are ours to read: the input-lead terms in
@@ -2467,6 +2472,8 @@ export class Game {
       // (they get the earliest possible decal on the hull they just holed).
       const target = hit.targetId ? this.shipsById.get(hit.targetId) : null;
       if (target && hit.holes?.length) {
+        // b3.3d: a fresh breach knocks the crew standing near it off balance.
+        if (hit.position) this.staggerCrew(this.state, target.id, hit.position, BREACH_STAGGER_RADIUS);
         if (!Array.isArray(target.holes)) target.holes = [];
         for (const fresh of hit.holes) {
           const existing = target.holes.find((h) => h.id === fresh.id);
@@ -3054,10 +3061,41 @@ export class Game {
     });
   }
 
+  /** Anchor state per ship at the last snapshot (b3.3d anchor-bite edge). */
+  private readonly anchorWas = new Map<string, boolean>();
+
+  /** Lurch every standing pirate aboard `shipId` within `radius` of `at`; the
+   *  clip is hit_back when the blow lands behind the way his body faces. */
+  private staggerCrew(state: GameState | null, shipId: string, at: { x: number; z: number }, radius: number) {
+    for (const p of state?.players ?? []) {
+      if (p.onShipId !== shipId || p.state !== 'alive') continue;
+      const mesh = this.playerMeshes.get(p.id);
+      if (!mesh) continue;
+      const dx = at.x - p.position.x;
+      const dz = at.z - p.position.z;
+      if (Math.hypot(dx, dz) > radius) continue;
+      queueStagger(mesh, Math.sin(mesh.rotation.y) * dx + Math.cos(mesh.rotation.y) * dz < 0);
+    }
+  }
+
   private applySnapshot(snapshot: GameState) {
     // Dropped when a newer hot/full snapshot already landed — applying the
     // overtaken one would rewind every transform for a frame.
     if (!this.clientState.acceptSeq(snapshot.seq)) return;
+    // b3.3d: the anchor bite. The tick a moving hull's anchor catches, the
+    // deck stops under her crew and every pirate aboard lurches toward the bow.
+    for (const ship of snapshot.ships ?? []) {
+      const was = this.anchorWas.get(ship.id);
+      this.anchorWas.set(ship.id, !!ship.anchored);
+      const v = Math.hypot(ship.velocity?.x ?? 0, ship.velocity?.z ?? 0);
+      if (was === false && ship.anchored && v > ANCHOR_BITE_MIN_SPEED) {
+        // The shove comes from astern: a point behind her along her travel.
+        this.staggerCrew(snapshot, ship.id, {
+          x: ship.position.x - (ship.velocity.x / v) * 20,
+          z: ship.position.z - (ship.velocity.z / v) * 20,
+        }, Infinity);
+      }
+    }
     const hasFreshIslandState = snapshot.islands.length > 0 || !this.state;
     // Static world (islands + seaRocks) rides only every 4th full snapshot on
     // the wire — preserve the previous copies on the ticks that omit them.
@@ -4647,8 +4685,14 @@ export class Game {
           const nx = moveAxes.x / len;
           const nz = moveAxes.z / len;
           const yaw = this.input.getYaw();
-          const desiredVx = (Math.sin(yaw) * nz - Math.cos(yaw) * nx) * PLAYER.MOVE_SPEED;
-          const desiredVz = (Math.cos(yaw) * nz + Math.sin(yaw) * nx) * PLAYER.MOVE_SPEED;
+          // b3.3d: in the flooded hold the server caps the walk (holdMovement,
+          // wade/swim); lead with the same cap or the body runs ahead and snaps back.
+          const holdShip = player.onShipId ? this.shipsById.get(player.onShipId) ?? null : null;
+          const moveSpeed = holdShip
+            ? Math.min(PLAYER.MOVE_SPEED, holdSpeedCap(sampleHoldWater(player.position, holdShip).mode, player.crouching))
+            : PLAYER.MOVE_SPEED;
+          const desiredVx = (Math.sin(yaw) * nz - Math.cos(yaw) * nx) * moveSpeed;
+          const desiredVz = (Math.cos(yaw) * nz + Math.sin(yaw) * nx) * moveSpeed;
           const response = player.onShipId ? 0.42 : 0.62;
           predictedX += (desiredVx - player.velocity.x) * inputLead * response;
           predictedZ += (desiredVz - player.velocity.z) * inputLead * response;
@@ -5298,6 +5342,8 @@ export class Game {
       if (skeletonDeathVisible) {
         this.anim.animateSkeletonDeath(mesh);
       } else {
+        // b3.3d: the hold water over his shins drives the wading gait.
+        setHoldImmersion(mesh, ship && player.onShipId === ship.id ? sampleHoldWater(player.position, ship).immersion : 0);
         this.anim.animatePlayerMesh(mesh, player, ship, dt, remoteAnim);
       }
       this.updateHudAnchor(mesh, healthBar?.root, plate);

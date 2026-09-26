@@ -377,6 +377,57 @@ expect('and off the look-at PITCH (the axis [fixup6] fixed — pinned so it stay
   Math.abs(craned.dead.x - straight.dead.x) <= 0.05,
   `she died looking up and her head stayed ${(craned.dead.x - straight.dead.x).toFixed(3)} rad off`);
 
+// ── b3.3d flood-crew and impact motion ─────────────────────────────────────
+// Each layer must APPEAR on its edge: the wade gait in knee-deep hold water,
+// the stagger on a breach hit / anchor bite, and the bucket and hammer clips
+// scrubbed by the SERVER's bailScoopProgress / hullRepairProgress clocks.
+{
+  const { queueStagger, setHoldImmersion, rigLocoState, WADE_CADENCE } = await import('../src/client/rendering/character/locomotion.ts');
+  const fresh = (tag) => { const m = makePlayerRig(0x3366cc, 'pirate', 'crew', `player-b33d-${tag}`, 'balanced'); return { m, r: playerRigOf(m) }; };
+  const run = (m, p, n) => { for (let i = 0; i < n; i++) updatePlayerRig(m, p, 1 / 60, 0, 0, 0); };
+  // wade
+  const wet = fresh('wet'); const dry = fresh('dry');
+  setHoldImmersion(wet.m, 0.5); setHoldImmersion(dry.m, 0);
+  const walkP = player({ velocity: { x: 0, y: 0, z: 1.5 } });
+  run(wet.m, walkP, 20); run(dry.m, walkP, 20);
+  const ph0w = rigLocoState(wet.r).phase; const ph0d = rigLocoState(dry.r).phase;
+  run(wet.m, walkP, 12); run(dry.m, walkP, 12);
+  const adv = (a0, a1) => ((a1 - a0) % 1 + 1) % 1;
+  const ratio = adv(ph0w, rigLocoState(wet.r).phase) / Math.max(1e-6, adv(ph0d, rigLocoState(dry.r).phase));
+  expect('knee-deep hold water: the lower layer is the wade gait', wet.r.lower.name === 'wade', wet.r.lower.name);
+  expect('dry control at the same speed is not wading', dry.r.lower.name !== 'wade', dry.r.lower.name);
+  expect('wading cadence is the WADE_CADENCE share of the dry stride', Math.abs(ratio - WADE_CADENCE) < 0.05, `ratio ${ratio.toFixed(3)}`);
+  const fastWet = fresh('fastwet'); setHoldImmersion(fastWet.m, 0.5);
+  run(fastWet.m, player({ velocity: { x: 0, y: 0, z: PLAYER.MOVE_SPEED } }), 30);
+  const domW = rigLocoState(fastWet.r).dominant;
+  expect('wading never plays a run sample', domW && domW.source === 'walk', domW?.name);
+  // stagger
+  const st = fresh('stagger'); run(st.m, player(), 20);
+  queueStagger(st.m, true); run(st.m, player(), 1);
+  expect('stagger from behind: hit_back on the legs', st.r.lower.name === 'hit_back', st.r.lower.name);
+  expect('and on the arms', st.r.upper.name === 'hit_back', st.r.upper.name);
+  run(st.m, player(), 60);
+  expect('the stagger ends back in idle', st.r.lower.name === 'idle', st.r.lower.name);
+  const sf = fresh('staggerfront'); run(sf.m, player(), 20); queueStagger(sf.m, false); run(sf.m, player(), 1);
+  expect('stagger from the front: hit_front', sf.r.lower.name === 'hit_front', sf.r.lower.name);
+  const helm = fresh('staggerhelm'); run(helm.m, player({ atHelm: true }), 20); queueStagger(helm.m, true); run(helm.m, player({ atHelm: true }), 1);
+  expect('control: a helmsman holds the wheel through a lurch', helm.r.lower.name === 'helm', helm.r.lower.name);
+  // bucket on the server clock
+  const bk = fresh('bail');
+  const frac = (act) => act.time / act.getClip().duration;
+  run(bk.m, player({ bailing: true, equippedTool: 'bucket', bailScoopProgress: 0.75 }), 10);
+  const b1 = { name: bk.r.lower.name, f: frac(bk.r.lower.action), u: frac(bk.r.upper.action) };
+  run(bk.m, player({ bailing: true, equippedTool: 'bucket', bailScoopProgress: 0.25 }), 10);
+  const b2 = { f: frac(bk.r.lower.action), u: frac(bk.r.upper.action) };
+  expect('bail clip scrubbed by bailScoopProgress (0.75 -> 25% through)', b1.name === 'bail' && Math.abs(b1.f - 0.25) < 0.02 && Math.abs(b1.u - 0.25) < 0.02, JSON.stringify(b1));
+  expect('and 0.25 -> 75% through, both layers', Math.abs(b2.f - 0.75) < 0.02 && Math.abs(b2.u - 0.75) < 0.02, JSON.stringify(b2));
+  // hammer on the shared blow clock (default 2.4 s repair = 3 blows)
+  const hm = fresh('hammer');
+  run(hm.m, player({ hullRepairProgress: 0.1 }), 1);
+  const h1 = { name: hm.r.lower.name, f: frac(hm.r.lower.action) };
+  expect('hammer clip on the blow clock (progress 0.1 of 3 blows -> phase 0.3)', h1.name === 'hammer' && Math.abs(h1.f - 0.3) < 0.02, JSON.stringify(h1));
+}
+
 console.log(`\n${checks} checks, ${failures} failed`);
 if (checks === 0) { console.error('VACUOUS: nothing graded'); process.exit(1); }
 process.exit(failures > 0 ? 1 : 0);

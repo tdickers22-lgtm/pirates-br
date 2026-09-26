@@ -36,6 +36,8 @@ import { PLAYER, WEAPONS } from '../../../shared/constants/index.js';
 import type { Player } from '../../../shared/types/index.js';
 import type { PlayerRig } from '../factories/PlayerRigFactory.js';
 import { triggerJaw } from './faceRig.js';
+import { HOLD_WADE_IMMERSION } from '../../../shared/flooding/hullVolume.js';
+import { repairBlowPhase, repairBlowsFor } from '../viewmodel/repairBlows.js';
 
 /** PLAN §2.5: cross-fade 0.12 s. One number, used by both layers. */
 export const CROSSFADE = 0.12;
@@ -313,6 +315,8 @@ export function stepLocomotion(
   side: number,
   dt: number,
   actionOf: (source: string) => THREE.AnimationAction | null,
+  /** Cadence multiplier (b3.3d: < 1 while wading, laboured steps). */
+  rateScale = 1,
 ): LocoPick | null {
   const pick = pickLocomotion(set, fwd, side);
   const target = new Map<LocoClip, number>();
@@ -329,7 +333,7 @@ export function stepLocomotion(
     st.weights.set(c, next);
     sum += next;
   }
-  if (pick) st.phase = (st.phase + dt * pick.phaseRate) % 1;
+  if (pick) st.phase = (st.phase + dt * pick.phaseRate * rateScale) % 1;
   // One action per SOURCE clip (walk and a reversed walk share one): its weight
   // is the sum, its time comes from the heavier sample.
   const bySource = new Map<string, { w: number; top: LocoClip; topW: number }>();
@@ -423,7 +427,43 @@ type Edges = {
   prevAmmo: number;
   lowerShot: number;
   lowerShotName: string;
+  staggerSeq: number;
+  repairT: number;
 };
+
+// ── b3.3d flood-crew and impact motion ───────────────────────────────────────
+/** Wading (hold water over the shins, the server's HOLD_WADE_IMMERSION): the
+ *  legs push through water, so the cadence drops to this share of the dry
+ *  stride-matched rate and the blend never reaches run/sprint. */
+export const WADE_CADENCE = 0.72;
+/** Longest a stagger may hold the body (s); the hit clip's own length if shorter. */
+export const STAGGER_MAX_S = 0.5;
+/** States a lurch can interrupt. A helmsman, a gunner, a climber or a swimmer
+ *  is holding on to something and keeps his clip. */
+const STAGGERABLE = new Set(['idle', 'walk', 'run', 'bail', 'hammer', 'dig']);
+
+const walkPace = new WeakMap<readonly LocoClip[], number>();
+/** Fastest forward walk sample's ground speed (the wading ceiling). */
+function walkPaceOf(set: readonly LocoClip[]): number {
+  let v = walkPace.get(set);
+  if (v === undefined) {
+    v = 0;
+    for (const c of set) if (c.source === 'walk' && !c.reverse) v = Math.max(v, c.speed);
+    if (!(v > 0)) v = PLAYER.MOVE_SPEED * 0.4;
+    walkPace.set(set, v);
+  }
+  return v;
+}
+/** Game feeds the hold-water depth under this pirate (body heights) each frame. */
+export function setHoldImmersion(mesh: THREE.Object3D, immersion: number): void {
+  mesh.userData.holdImmersion = Number.isFinite(immersion) ? immersion : 0;
+}
+/** A breach hit or an anchor bite rocked the deck under this pirate. */
+export function queueStagger(mesh: THREE.Object3D, fromBehind: boolean): void {
+  mesh.userData.staggerSeq = ((mesh.userData.staggerSeq as number | undefined) ?? 0) + 1;
+  mesh.userData.staggerFromBehind = fromBehind;
+}
+
 const edgesOf = new WeakMap<PlayerRig, Edges>();
 
 /** For tests and probes: the rig's locomotion state (null before its first frame). */
@@ -439,13 +479,21 @@ const clipSeconds = (name: string, cap: number) => Math.min(cap, pairs?.get(name
 export function driveRigLayers(rig: PlayerRig, mesh: THREE.Object3D, player: Player, dt: number, cutlassSwing: number): void {
   let e = edgesOf.get(rig);
   if (!e) {
-    e = { loco: newLocoState(), prevVy: 0, prevRecoil: 0, ammoKey: '', prevAmmo: -1, lowerShot: 0, lowerShotName: '' };
+    e = {
+      loco: newLocoState(), prevVy: 0, prevRecoil: 0, ammoKey: '', prevAmmo: -1, lowerShot: 0, lowerShotName: '',
+      staggerSeq: (mesh.userData.staggerSeq as number | undefined) ?? 0, repairT: 0,
+    };
     edgesOf.set(rig, e);
   }
   const vx = player.velocity.x;
   const vz = player.velocity.z;
   const vy = player.velocity.y ?? 0;
   let lower = lowerStateFor(player, Math.hypot(vx, vz));
+  // Wading: the hold water is over his shins, so no run cycle (the server caps
+  // the speed at HOLD_WADE_SPEED_SCALE of the walk) and a slower cadence.
+  const wading = ((mesh.userData.holdImmersion as number | undefined) ?? 0) >= HOLD_WADE_IMMERSION
+    && player.state !== 'swimming';
+  if (wading && lower === 'run') lower = 'walk';
 
   // Lower-body one-shot edges.
   // A standing landing plays land; a moving one runs straight on (the legs
@@ -457,8 +505,21 @@ export function driveRigLayers(rig: PlayerRig, mesh: THREE.Object3D, player: Pla
   const recoil = (mesh.userData.cannonRecoil as number | undefined) ?? 0;
   if (player.atCannon && recoil > e.prevRecoil + 0.2) { e.lowerShot = clipSeconds('cannon_fire', 0.9); e.lowerShotName = 'cannon_fire'; }
   e.prevRecoil = recoil;
+  // Stagger: a breach hit or the anchor bite lurches the deck. The hit clip
+  // plays on BOTH layers (legs buckle, arms fling) for at most STAGGER_MAX_S.
+  const seq = (mesh.userData.staggerSeq as number | undefined) ?? 0;
+  if (seq !== e.staggerSeq) {
+    e.staggerSeq = seq;
+    const hit = mesh.userData.staggerFromBehind ? 'hit_back' : 'hit_front';
+    if (STAGGERABLE.has(lower) && pairs?.has(hit)) {
+      e.lowerShot = clipSeconds(hit, STAGGER_MAX_S); e.lowerShotName = hit;
+      setLayer(rig, 'upper', hit);
+      rig.oneShot = Math.max(rig.oneShot, e.lowerShot);
+    }
+  }
   if (e.lowerShot > 0) {
-    const holds = e.lowerShotName === 'cannon_fire' ? player.atCannon : lower === 'idle';
+    const holds = e.lowerShotName === 'cannon_fire' ? player.atCannon
+      : e.lowerShotName.startsWith('hit_') ? STAGGERABLE.has(lower) : lower === 'idle';
     if (holds && pairs?.has(e.lowerShotName)) lower = e.lowerShotName;
     else e.lowerShot = 0;
     e.lowerShot = Math.max(0, e.lowerShot - dt);
@@ -472,14 +533,21 @@ export function driveRigLayers(rig: PlayerRig, mesh: THREE.Object3D, player: Pla
       for (const c of set) e.loco.weights.set(c, 0);
       e.loco.active = true;
     }
-    const { fwd, side } = bodyLocal(vx, vz, mesh.rotation.y);
+    let { fwd, side } = bodyLocal(vx, vz, mesh.rotation.y);
+    if (wading) {
+      // The blend is asked for at most walk pace: water to the knees is a
+      // walk, whatever the stick says.
+      const cap = walkPaceOf(set);
+      const v = Math.hypot(fwd, side);
+      if (v > cap) { fwd *= cap / v; side *= cap / v; }
+    }
     stepLocomotion(e.loco, set, fwd, side, dt, (source) => {
       const pair = pairs?.get(source);
       return pair && pair.lower.tracks.length > 0 ? rig.mixer.clipAction(pair.lower) : null;
-    });
+    }, wading ? WADE_CADENCE : 1);
     const dom = e.loco.dominant;
     rig.lower.action = dom ? rig.mixer.clipAction(pairs!.get(dom.source)!.lower) : null;
-    rig.lower.name = dom?.name ?? 'walk';
+    rig.lower.name = wading ? 'wade' : dom?.name ?? 'walk';
   } else {
     if (e.loco.active) {
       e.loco.active = false;
@@ -497,6 +565,26 @@ export function driveRigLayers(rig: PlayerRig, mesh: THREE.Object3D, player: Pla
       rig.lower.action.time = THREE.MathUtils.clamp(player.reviveProgress ?? 0, 0, 1) * rig.lower.action.getClip().duration * 0.999;
     }
   }
+  // Bucket and hammer ride the SERVER's clocks, so the third-person scoop/heave
+  // and every blow land when the first-person ones (and their sounds) do:
+  // one bail action = one pass of the clip over BAIL_SCOOP_TIME (the server's
+  // bailScoopProgress counts 1 -> 0), and the hammer phase is the shared blow
+  // clock (repairBlows.ts, the viewmodel's and FloodAudio's) off hullRepairProgress.
+  let scrub: number | null = null;
+  const scoop = player.bailScoopProgress ?? 0;
+  if (lower === 'bail' && scoop > 0) scrub = THREE.MathUtils.clamp(1 - scoop, 0, 1);
+  const repair = player.hullRepairProgress ?? 0;
+  if (lower === 'hammer' && repair > 0) {
+    e.repairT += dt;
+    const repairTime = repair > 0.15 ? e.repairT / repair : 2.4;
+    scrub = repairBlowPhase(repair, repairBlowsFor(repairTime));
+  } else e.repairT = 0;
+  const scrubTo = (action: THREE.AnimationAction | null) => {
+    if (scrub === null || !action) return;
+    action.timeScale = 0;
+    action.time = scrub * action.getClip().duration * 0.999;
+  };
+  if (!e.loco.active) scrubTo(rig.lower.action);
 
   // Upper one-shots: a swing, a hit or a shot OWNS the arms for its duration.
   if (cutlassSwing > 0.001 && rig.prevSwing <= 0.001) {
@@ -535,5 +623,6 @@ export function driveRigLayers(rig: PlayerRig, mesh: THREE.Object3D, player: Pla
       const p = dom.reverse ? 1 - e.loco.phase : e.loco.phase;
       rig.upper.action.time = (p % 1) * rig.upper.action.getClip().duration;
     }
+    if (rig.upper.name === lower) scrubTo(rig.upper.action);
   }
 }
