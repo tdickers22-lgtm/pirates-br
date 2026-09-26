@@ -166,6 +166,12 @@ export const LOGIC = [
   // int <= 90, bend <= 150 deg; negative controls prove a backward fold fails), head pitch raises the gaze,
   // ids / 30 fps / root motion only on roll-vault-slide. ~0.3 s. Red: --glb public/assets/models/pirate_base.glb (3/33).
   quick(plain('test-anim-rig-anatomy.mjs')),
+  // test-character-variants (b3.2f): the pure v2 variant picker (characterVariants.ts): 1,000 seeded crews
+  // + 2,000 four-bot crews in the narrowest archetype wardrobes never share head+hat+coat (negative control:
+  // the same crews collide without the resolver), deterministic and member-order independent, captain =
+  // tricorn|bicorn + frock coat (frock is captain-only), shirt always, hat -> hair_<style>_hat, every node
+  // exists in pirate_base_<body>.glb, >= 200 combos, archetypes == BOT_PERSONALITIES, mixer LOD bands. ~0.2 s.
+  quick(tsx('test-character-variants.mjs')),
   quick(tsx('test-ship-dynamics.mjs')),
   quick(tsx('test-ship-ladder.mjs')),
   quick(tsx('test-server-fixes.mjs')),

@@ -29,9 +29,9 @@
  * passes a balanced/high tier, and null means Game keeps `makePlayerMesh` —
  * which is also what happens if the GLB has not loaded or ever ships without
  * clips. Above low the per-frame bill is one `mixer.update` per visible pirate,
- * and that is rate-limited by distance (see MIXER_LOD): full rate inside 25 m,
- * half beyond, quarter beyond 60 m, frozen past 120 m where a pirate is a few
- * pixels. A pirate is 2,780 tris in 7 draws against 22-26 draws today.
+ * and that is rate-limited by distance (mixerIntervalFor, characterVariants.ts,
+ * b3.2f): full rate inside 15 m, 15 Hz inside 40 m, 5 Hz beyond (never frozen:
+ * a frozen pirate slides across the deck). A pirate is 2,780 tris in 7 draws against 22-26 draws today.
  */
 import * as THREE from 'three';
 import { clone as cloneSkinnedScene } from 'three/examples/jsm/utils/SkeletonUtils.js';
@@ -41,6 +41,7 @@ import { assets, type AssetName } from '../../assets/AssetLibrary.js';
 import type { RenderQuality } from '../QualityPreference.js';
 import { AVATAR_RIG } from './PlayerMeshFactory.js';
 import { pitchUpToBoneX } from '../signConventions.js';
+import { mixerIntervalFor } from './characterVariants.js';
 
 const RIG_ASSET = 'pirate_base' as string as AssetName;
 
@@ -76,13 +77,7 @@ const ONE_SHOT = new Set([
  * dropped, so a pirate stepped at quarter rate still plays her clip at the
  * right speed — she just does it in bigger steps.
  */
-const MIXER_LOD: readonly { d2: number; interval: number }[] = [
-  { d2: 25 * 25, interval: 0 },
-  { d2: 60 * 60, interval: 1 / 30 },
-  { d2: 120 * 120, interval: 1 / 15 },
-];
-/** Past this the mixer stops entirely: the pose freezes where it was. */
-const MIXER_FREEZE_D2 = 120 * 120;
+// The table lives in characterVariants.ts (pure, gated by test-character-variants).
 
 /**
  * Past this range a pirate stops casting a shadow.
@@ -451,18 +446,10 @@ export function updatePlayerRig(
   if (rig.bones.hips) rig.bones.hips.rotation.z = rig.hipsClipZ;
   if (rig.bones.spine) rig.bones.spine.rotation.z = rig.spineClipZ;
   rig.pending += dt;
-  let interval = Number.POSITIVE_INFINITY;
-  if (cameraDistSq < MIXER_FREEZE_D2) {
-    interval = 0;
-    for (const step of MIXER_LOD) {
-      if (cameraDistSq <= step.d2) { interval = step.interval; break; }
-    }
-  }
-  if (rig.pending >= interval) {
+  // 1e-6: twelve 1/60 frames sum to 0.19999..., which would miss the 5 Hz step
+  if (rig.pending + 1e-6 >= mixerIntervalFor(cameraDistSq)) {
     rig.mixer.update(rig.pending);
     rig.pending = 0;
-  } else if (interval === Number.POSITIVE_INFINITY) {
-    rig.pending = 0; // frozen: do not bank an hour of dt for the walk back
   }
 
   // ── shadow LOD ───────────────────────────────────────────────────────────
