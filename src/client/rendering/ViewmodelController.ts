@@ -5,6 +5,7 @@
  * narrow `ViewmodelView`.
  */
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { WEAPONS } from '../../shared/constants/index.js';
 import type { Player, Ship, TreasureChest, WeaponId, WeaponInstance } from '../../shared/types/index.js';
 import type { ClientInteractKind } from '../core/Game.js';
@@ -38,8 +39,68 @@ const BUCKET_DROPLETS = 12;
 
 // MIN_OFF_AXIS (the long-tool off-axis floor) now lives in viewmodel/poses.ts as TOOL_MIN_OFF_AXIS.
 
+/**
+ * FIRST-PERSON ARMS FROM THE CHARACTER ASSET (b3.2h, characters-11 / liveplay-12).
+ * `pirate_fp_arms.glb` (scripts/blender/_pirate_fp_arms.py via build_pirates.py) is the male pirate's own
+ * forearm and five-finger hand, closed on a 32 mm handle under the coat_frock sleeve and its turned-back
+ * crew cuff, baked in the SAME frame as the primitive fist it replaces (origin = the handle centre, +Y =
+ * back of the hand, +Z = forearm toward the camera, thumb inboard), so every grip below keeps its numbers.
+ * The primitive stays as the fallback until the file lands (and forever if it fails to load).
+ */
+export const FP_ARMS_FILE = 'pirate_fp_arms.glb';
+/** The real hand is ~25 % larger than the primitive fist the grip scales were tuned on. */
+export const FP_ARMS_SCALE = 0.8;
+type FpArmTemplates = { r: THREE.Object3D; l: THREE.Object3D };
+let fpArmTemplates: FpArmTemplates | null = null;
+let fpArmLoad: Promise<FpArmTemplates | null> | null = null;
+function loadFpArms(): Promise<FpArmTemplates | null> {
+  if (fpArmLoad) return fpArmLoad;
+  const url = typeof document !== 'undefined' ? new URL(`assets/models/${FP_ARMS_FILE}`, document.baseURI).href : '';
+  fpArmLoad = !url ? Promise.resolve(null) : new GLTFLoader().loadAsync(url).then((gltf) => {
+    const r = gltf.scene.getObjectByName('fp_arm_r');
+    const l = gltf.scene.getObjectByName('fp_arm_l');
+    fpArmTemplates = r && l ? { r, l } : null;
+    return fpArmTemplates;
+  }).catch(() => null);
+  return fpArmLoad;
+}
+
+/** Swap a primitive view hand's box fist + cylinder sleeve for the character's real arm. Idempotent. */
+export function fitFpArm(hand: THREE.Group, side: 1 | -1, templates: FpArmTemplates, crewColor: number | null): boolean {
+  if (hand.getObjectByName('fp_arms')) return false;
+  const arm = (side > 0 ? templates.r : templates.l).clone(true);
+  arm.name = 'fp_arms';
+  arm.position.set(0, 0, 0);
+  arm.rotation.set(0, 0, 0);
+  arm.scale.setScalar(FP_ARMS_SCALE);
+  const ud = hand.userData as { viewCoatMat?: THREE.MeshStandardMaterial; viewTeamColor?: number; fpCuffMat?: THREE.MeshStandardMaterial };
+  arm.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const mat = (mesh.material as THREE.MeshStandardMaterial).clone();
+    // Sleeve = the coat you wear (team-tinted exactly like the primitive sleeve was); cuff = crew facing.
+    if (mat.name.startsWith('fp_sleeve')) { ud.viewCoatMat = mat; ud.viewTeamColor = undefined; }
+    if (mat.name.startsWith('fp_cuff')) ud.fpCuffMat = mat;
+    mesh.material = mat;
+    mesh.renderOrder = ViewmodelController.HAND_RENDER_ORDER;
+  });
+  const primitive = (hand.userData.primitiveParts as THREE.Object3D[] | undefined) ?? [];
+  for (const part of primitive) hand.remove(part);
+  hand.add(arm);
+  applyViewmodelMaterialSettings(arm);
+  arm.traverse((o) => { if ((o as THREE.Mesh).isMesh) o.renderOrder = ViewmodelController.HAND_RENDER_ORDER; });
+  if (crewColor !== null) tintFpArm(hand, crewColor);
+  return true;
+}
+
+function tintFpArm(hand: THREE.Group, color: number) {
+  applyViewHandTeamColor(hand, color);
+  const cuff = (hand.userData as { fpCuffMat?: THREE.MeshStandardMaterial }).fpCuffMat;
+  if (cuff) cuff.color.set(color);
+}
+
 /** A first-person hand attachment in viewmodel-root space. */
-type HandGrip = { pos: [number, number, number]; rot: [number, number, number]; scale?: number };
+export type HandGrip = { pos: [number, number, number]; rot: [number, number, number]; scale?: number };
 
 export type ViewmodelView = {
   readonly combatFx: CombatFx;
@@ -296,7 +357,7 @@ export class ViewmodelController {
    * inside the haft/knuckle-bow they were holding. That is the whole "hand-less
    * floating prop" read. Hands draw last, always.
    */
-  private static readonly HAND_RENDER_ORDER = 1004;
+  static readonly HAND_RENDER_ORDER = 1004;
 
   /** The crew colour the world coat is wearing, once Game knows it (avatar-18). */
   private localCrewColor: number | null = null;
@@ -310,12 +371,19 @@ export class ViewmodelController {
   setLocalCrewColor(color: number) {
     if (this.localCrewColor === color) return;
     this.localCrewColor = color;
-    if (this.weaponHands) { applyViewHandTeamColor(this.weaponHands.left, color); applyViewHandTeamColor(this.weaponHands.right, color); }
-    if (this.pocketHands) { applyViewHandTeamColor(this.pocketHands.left, color); applyViewHandTeamColor(this.pocketHands.right, color); }
+    for (const { hand } of this.allHands) tintFpArm(hand, color);
+  }
+
+  /** Every view hand ever made (weapon, pocket, swim, capstan, repair), so the fp_arms swap reaches all. */
+  private readonly allHands: { hand: THREE.Group; side: 1 | -1 }[] = [];
+
+  private fitFpArms(templates: FpArmTemplates) {
+    for (const { hand, side } of this.allHands) fitFpArm(hand, side, templates, this.localCrewColor);
   }
 
   private makeHand(side: 1 | -1, parent: THREE.Group): THREE.Group {
     const hand = makeViewHand(side);
+    hand.userData.primitiveParts = [...hand.children];
     if (this.localCrewColor !== null) applyViewHandTeamColor(hand, this.localCrewColor);
     applyViewmodelMaterialSettings(hand);
     hand.traverse((object) => {
@@ -323,6 +391,9 @@ export class ViewmodelController {
     });
     hand.visible = false;
     parent.add(hand);
+    this.allHands.push({ hand, side });
+    if (fpArmTemplates) fitFpArm(hand, side, fpArmTemplates, this.localCrewColor);
+    else void loadFpArms().then((t) => { if (t) this.fitFpArms(t); });
     return hand;
   }
 
@@ -368,7 +439,7 @@ export class ViewmodelController {
    *  (scripts/viewmodel-hands-probe.mjs). A fist whose palm sits below
    *  ndc.y ≈ −0.9 is off the bottom of the frame and the weapon reads as a
    *  floating prop again, no matter that `visible` is true. */
-  private weaponGrips(weaponId: WeaponId): { left: HandGrip | null; right: HandGrip | null } {
+  static weaponGrips(weaponId: WeaponId): { left: HandGrip | null; right: HandGrip | null } {
     switch (weaponId) {
       // Forearms are pitched steeply DOWN (rot.x ≈ 1) so they exit through the
       // bottom of the frame instead of running back at the lens, where they
@@ -407,7 +478,7 @@ export class ViewmodelController {
 
   /** Grip transforms per pocket item (root space). Chest and keg meshes ship
    *  with their own modelled hands, so they opt out. */
-  private pocketGrips(kind: PocketPreviewKind): { left: HandGrip | null; right: HandGrip | null } {
+  static pocketGrips(kind: PocketPreviewKind): { left: HandGrip | null; right: HandGrip | null } {
     switch (kind) {
       case 'chest':
       case 'powder_keg':
@@ -1060,7 +1131,7 @@ export class ViewmodelController {
     this.placeHands(
       this.ensurePocketHands(),
       this.repairHandGrips
-        ?? (this.localViewPocketKind ? this.pocketGrips(this.localViewPocketKind) : { left: null, right: null }),
+        ?? (this.localViewPocketKind ? ViewmodelController.pocketGrips(this.localViewPocketKind) : { left: null, right: null }),
     );
     return true;
   }
@@ -1636,7 +1707,7 @@ export class ViewmodelController {
       hands.left.visible = false;
       hands.right.visible = false;
     } else {
-      const grips = this.weaponGrips(weaponId);
+      const grips = ViewmodelController.weaponGrips(weaponId);
       if (grips.left && reload.ram > 0.001) {
         // The support hand rams the charge home down the muzzle.
         grips.left = {

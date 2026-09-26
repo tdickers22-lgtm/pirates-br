@@ -21,6 +21,11 @@ Stages (one module each, run in this order; later slices append theirs):
                                    (body shells + lofts, Data Transfer weights, crew-colour lining/facings);
                                    --cloth-renders writes the posed weight-QA and R2 sheets to
                                    docs/asset-sheets/characters/wardrobe-ii/ (--cloth-qa-only: Workbench poses only).
+  fp arms (b3.2h, _pirate_fp_arms.py)  the male forearm + five-finger hand closed on a 32 mm handle under the
+                                   coat_frock sleeve and crew cuff, in the viewmodel hand frame
+                                   -> public/assets/models/pirate_fp_arms.glb (fp_arm_r, fp_arm_l); runs after the
+                                   base export, or alone from the built male with `-- --fp-arms-only`;
+                                   --fp-renders writes docs/asset-sheets/characters/fp-arms/.
 Inputs are restored by `node assets-src/quaternius/fetch.mjs` (sha256-pinned, CC0).
 """
 import json
@@ -216,7 +221,16 @@ def wardrobe_sheet(built):
         print("wrote", out.filepath_raw)
 
 
+def fp_arms():
+    import _pirate_fp_arms
+    sheet = os.path.join(REPO, "docs", "asset-sheets", "characters", "fp-arms") if "--fp-renders" in ARGS else None
+    _pirate_fp_arms.build(REPO, sheet)   # -> public/assets/models/pirate_fp_arms.glb
+
+
 def main():
+    if "--fp-arms-only" in ARGS:
+        fp_arms()
+        return
     bpy.ops.wm.read_factory_settings(use_empty=True)
     os.makedirs(OUT, exist_ok=True)
     report = {"skeleton": "Quaternius UE-style 65 minus 12 leaf plus eye_l/eye_r", "targets": {
@@ -305,3 +319,5 @@ def main():
 
 
 main()
+if "--fp-arms-only" not in ARGS and not RAW:   # b3.2h reads the male GLB main() just wrote
+    fp_arms()
