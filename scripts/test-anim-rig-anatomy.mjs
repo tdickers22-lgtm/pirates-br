@@ -165,6 +165,30 @@ if (isLibrary) {
   }
   expect('every clip non-empty: >= 2 keys and >= 50 animated bones', !thin.length, thin.join(', '));
   expect('every clip on an exact 30 fps grid', !off.length, off.join(', '));
+  { // R2 F5: "at the wheel" is a STANDING pose (the first build mapped helm to UAL Driving_Loop, a seated car loop:
+    // thighs level, squatting on an invisible chair). At 21 phases: pelvis height >= 0.9x the idle's, knee flexion
+    // <= 25 deg, both hands forward on the spokes (1.0-1.25 m above the lowest toe, >= 0.2 m in front of the pelvis).
+    const pose = (name, k) => { const a = ids.get(name); if (!a) return null;
+      const ch = a.channels.map((c) => ({ node: c.target.node, path: c.target.path, s: [acc(G, a.samplers[c.sampler].input).map((x) => x[0]), acc(G, a.samplers[c.sampler].output)] }));
+      const dur = Math.max(...ch.map((c) => c.s[0][c.s[0].length - 1])); const local = new Map([...restLocal].map(([i, v]) => [i, { ...v }]));
+      for (const c of ch) { const v = sample(c.s, dur * k / 20); if (c.path === 'rotation') local.get(c.node).r = v; else if (c.path === 'translation') local.get(c.node).t = v; }
+      return fk(local); };
+    const PEL = pick('pelvis'); const BALL = [pick('ball_l'), pick('ball_r')];
+    const idle = pose('idle', 0); const idleH = idle && idle.wp.get(PEL)[1] - Math.min(...BALL.map((b) => idle.wp.get(b)[1]));
+    let worstPel = Infinity; let worstKnee = 0; let handLo = Infinity; let handHi = -Infinity; let fwdMin = Infinity;
+    for (let k = 0; k <= 20 && idle; k++) {
+      const P = pose('helm', k); if (!P) { worstPel = 0; break; }
+      const floor = Math.min(...BALL.map((b) => P.wp.get(b)[1]));
+      worstPel = Math.min(worstPel, (P.wp.get(PEL)[1] - floor) / idleH);
+      for (const [id, ja, jb, jc] of LIMBS.filter((l) => l[0].startsWith('knee'))) {
+        const u = unit(sub(P.wp.get(B[jb]), P.wp.get(B[ja]))); const f = unit(sub(P.wp.get(B[jc]), P.wp.get(B[jb])));
+        worstKnee = Math.max(worstKnee, Math.acos(Math.max(-1, Math.min(1, dot(u, f)))) * 180 / Math.PI);
+      }
+      for (const h of [B.hand_l, B.hand_r]) { const y = P.wp.get(h)[1] - floor; handLo = Math.min(handLo, y); handHi = Math.max(handHi, y); fwdMin = Math.min(fwdMin, P.wp.get(h)[2] - P.wp.get(PEL)[2]); }
+    }
+    expect(`helm stands at the wheel: pelvis >= 0.9x idle height (${worstPel.toFixed(2)}x), knee flexion <= 25 deg (${worstKnee.toFixed(0)}), hands 1.0-1.25 m (${handLo.toFixed(2)}-${handHi.toFixed(2)}) and >= 0.2 m forward (${fwdMin.toFixed(2)})`,
+      worstPel >= 0.9 && worstKnee <= 25 && handLo >= 1.0 && handHi <= 1.25 && fwdMin >= 0.2);
+  }
   const rm = gltf.animations.filter((a) => a.channels.some((c) => nodes[c.target.node].name === 'root')).map((a) => a.name).sort();
   expect(`root motion only on roll / vault / slide (${rm.join(', ')})`, rm.every((n) => /^(roll|vault|slide_start|slide_exit)$/.test(n)) && rm.includes('roll') && rm.includes('vault'));
 }

@@ -39,7 +39,7 @@ MAP = {
     "roll": ("Roll", {"rm": True}), "vault": ("ClimbUp_1m", {"rm": True}),
     "slide_start": ("Slide_Start", {"rm": True}), "slide": "Slide_Loop", "slide_exit": ("Slide_Exit", {"rm": True}),
     "swim": "Swim_Fwd_Loop", "tread": "Swim_Idle_Loop",
-    "helm": "Driving_Loop", "capstan_push": "Push_Loop", "cannon_aim": "Push_Loop", "cannon_fire": "Interact",
+    "capstan_push": "Push_Loop", "cannon_aim": "Push_Loop", "cannon_fire": "Interact",
     "repair": "Fixing_Kneeling", "bail": "Farm_Watering", "dig": "Farm_Harvest", "plant": "Farm_PlantSeed",
     "interact": "Interact", "chest_open": "Chest_Open", "pickup": "PickUp_Table", "throw": "OverhandThrow",
     "drink": "Consume", "sit_enter": "Sitting_Enter", "sit_idle": "Sitting_Idle_Loop", "sit_talk": "Sitting_Talking_Loop",
@@ -243,6 +243,20 @@ def gap_layers(gid, sk, local, pel, t, T):
         layer(sk, local, "upperarm_l", qaxis(Y, -0.35))
         flex(sk, local, "lowerarm_l", 1.35)
         layer(sk, local, "head", qaxis(X, -0.05 * _sin(t, T)))
+    elif gid == "helm":      # R2 F5: STANDING at the wheel (UAL Driving_Loop is a seated car loop: the pirate squatted
+        # on an invisible chair). Idle legs, feet planted; both hands forward on the spokes at ~1.1 m, working the
+        # wheel a few degrees each way, weight shifting from foot to foot with it
+        w = _sin(t, T)
+        pel[0] += 0.012 * w
+        pel[2] += 0.012   # the idle stands with the knees bent ~29 deg: brace them to ~20 and lift the hips to keep the feet down
+        for side in "lr":
+            flex(sk, local, f"calf_{side}", -0.16)
+        layer(sk, local, "spine_01", qaxis((0, 0, 1), -0.03 * w))
+        layer(sk, local, "spine_02", qaxis(X, 0.06))    # a little over the wheel
+        for side, sg in (("l", 1), ("r", -1)):
+            layer(sk, local, f"upperarm_{side}", qaxis(X, -(HELM_ARM[0] + 0.06 * sg * w)))
+            layer(sk, local, f"upperarm_{side}", qaxis(Y, -sg * HELM_ARM[1]))
+            flex(sk, local, f"lowerarm_{side}", HELM_ARM[2] - 0.08 * sg * w)
     elif gid == "downed":    # held on the ground, laboured breathing
         layer(sk, local, "spine_02", qaxis(X, 0.035 * _sin(t, T / 2)))
     elif gid in ("drown", "death_drown"):   # face tipped up for air, arms clawing, sinking
@@ -254,10 +268,12 @@ def gap_layers(gid, sk, local, pel, t, T):
             pel[1] -= 0.35 * (t / T)
 
 
+HELM_ARM = (0.85, 0.30, 0.90)   # upper arm raise forward, swing inward, elbow flex (rad)
 GAPS = {   # game id -> (source, time map, duration or None = source's, loop)
     "walk_back": ("Walk_Loop", "reverse", None, True), "run_back": ("Jog_Fwd_Loop", "reverse", None, True),
     "strafe_l": ("Walk_Loop", "same", None, True), "strafe_r": ("Walk_Loop", "same", None, True),
     "climb": ("Walk_Loop", "slow", 1.6, True), "spyglass": ("Idle_Loop", "same", None, True),
+    "helm": ("Idle_Loop", "same", None, True),
     "hammer": ("TreeChopping_Loop", "fast", 0.8, True),
     "downed": ("LayToIdle", "hold0", 2.5, True), "drown": ("Swim_Idle_Loop", "same", None, True),
     "death_drown": ("Swim_Idle_Loop", "same", 2.0, False),
