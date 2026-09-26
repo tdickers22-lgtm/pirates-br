@@ -32,6 +32,17 @@ export type GripKind = 'helm' | 'capstan' | 'cannon' | 'ladder';
 export const PALM = 0.07;
 /** Most a pirate leans in from the waist to reach a grip the clip left short. */
 export const LEAN_MAX = 0.5;
+/** A live breech is knee high (the ShipRenderer's deck gun: handles ~0.3 m off
+ *  the planking, measured by scripts/probes/rig-contacts.mjs), so a gunner
+ *  CROUCHES: the pelvis drops up to this far and the foot IK bends the knees
+ *  to keep both boots on the deck. Only a grip the lean cannot bring into
+ *  reach triggers it; a wheel or capstan at chest height never crouches. */
+export const CROUCH_MAX = 0.42;
+/** Waist lean allowed per station: a gunner bends right over the breech, and a
+ *  helmsman leans into a wheel the hull type set up to 0.9 m ahead of his hips
+ *  (live stand-off, rig-contacts probe). */
+const LEAN_OF: Record<GripKind, number> = { helm: 0.9, capstan: LEAN_MAX, cannon: 1.1, ladder: LEAN_MAX };
+const CROUCHES: Record<GripKind, boolean> = { helm: false, capstan: false, cannon: true, ladder: false };
 export type GripSet = { kind: GripKind; points: THREE.Vector3[] };
 export const IK_GRIPS_KEY = 'ikGrips';
 
@@ -43,6 +54,9 @@ type Chains = {
   /** The spine bone the reach lean bends (spine2 / spine_02), and its clip value. */
   lean: THREE.Bone | null;
   qLean: THREE.Quaternion;
+  /** The pelvis the crouch lowers, and its clip position. */
+  hips: THREE.Bone | null;
+  pHips: THREE.Vector3;
   stashed: boolean;
   /** Contact blend weight, eased in and out so a pirate taking the wheel reaches for it. */
   w: number;
@@ -68,7 +82,8 @@ export function contactChainsOf(root: THREE.Object3D): Chains {
   const arm = (s: Side) => chain(find(root, [`upperarm_${s}`]), find(root, [`lowerarm_${s}`, `forearm_${s}`]), find(root, [`hand_${s}`]));
   const leg = (s: Side) => chain(find(root, [`thigh_${s}`]), find(root, [`calf_${s}`, `shin_${s}`]), find(root, [`foot_${s}`]));
   const lean = find(root, ['spine_02', 'spine2', 'spine_01', 'spine1']);
-  c = { arm: { l: arm('l'), r: arm('r') }, leg: { l: leg('l'), r: leg('r') }, lean, qLean: lean?.quaternion.clone() ?? new THREE.Quaternion(), stashed: false, w: 0, kind: null };
+  const hips = find(root, ['pelvis', 'hips']);
+  c = { arm: { l: arm('l'), r: arm('r') }, leg: { l: leg('l'), r: leg('r') }, lean, qLean: lean?.quaternion.clone() ?? new THREE.Quaternion(), hips, pHips: hips?.position.clone() ?? new THREE.Vector3(), stashed: false, w: 0, kind: null };
   CHAINS.set(root, c);
   return c;
 }
@@ -83,6 +98,7 @@ export function restoreContactClipPose(root: THREE.Object3D): void {
   if (!c || !c.stashed) return;
   eachChain(c, (ch) => { ch.a.quaternion.copy(ch.qa); ch.b.quaternion.copy(ch.qb); });
   c.lean?.quaternion.copy(c.qLean);
+  c.hips?.position.copy(c.pHips);
   c.stashed = false;
 }
 
@@ -90,6 +106,7 @@ function stash(c: Chains): void {
   if (c.stashed) return;
   eachChain(c, (ch) => { ch.qa.copy(ch.a.quaternion); ch.qb.copy(ch.b.quaternion); });
   if (c.lean) c.qLean.copy(c.lean.quaternion);
+  if (c.hips) c.pHips.copy(c.hips.position);
   c.stashed = true;
 }
 
@@ -223,8 +240,8 @@ export function pickGrips(holder: THREE.Object3D, body: THREE.Object3D, arms: Re
     t.copy(set.points[bi]).applyMatrix4(holder.matrixWorld);
     arm.a.getWorldPosition(A); arm.b.getWorldPosition(B); arm.c.getWorldPosition(C);
     const reach = A.distanceTo(B) + B.distanceTo(C) + PALM;
-    // the waist lean buys ~0.45 m x LEAN_MAX of extra reach
-    if (A.distanceTo(t) > reach + 0.06 + 0.45 * LEAN_MAX) continue;
+    // the waist lean buys ~0.45 m x the lean of extra reach, a crouch its depth
+    if (A.distanceTo(t) > reach + 0.06 + 0.45 * LEAN_OF[set.kind] + (CROUCHES[set.kind] ? CROUCH_MAX : 0)) continue;
     taken = bi;
     out[s] = t;
   }
@@ -253,7 +270,9 @@ export function applyStationContacts(
   const res: ContactResult = { l: NaN, r: NaN, targetL: null, targetR: null };
   if (c.w > 0 && holder) {
     const grips = pickGrips(holder, body, c.arm);
-    leanToReach(c, body, grips);
+    const leanMax = LEAN_OF[c.kind ?? 'helm'];
+    if (CROUCHES[c.kind ?? 'helm']) crouchToReach(c, body, grips, leanMax);
+    leanToReach(c, body, grips, leanMax);
     for (const s of ['l', 'r'] as const) {
       const arm = c.arm[s]; const t = grips[s];
       if (!arm || !t) continue;
@@ -286,8 +305,7 @@ export function applyStationContacts(
 
 /** Bend forward from the waist just enough that the farther grip comes into
  *  the arm's reach (a helmsman leans into a wheel a step away). */
-function leanToReach(c: Chains, body: THREE.Object3D, grips: { l: THREE.Vector3 | null; r: THREE.Vector3 | null }): void {
-  if (!c.lean) return;
+function shortfall(c: Chains, grips: { l: THREE.Vector3 | null; r: THREE.Vector3 | null }): number {
   let short = 0;
   for (const s of ['l', 'r'] as const) {
     const arm = c.arm[s]; const t = grips[s];
@@ -295,11 +313,37 @@ function leanToReach(c: Chains, body: THREE.Object3D, grips: { l: THREE.Vector3 
     arm.a.getWorldPosition(A); arm.b.getWorldPosition(B); arm.c.getWorldPosition(C);
     short = Math.max(short, A.distanceTo(t) - (A.distanceTo(B) + B.distanceTo(C) + PALM - 0.02));
   }
-  if (short <= 0) return;
+  return short;
+}
+
+const leverOf = (c: Chains): number => {
+  if (!c.lean) return 0.25;
   c.lean.getWorldPosition(B);
   c.arm.r?.a.getWorldPosition(A) ?? c.arm.l?.a.getWorldPosition(A);
-  const lever = Math.max(0.25, A.distanceTo(B));
-  const angle = Math.min(LEAN_MAX, (short / lever) * c.w);
+  return Math.max(0.25, A.distanceTo(B));
+};
+
+/** Drop the pelvis (straight down the body's own up axis) by what the lean
+ *  alone leaves short; plantFeetOnDeck then bends the knees under it. */
+function crouchToReach(c: Chains, body: THREE.Object3D, grips: { l: THREE.Vector3 | null; r: THREE.Vector3 | null }, leanMax: number): void {
+  if (!c.hips) return;
+  const left = shortfall(c, grips) - leverOf(c) * leanMax * 0.8;
+  if (left <= 0) return;
+  // a grip below and ahead of the shoulder: dropping it by d closes ~0.8 d of the gap
+  const drop = Math.min(CROUCH_MAX, (left / 0.8) * c.w);
+  c.hips.getWorldPosition(A);
+  U.set(0, 1, 0).transformDirection(body.matrixWorld);
+  A.addScaledVector(U, -drop);
+  if (c.hips.parent) { c.hips.parent.updateWorldMatrix(true, false); c.hips.parent.worldToLocal(A); }
+  c.hips.position.copy(A);
+  c.hips.updateMatrixWorld(true);
+}
+
+function leanToReach(c: Chains, body: THREE.Object3D, grips: { l: THREE.Vector3 | null; r: THREE.Vector3 | null }, leanMax = LEAN_MAX): void {
+  if (!c.lean) return;
+  const short = shortfall(c, grips);
+  if (short <= 0) return;
+  const angle = Math.min(leanMax, (short / leverOf(c)) * c.w);
   // + about her own left (+X) tips her up-axis toward +Z: forward
   U.set(1, 0, 0).transformDirection(body.matrixWorld);
   rotateWorld(c.lean, DQ.setFromAxisAngle(U, angle));
@@ -315,7 +359,7 @@ function plantFeetOnDeck(c: Chains, body: THREE.Object3D): void {
     leg.c.getWorldPosition(C);
     const local = body.worldToLocal(C.clone());
     const sole = local.y - 0.045;
-    if (sole > -0.005 || sole < -0.25) continue;
+    if (sole > -0.005 || sole < -(CROUCH_MAX + 0.1)) continue;
     local.y -= sole;
     body.localToWorld(local);
     leg.a.getWorldPosition(A);
