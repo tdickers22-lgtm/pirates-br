@@ -17,6 +17,7 @@ import type { HullProfile } from '../../shared/hull.js';
 import type { RenderQuality } from './Renderer.js';
 import { registerBudgetLight } from './LightBudget.js';
 import { showWhenAffordable } from './FirstDrawBudget.js';
+import { farSwapDistance, FAR_SWAP_HYSTERESIS } from '../world/island/InstanceLod.js';
 
 /** Storm sea-state source accepted by update(): either a precomputed 0..1
  *  intensity, or the replicated storm ring so the renderer can evaluate the
@@ -149,6 +150,67 @@ interface CannonMeshGroup {
   pitchPivot: THREE.Group;
 }
 
+// ── SHIP HARDWARE GLBs (b3.4e, assets-01) ────────────────────────────────────
+// cannon / wheel / capstan / ship_lantern (+ their _far siblings) are Blender
+// builds (scripts/blender/build_ship_hardware.py) whose pivots test-hero-assets
+// pins: the cannon's `barrel` node sits ON the trunnions and points +Z, the
+// `wheel_body` disc lies in XY so rotation.z spins it, the capstan's `drum`
+// stands on `capstan_body`, the lantern hangs from its hook at y = 0. They are
+// mounted over the procedural hardware the moment the library has all four;
+// before that (the queue window) the procedural pieces are the fallback.
+export const SHIP_HARDWARE = ['cannon', 'wheel', 'capstan', 'ship_lantern'] as const;
+export type ShipHardwareName = (typeof SHIP_HARDWARE)[number];
+/** What ShipRenderer needs from the asset library (AssetLibrary satisfies it;
+ *  the node gate passes a stub). */
+export interface ShipHardwareSource {
+  has(name: ShipHardwareName): boolean;
+  clone(name: ShipHardwareName): THREE.Group | null;
+  cloneFar(name: ShipHardwareName): THREE.Group | null;
+}
+/** Uniform scale of the cannon GLB: trunnion 0.54 m over the carriage base
+ *  (the procedural pivot height) and a 1.5 m barrel, as the gun it replaces. */
+export const HW_CANNON_SCALE = 0.9;
+/** Capstan GLB scale: bar ends at ~0.8 m radius, inside the 1.25 m clearance
+ *  ring the deck barrels already keep (see the supply-barrel keep-outs). */
+export const HW_CAPSTAN_SCALE = 0.8;
+/** The wheel GLB's outer (handle-tip) radius in its own units. The ship's rim
+ *  radius rimR is per hull class; handles jut 0.16 m past it. */
+const HW_WHEEL_TIP_R = 0.84;
+const HW_SHARED = 'hwShared';
+interface HardwarePart { near: THREE.Object3D; far: THREE.Object3D | null }
+export interface ShipHardwareMount { parts: HardwarePart[]; far: boolean; lanterns: number }
+
+/** Handle / bar tips of a spoked part, clustered by angle, in `root` space:
+ *  the IK grip anchors come out of the GLB instead of a hand-typed ring. */
+function radialTips(root: THREE.Object3D, plane: 'xy' | 'xz'): THREE.Vector3[] {
+  root.updateMatrixWorld(true);
+  const inv = new THREE.Matrix4().copy(root.matrixWorld).invert();
+  const m = new THREE.Matrix4();
+  const pts: THREE.Vector3[] = [];
+  root.traverse((o) => {
+    const pos = (o as THREE.Mesh).isMesh ? (o as THREE.Mesh).geometry?.getAttribute?.('position') : undefined;
+    if (!pos || !(pos as THREE.BufferAttribute).array?.length) return;
+    m.multiplyMatrices(inv, o.matrixWorld);
+    for (let i = 0; i < pos.count; i++) pts.push(new THREE.Vector3().fromBufferAttribute(pos as THREE.BufferAttribute, i).applyMatrix4(m));
+  });
+  const rad = (p: THREE.Vector3) => (plane === 'xy' ? Math.hypot(p.x, p.y) : Math.hypot(p.x, p.z));
+  const ang = (p: THREE.Vector3) => (plane === 'xy' ? Math.atan2(p.y, p.x) : Math.atan2(p.z, p.x));
+  let maxR = 0;
+  for (const p of pts) maxR = Math.max(maxR, rad(p));
+  const tips = pts.filter((p) => rad(p) > maxR * 0.93).sort((a, b) => ang(a) - ang(b));
+  if (tips.length === 0) return [];
+  const clusters: THREE.Vector3[][] = [[tips[0]]];
+  for (let i = 1; i < tips.length; i++) {
+    if (ang(tips[i]) - ang(tips[i - 1]) > 0.15) clusters.push([]);
+    clusters[clusters.length - 1].push(tips[i]);
+  }
+  // The cluster straddling ±π is one handle cut in two.
+  if (clusters.length > 1 && ang(tips[0]) + 2 * Math.PI - ang(tips[tips.length - 1]) <= 0.15) {
+    clusters[0].push(...clusters.pop()!);
+  }
+  return clusters.map((c) => c.reduce((acc, p) => acc.add(p), new THREE.Vector3()).divideScalar(c.length));
+}
+
 interface WakeSpray {
   sprite: THREE.Sprite;
   velocity: THREE.Vector3;
@@ -269,6 +331,11 @@ interface ShipMeshGroup {
   anchor: THREE.Group;
   anchorChain: THREE.Mesh;
   anchorCapstan: THREE.Group;
+  /** b3.4e: the GLB hardware mounted on this hull, or null while the procedural
+   *  fallback is still up (the library had not loaded the four files yet). */
+  hardware: ShipHardwareMount | null;
+  /** Helm rim radius for this hull class (the wheel GLB is fitted to it). */
+  wheelRimR: number;
   /** Shared warm-amber glass materials whose emissiveIntensity ramps with night. */
   lanternGlassMats: THREE.MeshStandardMaterial[];
   /** One warm PointLight per ship (budgeted: only the nearest few get lit at night). */
@@ -319,6 +386,12 @@ export class ShipRenderer {
   private shipMeshes: Map<string, ShipMeshGroup> = new Map();
   private scene!: THREE.Scene;
   private quality: RenderQuality = 'balanced';
+  /** b3.4e: where the hardware GLBs come from (the shared AssetLibrary in the
+   *  browser, a stub in the node gate). Null = procedural hardware only. */
+  private hardwareSource: ShipHardwareSource | null = null;
+  /** Grip anchors per hardware file, in GLB units (computed once per file). */
+  private readonly hardwareTips = new Map<string, THREE.Vector3[]>();
+  setHardwareSource(src: ShipHardwareSource | null): void { this.hardwareSource = src; }
   /** One reused frame record for every hull's wake — filled in place each
    *  update so driving twelve wakes allocates nothing. */
   private wakeFrame: WakeFrame = makeWakeFrame();
@@ -415,6 +488,12 @@ export class ShipRenderer {
   init(scene: THREE.Scene, quality: RenderQuality = 'balanced') {
     this.scene = scene;
     this.quality = quality;
+    // Browser only (`location`): node gates import this file without a library.
+    if (!this.hardwareSource && typeof location !== 'undefined') {
+      void import('../assets/AssetLibrary.js')
+        .then((m) => { this.hardwareSource ??= m.assets; })
+        .catch(() => { /* procedural hardware stays */ });
+    }
     this.darkWoodTex = woodTexture(256, 128, 'dark');
     this.deckTex     = woodTexture(256, 256, 'deck');
     this.sailTex     = sailTexture();
@@ -466,6 +545,7 @@ export class ShipRenderer {
       // disposed by the last holder.
       for (const root of [mesh.root, mesh.wake.group]) {
         root.traverse((obj) => {
+          if (obj.userData[HW_SHARED]) return; // library-owned hardware GLB geometry
           releaseShipGeometry((obj as THREE.Mesh).geometry as THREE.BufferGeometry | undefined);
         });
       }
@@ -2475,7 +2555,21 @@ export class ShipRenderer {
       // Extra lantern by the helm
       lanternMounts.push(new THREE.Vector3(W * 0.22, H + 1.5, -L * 0.3));
     }
+    // b3.4e: GLB lanterns when the library already has the hardware (they stay
+    // out of the static merge so the far sibling can swap); otherwise the
+    // procedural fixture merges into the hull as before.
+    const hwLanterns: HardwarePart[] = [];
+    const lanternHolders: THREE.Object3D[] = [];
     for (const mount of lanternMounts) {
+      const glb = this.hardwareReady() ? this.lanternFromGlb(lanternGlassMat) : null;
+      if (glb) {
+        // The GLB hangs from its hook at y = 0; the procedural hook top is at +0.3.
+        glb.holder.position.copy(mount).add(new THREE.Vector3(0, 0.3, 0));
+        group.add(glb.holder);
+        lanternHolders.push(glb.holder);
+        hwLanterns.push(glb.part);
+        continue;
+      }
       const fixture = makeLanternFixture(lanternGlassMat, metalMat);
       fixture.position.copy(mount);
       group.add(fixture);
@@ -2653,6 +2747,7 @@ export class ShipRenderer {
       anchorCapstan,
       holdWater.mesh,
       holdWater.shaft,
+      ...lanternHolders,
     ]);
     // perf-15: the static hull is identical across every ship of a class —
     // team colour is a material, breaches a uniform, sails/flags/upgrades/patches
@@ -2673,7 +2768,8 @@ export class ShipRenderer {
       for (const c of o.children) dropSharedMats(c);
     };
     dropSharedMats(group);
-    mergeStaticMeshes(group, mergeExclude, `detail-${ship.type}`);
+    // A hull whose lanterns are GLBs merges a different static set: its own key.
+    mergeStaticMeshes(group, mergeExclude, `detail-${ship.type}${hwLanterns.length ? '-hwlantern' : ''}`);
 
     // ── Wake foam ─────────────────────────────────────────────
     // Scene-level (NOT parented to the ship): the old wake quad inherited hull
@@ -2721,6 +2817,8 @@ export class ShipRenderer {
       anchor,
       anchorChain,
       anchorCapstan,
+      hardware: null,
+      wheelRimR: rimR,
       lanternGlassMats,
       nightLight,
       holdWater,
@@ -2749,8 +2847,182 @@ export class ShipRenderer {
       plankUniforms,
       ownPennant,
     });
+    const built = this.shipMeshes.get(ship.id)!;
+    if (this.hardwareReady()) this.mountHardware(built, hwLanterns);
 
     return group;
+  }
+
+  /** All four hardware files are loaded (far siblings are optional). */
+  private hardwareReady(): boolean {
+    const src = this.hardwareSource;
+    return !!src && SHIP_HARDWARE.every((n) => src.has(n));
+  }
+
+  private hardwareClone(name: ShipHardwareName, far: boolean): THREE.Group | null {
+    const src = this.hardwareSource;
+    const g = src ? (far ? src.cloneFar(name) : src.clone(name)) : null;
+    if (!g) return null;
+    g.traverse((o) => {
+      o.userData[HW_SHARED] = true; // library-owned geometry: clear() must not dispose it
+      if ((o as THREE.Mesh).isMesh) { o.castShadow = !far; o.receiveShadow = true; }
+    });
+    return g;
+  }
+
+  /** Grip anchors for a spoked file (wheel handles, capstan bars), in GLB units. */
+  private tipsOf(name: 'wheel' | 'capstan', node: THREE.Object3D, plane: 'xy' | 'xz'): THREE.Vector3[] {
+    let tips = this.hardwareTips.get(name);
+    if (!tips || tips.length === 0) {
+      tips = radialTips(node, plane);
+      if (tips.length > 0) this.hardwareTips.set(name, tips);
+    }
+    return tips;
+  }
+
+  private lanternFromGlb(glassMat: THREE.MeshStandardMaterial): { holder: THREE.Group; part: HardwarePart } | null {
+    const near = this.hardwareClone('ship_lantern', false);
+    if (!near) return null;
+    const far = this.hardwareClone('ship_lantern', true);
+    const holder = new THREE.Group();
+    holder.name = 'hw-lantern';
+    for (const g of far ? [near, far] : [near]) {
+      // The ship's own glass: setNightFactor ramps its emissive day -> night.
+      g.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        const mat = mesh.material as THREE.Material;
+        if (o.name === 'glass' || /glass|flame/i.test(mat?.name ?? '')) mesh.material = glassMat;
+      });
+      holder.add(g);
+    }
+    return { holder, part: { near, far } };
+  }
+
+  /**
+   * Swap the procedural cannons, wheel and capstan of one hull for the GLBs
+   * (b3.4e). The pivots the update loop drives stay the same objects —
+   * yawPivot/pitchPivot, mesh.wheel, mesh.anchorCapstan — so the barrel
+   * elevation, the wheel's rudder reading and the capstan's anchor direction
+   * are unchanged conventions; only what hangs off them changes. The IK grip
+   * sets on those holders are re-derived from the GLB geometry.
+   */
+  private mountHardware(mesh: ShipMeshGroup, lanterns: HardwarePart[] = []): void {
+    const parts: HardwarePart[] = [...lanterns];
+    const keep = (o: THREE.Object3D) => o.name === 'upgrade-charged-cannon';
+    const strip = (holder: THREE.Object3D, spare: ReadonlySet<THREE.Object3D>) => {
+      for (const c of [...holder.children]) if (!spare.has(c) && !keep(c)) holder.remove(c);
+    };
+    const S = HW_CANNON_SCALE;
+    for (const cannon of mesh.cannonMeshes) {
+      const near = this.hardwareClone('cannon', false);
+      if (!near) return;
+      const far = this.hardwareClone('cannon', true);
+      strip(cannon.root, new Set([cannon.yawPivot]));
+      strip(cannon.pitchPivot, new Set());
+      // Carriage: GLB +Z (the muzzle) onto the pivot's +X, the trunnions (GLB
+      // barrel node origin) onto the pitch pivot, the base 0.36 m under the root.
+      const body = new THREE.Group();
+      body.name = 'hw-cannon-carriage';
+      body.rotation.y = Math.PI * 0.5;
+      body.scale.setScalar(S);
+      cannon.root.add(body);
+      const barrelHolder = new THREE.Group();
+      barrelHolder.name = 'hw-cannon-barrel';
+      barrelHolder.rotation.y = Math.PI * 0.5;
+      barrelHolder.scale.setScalar(S);
+      cannon.pitchPivot.add(barrelHolder);
+      let trunnion: THREE.Vector3 | null = null;
+      let breechZ = -0.5;
+      // near first, then far: body.children / barrelHolder.children are [near, far].
+      for (const g of far ? [near, far] : [near]) {
+        const carriage = g.getObjectByName('cannon_body');
+        const barrel = g.getObjectByName('barrel');
+        if (!carriage || !barrel) continue;
+        if (!trunnion) {
+          trunnion = barrel.position.clone();
+          barrel.updateMatrixWorld(true);
+          breechZ = new THREE.Box3().setFromObject(barrel).min.z - barrel.position.z;
+        }
+        body.add(carriage);
+        barrel.position.set(0, 0, 0);
+        barrelHolder.add(barrel);
+      }
+      const nb = body.children;
+      const bb = barrelHolder.children;
+      if (nb[0]) parts.push({ near: nb[0], far: nb[1] ?? null });
+      if (bb[0]) parts.push({ near: bb[0], far: bb[1] ?? null });
+      const t = trunnion ?? new THREE.Vector3(0, 0.6, 0.02);
+      body.position.set(-t.z * S, -t.y * S, 0);
+      cannon.pitchPivot.userData[IK_GRIPS_KEY] = {
+        kind: 'cannon',
+        points: [new THREE.Vector3((breechZ + 0.1) * S, 0.08, 0.18), new THREE.Vector3((breechZ + 0.1) * S, 0.08, -0.18)],
+      };
+    }
+
+    // Helm wheel: fitted to this hull's rim radius, spun by mesh.wheel.rotation.z.
+    const wheelNear = this.hardwareClone('wheel', false);
+    if (wheelNear) {
+      const wheelFar = this.hardwareClone('wheel', true);
+      strip(mesh.wheel, new Set());
+      const ws = (mesh.wheelRimR + 0.16) / HW_WHEEL_TIP_R;
+      for (const g of wheelFar ? [wheelNear, wheelFar] : [wheelNear]) { g.scale.setScalar(ws); mesh.wheel.add(g); }
+      parts.push({ near: wheelNear, far: wheelFar });
+      const tips = this.tipsOf('wheel', wheelNear.getObjectByName('wheel_body') ?? wheelNear, 'xy');
+      if (tips.length >= 4) {
+        mesh.wheel.userData[IK_GRIPS_KEY] = { kind: 'helm', points: tips.map((p) => p.clone().multiplyScalar(ws * 0.97)) };
+      }
+    }
+
+    // Capstan: the base stays on the deck, the drum (bars) turns with the anchor.
+    const capNear = this.hardwareClone('capstan', false);
+    if (capNear) {
+      const capFar = this.hardwareClone('capstan', true);
+      const cap = mesh.anchorCapstan;
+      strip(cap, new Set([mesh.anchorChain]));
+      const base = new THREE.Group();
+      base.name = 'hw-capstan-base';
+      base.position.copy(cap.position);
+      base.scale.setScalar(HW_CAPSTAN_SCALE);
+      cap.parent?.add(base);
+      for (const g of capFar ? [capNear, capFar] : [capNear]) {
+        const b = g.getObjectByName('capstan_body');
+        const d = g.getObjectByName('drum');
+        if (b) base.add(b);
+        if (d) { d.scale.setScalar(HW_CAPSTAN_SCALE); cap.add(d); }
+      }
+      const bodies = base.children;
+      const drums = cap.children.filter((c) => c.name === 'drum');
+      parts.push({ near: bodies[0], far: bodies[1] ?? null }, { near: drums[0], far: drums[1] ?? null });
+      if (drums[0]) {
+        const tips = this.tipsOf('capstan', drums[0], 'xz');
+        if (tips.length >= 4) {
+          cap.userData[IK_GRIPS_KEY] = { kind: 'capstan', points: tips.map((p) => p.clone().multiplyScalar(HW_CAPSTAN_SCALE)) };
+        }
+      }
+    }
+
+    mesh.hardware = { parts: parts.filter((p) => !!p.near), far: false, lanterns: lanterns.length };
+    this.applyHardwareLod(mesh.hardware, this.quality === 'low');
+  }
+
+  private applyHardwareLod(hw: ShipHardwareMount, far: boolean): void {
+    hw.far = far;
+    for (const p of hw.parts) {
+      p.near.visible = !far || !p.far;
+      if (p.far) p.far.visible = far;
+    }
+  }
+
+  /** Near <-> far sibling at the islands' FAR_SWAP distance (same hysteresis);
+   *  the low tier never draws hardware LOD0 (D6). */
+  private updateHardwareLod(mesh: ShipMeshGroup, distSq: number): void {
+    const hw = mesh.hardware;
+    if (!hw) return;
+    const swap = farSwapDistance(this.quality);
+    const threshold = hw.far ? swap * FAR_SWAP_HYSTERESIS : swap;
+    const far = this.quality === 'low' || distSq > threshold * threshold;
+    if (far !== hw.far) this.applyHardwareLod(hw, far);
   }
 
   /** Probe-only (hold-water-probe breach rows): extra hull-local holes drawn
@@ -3387,6 +3659,10 @@ void main() {
       // sails for two frames with no canvas on it.
       detailNear = mesh.detailRoot.visible;
       mesh.proxyRoot.visible = !detailNear;
+      // b3.4e: the queue-window fallback gives way once the library has the
+      // hardware; after that only the near/far sibling swap runs.
+      if (!mesh.hardware && detailNear && this.hardwareReady()) this.mountHardware(mesh);
+      if (mesh.hardware && detailNear) this.updateHardwareLod(mesh, distSq);
       const extrapolation = Math.min(0.14, snapshotAge + dt * 0.5);
       // Local storm sea-state feeds the SAME boosted Gerstner field the ocean
       // surface uses, so hulls keep riding the visible water inside a storm.

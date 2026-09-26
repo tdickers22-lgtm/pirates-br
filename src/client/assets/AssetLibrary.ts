@@ -57,6 +57,11 @@ export const ASSET_NAMES = [
   'rock_arch_cave', 'cave_ledge', 'crystal_vein_a', 'crystal_vein_b',
   'cave_pool_rim', 'rope_bridge_short', 'wall_torch',
   'bone_pile_cave', 'skull_shrine', 'cave_painting_panel',
+  // Ship hardware (assets-01, b3.4e; scripts/blender/build_ship_hardware.py):
+  // ShipRenderer mounts them over its procedural cannons, helm wheel, capstan
+  // and lanterns. World tier, not boot: the procedural hardware is the
+  // fallback for the queue window, and a hull swaps once all four are in.
+  'cannon', 'wheel', 'capstan', 'ship_lantern',
 ] as const;
 
 export type AssetName = (typeof ASSET_NAMES)[number];
@@ -202,6 +207,9 @@ export const FAR_ASSET_NAMES = [
   // skinned hero would cost SHARK.MAX_WORLD x ~7k extra triangles and a
   // skinning shader variant (FAUNAGLB-01).
   'shark',
+  // Ship hardware: ShipRenderer swaps to these at the islands' FAR_SWAP_M and
+  // draws only these on the low tier (b3.4e, D6).
+  'cannon', 'wheel', 'capstan', 'ship_lantern',
 ] as const satisfies readonly AssetName[];
 type FarKey = `${(typeof FAR_ASSET_NAMES)[number] | (typeof LAZY_ASSET_NAMES)[number]}_far`;
 const STORY_PROXY_SET: ReadonlySet<string> = new Set<string>(STORY_PROXY_NAMES);
@@ -220,6 +228,8 @@ const RUNTIME_CLONED: ReadonlySet<string> = new Set<string>([
   'shark', 'crab', 'chicken', 'pig', 'gull',
   // Sea rocks drain on their own queue, which may trail the islands'.
   'searock_a', 'searock_b', 'searock_c',
+  // Every hull (and every late-joining one) clones the ship hardware.
+  'cannon', 'wheel', 'capstan', 'ship_lantern',
 ]);
 const STORY_PROXY_KEYS: ReadonlySet<string> = new Set<string>(STORY_PROXY_NAMES.map((n) => `${n}_far`));
 /** A library key whose template/merged CPU copies the phone release may drop:
