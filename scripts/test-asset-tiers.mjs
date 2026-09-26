@@ -122,13 +122,13 @@ export const RATCHET = [
   'tool_hammer:lods', 'tool_hammer:textures', 'tool_hammer:verts',
   'tool_planks:lods', 'tool_planks:textures', 'tool_planks:verts',
   // cannon
-  'cannon:band', 'cannon:lods', 'cannon:textures',
+  'cannon:lods',
   // wheel
-  'wheel:band', 'wheel:lods', 'wheel:textures',
+  'wheel:lods',
   // capstan
-  'capstan:band', 'capstan:lods', 'capstan:textures',
+  'capstan:lods',
   // lantern
-  'ship_lantern:band', 'ship_lantern:lods', 'ship_lantern:textures',
+  'ship_lantern:lods',
   // props
   'barrel:band', 'barrel:lods', 'barrel:textures',
   'keg:band', 'keg:lods', 'keg:textures',

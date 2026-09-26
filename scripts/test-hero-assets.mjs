@@ -57,6 +57,12 @@
 //       no lateral step (centre of the station's x extent) > 2 mm per 1 cm station.
 //   [m] METAL READS AS METAL (assets-02). Sampling the ORM texture at the UVs of an all-metal
 //       node (cutlass `blade`, gun `muzzle`): >= 90% of the samples have ORM.b > 0.8.
+//   [o] ONE SHARED HARDWARE ATLAS (b3.4h, assets-01/02, D27 row 9). cannon, wheel, capstan and
+//       ship_lantern are baked into ONE PBR atlas, so their baseColor/normal/ORM images are
+//       byte-identical across the four files (sha1 of each image buffer view, per slot). A per-file
+//       re-bake shows up as a different hash. [m] also samples the hardware's all-metal nodes
+//       (cannon `barrel`; the lantern body's thin posts read 80% at the shared atlas's texel density).
+//       Mutation: PIRATES_BR_MUTATE_HERO=wheel:ownatlas grades the wheel's normal as a foreign bake.
 //   [n] FIT SCALE (assets-05). The SHIPPED heroWeaponFit formula (fitBoxOnto onto
 //       primitiveWeaponBox) must scale every weapon by 0.85-1.15: a hero authored at the wrong
 //       size (the v1 flintknock was a 1.14 m musket fitted at 0.50) fails here. The flintknock is
@@ -66,6 +72,7 @@
 // to an impossible window (ratchet ignored), and the gate must go red.
 //
 //   node scripts/test-hero-assets.mjs
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { TIERS, RATCHET, tierOf } from './test-asset-tiers.mjs';
@@ -234,27 +241,28 @@ const HERO = [
   // Ship hardware (HWGLB-01). These are the pieces a pirate stands beside, and
   // the only hero family that is MULTIPLIED (eight cannons a galleon, six
   // hulls) — so every one of them carries a far LOD.
-  { file: 'cannon', tris: [2500, 7000], far: true, nodes: ['cannon_body', 'barrel'],
+  { file: 'cannon', tris: [2500, 7000], far: true, nodes: ['cannon_body', 'barrel'], metal: 'barrel', atlas: 'hardware',
     pivot: (b) => [['carriage base on the deck', Math.abs(b.get('cannon_body').min[1]) < 0.04],
       ['barrel points forward (+Z)', b.get('barrel').max[2] > 0.9],
       ['barrel node pivots on the trunnions, not the origin', b.get('barrel').min[1] > 0.35]] },
-  { file: 'wheel', tris: [2000, 5000], far: true, nodes: ['wheel_body'],
+  { file: 'wheel', tris: [2000, 5000], far: true, nodes: ['wheel_body'], atlas: 'hardware',
     pivot: (b) => [['origin on the axle', Math.abs(b.get('wheel_body').min[1] + b.get('wheel_body').max[1]) < 0.06
       && Math.abs(b.get('wheel_body').min[0] + b.get('wheel_body').max[0]) < 0.06],
       ['the disc lies in XY so rotation.z spins it', (b.get('wheel_body').max[2] - b.get('wheel_body').min[2]) < 0.4]] },
-  { file: 'capstan', tris: [1800, 4500], far: true, nodes: ['capstan_body', 'drum'],
+  { file: 'capstan', tris: [1800, 4500], far: true, nodes: ['capstan_body', 'drum'], atlas: 'hardware',
     pivot: (b) => [['base on the deck', Math.abs(b.get('capstan_body').min[1]) < 0.04],
       ['drum above the deck', b.get('drum').min[1] > 0.05]] },
-  { file: 'ship_lantern', tris: [600, 2500], far: true, mats: 2,
+  { file: 'ship_lantern', tris: [600, 2500], far: true, mats: 2, atlas: 'hardware',
     nodes: ['ship_lantern_body', 'glass'],
     pivot: (b) => [['the hook is at y=0 and the body hangs below it',
       Math.abs(b.get('ship_lantern_body').max[1]) < 0.04 && b.get('ship_lantern_body').min[1] < -0.4]] },
 ];
 
 // [k] files still exported doubleSided by the 2026-09 atlas pass. SHRINK ONLY (see the header).
-export const DOUBLE_SIDED_PENDING = ['cannon', 'wheel', 'capstan', 'ship_lantern'];
+export const DOUBLE_SIDED_PENDING = [];
 export const CARD_MATERIAL = /(glass|pane|card|sail|canvas|flag|leaf|flame)/i;
 const pending = new Set(DOUBLE_SIDED_PENDING);
+const SHARED_ATLAS = {};
 
 // [a] band source: the `tris` literals above are the pre-D27 bands, kept ONLY as the no-regress
 // floor for files the test-asset-tiers ratchet still lists as off-band (see the header).
@@ -275,7 +283,7 @@ if (mutate) {
   if (row && what === 'tris') { row.tris = [1, 2]; console.log(`  ! mutation: ${file} triangle band -> ${row.tris}`); }
   if (row && what === 'twosided') { pending.delete(file); console.log(`  ! mutation: ${file} dropped from DOUBLE_SIDED_PENDING`); }
   if (what === 'stale') { pending.add(file); console.log(`  ! mutation: ${file} added to DOUBLE_SIDED_PENDING`); }
-  if (row && ['kink', 'nometal', 'fit'].includes(what)) { row.mutate = what; console.log(`  ! mutation: ${file} ${what}`); }
+  if (row && ['kink', 'nometal', 'fit', 'ownatlas'].includes(what)) { row.mutate = what; console.log(`  ! mutation: ${file} ${what}`); }
 }
 
 console.log(`HERO GLB census — ${HERO.length} files\n`);
@@ -321,12 +329,36 @@ for (const h of HERO) {
   }
   if (h.file === 'cutlass' && boxes.has('blade')) gradeBlade(g, h);
   if (!pending.has(h.file) && (boxes.has('blade') || boxes.has('muzzle'))) await gradeMetal(g, h, boxes.has('blade') ? 'blade' : 'muzzle');
+  if (!pending.has(h.file) && h.metal && boxes.has(h.metal)) await gradeMetal(g, h, h.metal);
+  if (h.atlas) {
+    const pm = (g.json.materials || []).find((m) => m.normalTexture && m.occlusionTexture);
+    const slot = (t) => {
+      if (t == null) return 'none';
+      const img = g.json.images[g.json.textures[t.index].source];
+      const v = g.json.bufferViews[img.bufferView];
+      return crypto.createHash('sha1').update(g.bin.subarray(v.byteOffset || 0, (v.byteOffset || 0) + v.byteLength)).digest('hex');
+    };
+    const sig = pm ? [slot(pm.pbrMetallicRoughness?.baseColorTexture), slot(pm.normalTexture),
+      slot(pm.pbrMetallicRoughness?.metallicRoughnessTexture)] : ['none', 'none', 'none'];
+    if (h.mutate === 'ownatlas') sig[1] = 'foreign-bake';
+    (SHARED_ATLAS[h.atlas] ||= []).push({ file: h.file, sig });
+  }
   if (h.far) {
     const farFile = `${h.file}_far.glb`;
     if (!fs.existsSync(path.join(DIR, farFile))) { expect(`[h] ${farFile}: present (LOD1 at 60 m)`, false); continue; }
     const fs2 = stats(readGlb(farFile));
     expect(`[h] ${h.file}_far: ${fs2.tris} tris ≤ 45% of ${s.tris}`, fs2.tris <= s.tris * 0.45,
       'a far LOD that saves nothing is a second upload for nothing');
+  }
+}
+
+// [o] one shared atlas per family: every member carries the same three images.
+for (const [fam, rows] of Object.entries(SHARED_ATLAS)) {
+  const ref = rows[0];
+  for (const r of rows) {
+    const same = r.sig.every((x, i) => x !== 'none' && x === ref.sig[i]);
+    expect(`[o] ${r.file}: baseColor/normal/ORM are the shared ${fam} atlas (same bytes as ${ref.file})`, same,
+      `sha1 ${r.sig.map((x) => x.slice(0, 8)).join('/')} vs ${ref.sig.map((x) => x.slice(0, 8)).join('/')}: bake the family in one pbr_atlas pass`);
   }
 }
 
