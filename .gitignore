@@ -32,3 +32,7 @@ data/bugsnaps/
 
 # one-off scratch probes (dot-prefixed) — never part of a suite
 scripts/.*.mjs
+
+# PolyHaven CC0 texture cache (scripts/blender/_pbr.py fetches by id; TEXTURE_LICENSES.md is the record)
+scripts/blender/.cache/
+__pycache__/
