@@ -49,6 +49,7 @@ export const LOGIC = [
   quick(plain('test-kill-streak-powers.mjs')),
   quick(tsx('test-wildlife-meat.mjs')),
   quick(tsx('test-anim-no-inversion.mjs')), // b1.6a: wheel, flag, foliage, heel, head pitch signs; b1.6b: viewmodel recoil, slash ribbon, draw, near plane (~0.3 s)
+  quick(tsx('test-anim-locomotion.mjs')), // b3.3b: 8-way blend space on the v2 skeleton, stride-matched slip <= 12% at 1-5 m/s x 8 dirs, backpedal never forward, shared phase (~0.3 s)
   quick(tsx('test-handedness.mjs')), // b1.6c: +x = port; walk/helm vs sideOfLocalX, ship_hit side, wind phrase/gloss/vane, brace prompt, no raw side ternary or HullSections key in display paths (~0.2 s)
   quick(tsx('test-ammo-truth.mjs')), // b1.6e: HUD card == server mag | reserve over 6 shots, 7th reload refused no_ammo (R and trigger), no '∞' for firearms (~0.2 s)
   tsx('test-wildlife-flee.mjs'),

@@ -1,4 +1,5 @@
 import { lateJoinNotice } from '../menu/queueText.js';
+import { locomotionFacing } from '../rendering/character/locomotion.js';
 import { ballisticPositionAt, projectileGravity } from '../../shared/ballistics.js';
 import * as THREE from 'three';
 import { ECONOMY, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, SHOP_PRICES, SHOP_QUANTITIES, WEAPONS, WILDLIFE, type ShopLine } from '../../shared/constants/index.js';
@@ -5040,8 +5041,14 @@ export class Game {
         const held = (mesh.userData.bodyYawHeld as boolean | undefined) ?? false;
         const turning = bodyMoving || Math.abs(off) > 0.6 || (held && Math.abs(off) > 0.5);
         mesh.userData.bodyYawHeld = turning;
+        // b3.3b (animations-07): a moving body keeps facing the look only while
+        // the locomotion blend space can carry that body-local direction with a
+        // stride-matched clip (slow strafes, backpedals); past that it faces
+        // where it is going, so a fleeing pirate runs instead of skating.
+        const mvx = remoteAnim ? remoteAnim.vx : player.velocity.x;
+        const mvz = remoteAnim ? remoteAnim.vz : player.velocity.z;
         targetYaw = turning
-          ? (bodyMoving ? lookYaw : lookYaw - Math.sign(off) * 0.5)
+          ? (bodyMoving ? locomotionFacing(lookYaw, mvx, mvz, !!mesh.userData.rig) : lookYaw - Math.sign(off) * 0.5)
           : mesh.rotation.y;
       }
       const isSkeleton = mesh.userData.animation?.variant === 'skeleton';
@@ -5468,11 +5475,14 @@ export class Game {
     // the wire and this map already holds every body's drawn position.
     const attacker = player.lastDamagedById ? this.playerMeshes.get(player.lastDamagedById) : undefined;
     let flinchYaw: number;
+    let fromBehind = false;
     if (attacker && attacker !== mesh) {
       flinchYaw = angleWrap(Math.atan2(
         attacker.position.x - mesh.position.x,
         attacker.position.z - mesh.position.z,
       ) - mesh.rotation.y);
+      // b3.3b (animations-10): the rig plays hit_back for a shot from behind.
+      fromBehind = Math.abs(flinchYaw) > Math.PI / 2;
       // Read as a twist, not a spin: a hit from dead ahead or dead astern still
       // has to move the torso somewhere.
       flinchYaw = THREE.MathUtils.clamp(flinchYaw, -1.2, 1.2);
@@ -5485,6 +5495,7 @@ export class Game {
       t: 0,
       mag: THREE.MathUtils.clamp(drop / 40, 0.3, 1),
       yaw: flinchYaw,
+      fromBehind,
     };
     if (isLocal) {
       this.cameraShake = Math.min(1, this.cameraShake + THREE.MathUtils.clamp(drop / 90, 0.05, 0.3));

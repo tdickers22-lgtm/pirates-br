@@ -35,14 +35,14 @@
  */
 import * as THREE from 'three';
 import { clone as cloneSkinnedScene } from 'three/examples/jsm/utils/SkeletonUtils.js';
-import { PLAYER, WEAPONS } from '../../../shared/constants/index.js';
 import type { Player } from '../../../shared/types/index.js';
 import { assets, type AssetName } from '../../assets/AssetLibrary.js';
 import type { RenderQuality } from '../QualityPreference.js';
 import { AVATAR_RIG } from './PlayerMeshFactory.js';
-import { attachFaceRig, updateFaceRig, triggerJaw, nearestWithin, FACE, type FaceRig, type Vec3 } from '../character/faceRig.js';
+import { attachFaceRig, updateFaceRig, nearestWithin, FACE, type FaceRig, type Vec3 } from '../character/faceRig.js';
 import { pitchUpToBoneX } from '../signConventions.js';
 import { mixerIntervalFor } from './characterVariants.js';
+import { setLayer, driveRigLayers, registerLocoClips } from '../character/locomotion.js';
 
 const RIG_ASSET = 'pirate_base' as string as AssetName;
 
@@ -53,23 +53,8 @@ const LOWER_BONES = new Set([
   'thigh_r', 'shin_r', 'foot_r', 'toe_r',
 ]);
 
-/** PLAN §2.5: cross-fade 0.12 s. One number, used by both layers. */
-const CROSSFADE = 0.12;
-
-/** Clips that are a whole-body statement — while one of these is the lower
- *  state the upper layer plays its own upper half and no weapon pose overrides
- *  it (a helmsman does not aim a pistol at the wheel). */
-const FULL_BODY = new Set([
-  'helm', 'cannon_aim', 'cannon_fire', 'capstan_push', 'bail', 'dig', 'hammer',
-  'swim', 'tread', 'climb', 'downed', 'revive',
-  'death_shot', 'death_fall', 'death_drown',
-]);
-
-const ONE_SHOT = new Set([
-  'jump', 'land', 'cannon_fire', 'fire_pistol', 'reload',
-  'cutlass_swing_a', 'cutlass_swing_b', 'hit_front', 'hit_back', 'revive',
-  'death_shot', 'death_fall', 'death_drown',
-]);
+// CROSSFADE, FULL_BODY, ONE_SHOT and the layer state machine live in
+// ../character/locomotion.ts (b3.3b, extract-and-call).
 
 /**
  * How often the mixer is stepped, by distance to the camera. A pirate at 80 m
@@ -244,7 +229,10 @@ export function makePlayerRig(
   const src = assets.source(RIG_ASSET);
   if (!src || !rigAssetReady()) return null;
 
-  if (!clipCache) clipCache = splitClips(src.animations);
+  if (!clipCache) {
+    clipCache = splitClips(src.animations);
+    registerLocoClips(src.scene, src.animations, clipCache);
+  }
 
   const root = cloneSkinnedScene(src.scene) as THREE.Group;
   const h = hashId(playerId);
@@ -354,61 +342,6 @@ export function playerRigOf(mesh: THREE.Object3D): PlayerRig | null {
   return (mesh.userData?.rig as PlayerRig | undefined) ?? null;
 }
 
-function setLayer(rig: PlayerRig, which: 'lower' | 'upper', clipName: string) {
-  const layer = rig[which];
-  if (layer.name === clipName) return;
-  const pair = clipCache?.get(clipName);
-  if (!pair) return;
-  const clip = which === 'lower' ? pair.lower : pair.upper;
-  if (clip.tracks.length === 0) return;
-  const next = rig.mixer.clipAction(clip);
-  const once = ONE_SHOT.has(clipName);
-  next.reset();
-  next.setLoop(once ? THREE.LoopOnce : THREE.LoopRepeat, once ? 1 : Infinity);
-  next.clampWhenFinished = once;
-  next.enabled = true;
-  next.setEffectiveWeight(1);
-  next.play();
-  if (layer.action && layer.action !== next) layer.action.crossFadeTo(next, CROSSFADE, false);
-  layer.action = next;
-  layer.name = clipName;
-}
-
-/** Which whole-body clip a player's replicated state asks for. */
-function lowerStateFor(player: Player, moveSpeed: number): string {
-  if (player.state === 'downed') return 'downed';
-  if (player.state === 'swimming') return moveSpeed > 0.6 ? 'swim' : 'tread';
-  if (player.mastClimb !== null) return 'climb';
-  if (player.atHelm) return 'helm';
-  if (player.atCannon) return 'cannon_aim';
-  // `atCapstan` is POSE-01's wire bit and lands with lane 7.5; read it
-  // defensively so the clip is wired the day the bit exists and this file does
-  // not have to be touched again.
-  if ((player as { atCapstan?: boolean }).atCapstan) return 'capstan_push';
-  if (player.bailing) return 'bail';
-  if ((player.hullRepairProgress ?? 0) > 0) return 'hammer';
-  if (player.equippedTool === 'shovel') return 'dig';
-  const vy = player.velocity.y ?? 0;
-  if (Math.abs(vy) > 1.6) return vy > 0 ? 'jump' : 'fall';
-  if (moveSpeed > PLAYER.MOVE_SPEED * 0.72) return 'run';
-  if (moveSpeed > 0.4) return 'walk';
-  return 'idle';
-}
-
-/** What the arms are doing, when the legs are free to do something else. */
-function upperStateFor(player: Player, lower: string, rig: PlayerRig, swing: number): string | null {
-  if (FULL_BODY.has(lower)) return null;
-  const weapon = player.weapons[player.activeSlot];
-  if (!weapon) return null;
-  if (weapon.weaponId === 'cutlass') {
-    if (swing > 0.001) return rig.swingFlip === 0 ? 'cutlass_swing_a' : 'cutlass_swing_b';
-    return 'cutlass_idle';
-  }
-  if (WEAPONS[weapon.weaponId]?.melee) return 'block';
-  if (weapon.reloading) return 'reload';
-  return 'aim_pistol';
-}
-
 /**
  * One rigged pirate, one frame. Returns false when `mesh` is not a rig, so the
  * caller can fall through to the procedural animator.
@@ -434,30 +367,8 @@ export function updatePlayerRig(
   const rig = playerRigOf(mesh);
   if (!rig) return false;
 
-  const moveSpeed = Math.hypot(player.velocity.x, player.velocity.z);
-  const lower = lowerStateFor(player, moveSpeed);
-  setLayer(rig, 'lower', lower);
-
-  // One-shots first: a swing edge or a health drop OWNS the arms for its
-  // duration, and only then does the steady-state pose come back.
-  if (cutlassSwing > 0.001 && rig.prevSwing <= 0.001) {
-    rig.swingFlip ^= 1;
-    rig.oneShot = 0.62;
-    if (rig.face) triggerJaw(rig.face);
-  }
-  rig.prevSwing = cutlassSwing;
-  if (player.health < rig.prevHealth - 0.5 && player.state !== 'downed' && rig.oneShot <= 0) {
-    setLayer(rig, 'upper', 'hit_front');
-    rig.oneShot = 0.34;
-    if (rig.face) triggerJaw(rig.face);
-  }
-  rig.prevHealth = player.health;
-  rig.oneShot = Math.max(0, rig.oneShot - dt);
-
-  if (rig.oneShot <= 0 || FULL_BODY.has(lower)) {
-    const upper = upperStateFor(player, lower, rig, cutlassSwing);
-    setLayer(rig, 'upper', upper ?? lower);
-  }
+  // Both layers: locomotion blend space, named clips and one-shot edges (b3.3b).
+  driveRigLayers(rig, mesh, player, dt, cutlassSwing);
 
   // ── mixer, rate-limited by distance ──────────────────────────────────────
   // Undo the head look-at BEFORE the step, so the bone the mixer sees (and the

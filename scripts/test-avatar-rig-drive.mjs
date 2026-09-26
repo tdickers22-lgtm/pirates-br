@@ -138,8 +138,10 @@ const drive = (p, frames = 30) => {
 };
 const cases = [
   [player({ velocity: { x: 0, y: 0, z: 0 } }), 'idle'],
-  [player({ velocity: { x: 2.0, y: 0, z: 0 } }), 'walk'],
-  [player({ velocity: { x: PLAYER.MOVE_SPEED, y: 0, z: 0 } }), 'run'],
+  // b3.3b: the body faces +Z, so forward travel is +Z; 1 m/s is the walk
+  // clip's stride-matched band, full speed the run's.
+  [player({ velocity: { x: 0, y: 0, z: 1.0 } }), 'walk'],
+  [player({ velocity: { x: 0, y: 0, z: PLAYER.MOVE_SPEED } }), 'run'],
   [player({ state: 'swimming', velocity: { x: 2, y: 0, z: 0 } }), 'swim'],
   [player({ state: 'swimming', velocity: { x: 0, y: 0, z: 0 } }), 'tread'],
   [player({ atHelm: true }), 'helm'],
@@ -157,12 +159,79 @@ for (const [p, want] of cases) {
 }
 
 // aim while walking is the whole point of the split
-const [lower, upper] = drive(player({ velocity: { x: 2.0, y: 0, z: 0 } }), 6);
+const [lower, upper] = drive(player({ velocity: { x: 0, y: 0, z: 1.0 } }), 6);
 expect('a walking pirate can aim: legs walk, arms aim', lower === 'walk' && upper === 'aim_pistol', `${lower}/${upper}`);
 
 // a station pose owns the whole body — no pistol at the wheel
 const [lowerHelm, upperHelm] = drive(player({ atHelm: true }), 6);
 expect('a helmsman does not aim a pistol', lowerHelm === 'helm' && upperHelm === 'helm', `${lowerHelm}/${upperHelm}`);
+
+// ── b3.3b: blend space on this asset + the clips that used to be dead data ──
+// (animations-07/10). Each case settles first so no earlier one-shot owns a layer.
+const settle = () => drive(player(), 40);
+{
+  settle();
+  const [lo] = drive(player({ velocity: { x: 0, y: 0, z: -1.0 } }), 20);
+  expect('b3.3b a 1 m/s backpedal plays a back clip, never walk', lo === 'walk_back', `got "${lo}"`);
+  settle();
+  const [ls] = drive(player({ velocity: { x: 0.9, y: 0, z: 0 } }), 20);
+  expect('b3.3b a slow step to the left (+X on a +Z body) plays strafe_l', ls === 'strafe_l', `got "${ls}"`);
+  settle();
+  const [rs] = drive(player({ velocity: { x: -0.9, y: 0, z: 0 } }), 20);
+  expect('b3.3b a slow step to the right plays strafe_r', rs === 'strafe_r', `got "${rs}"`);
+}
+{
+  settle();
+  drive(player({ velocity: { x: 0, y: -6, z: 0 } }), 6);
+  const [lo] = drive(player(), 2);
+  expect('b3.3b land: grounded after vy < -3 plays land', lo === 'land', `got "${lo}"`);
+  settle();
+  drive(player({ velocity: { x: 0, y: -2, z: 0 } }), 6);
+  const [soft] = drive(player(), 2);
+  expect('b3.3b a soft touchdown (vy > -3) does not', soft === 'idle', `got "${soft}"`);
+}
+{
+  settle();
+  drive(player({ atCannon: true }), 6);
+  a.userData.cannonRecoil = 1;
+  const [lo] = drive(player({ atCannon: true }), 2);
+  expect('b3.3b cannon_fire: the gunner\'s cannonRecoil edge plays cannon_fire', lo === 'cannon_fire', `got "${lo}"`);
+  a.userData.cannonRecoil = 0;
+  const [back] = drive(player({ atCannon: true }), 90);
+  expect('b3.3b ...and hands back to cannon_aim', back === 'cannon_aim', `got "${back}"`);
+}
+{
+  settle();
+  const [lo] = drive(player({ state: 'downed', reviveProgress: 0.5 }), 3);
+  expect('b3.3b revive: a downed pirate being revived plays revive (scrubbed by progress)', lo === 'revive'
+    && Math.abs(rigA.lower.action.time / rigA.lower.action.getClip().duration - 0.5) < 0.01, `got "${lo}"`);
+  const [dn] = drive(player({ state: 'downed', reviveProgress: 0 }), 3);
+  expect('b3.3b ...and downed again when nobody holds', dn === 'downed', `got "${dn}"`);
+}
+{
+  settle();
+  a.userData.flinch = { t: 0, mag: 0.5, yaw: 1.2, fromBehind: true };
+  const [, up] = drive(player({ health: 80 }), 1);
+  expect('b3.3b hit_back: a hit from behind (Game flinch.fromBehind) plays hit_back', up === 'hit_back', `got "${up}"`);
+  a.userData.flinch = undefined;
+  drive(player({ health: 80 }), 40);
+  const [, upF] = drive(player({ health: 60 }), 1);
+  expect('b3.3b ...and a hit from the front hit_front', upF === 'hit_front', `got "${upF}"`);
+}
+{
+  settle();
+  const gun = (ammo) => player({ weapons: [{ weaponId: 'pistol', ammo, reserve: 10, reloading: false, reloadTimer: 0 }] });
+  drive(gun(5), 40);
+  const [, up] = drive(gun(4), 1);
+  expect('b3.3b fire_pistol: an ammo decrement plays fire_pistol on the upper layer', up === 'fire_pistol', `got "${up}"`);
+  const [, after] = drive(gun(4), 60);
+  expect('b3.3b ...then back to the aim', after === 'aim_pistol', `got "${after}"`);
+}
+{
+  settle();
+  const [, up] = drive(player({ equippedTool: 'spyglass' }), 6);
+  expect('b3.3b spyglass: equippedTool spyglass plays spyglass on the upper layer', up === 'spyglass', `got "${up}"`);
+}
 
 // ── the soles stay on the ground through every state ───────────────────────
 const boot = new THREE.Vector3();
