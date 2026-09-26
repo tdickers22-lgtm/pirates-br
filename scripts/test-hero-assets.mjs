@@ -4,9 +4,18 @@
 // glb-census; neither of them knows anything about the things that make a HERO
 // asset a hero asset, and every one of those is load-bearing:
 //
-//   [a] TRIANGLE BAND. A weapon the player stares at from 40 cm needs 4-8k; a
-//       weapon at 40k would cost the viewmodel layer its budget on the low tier.
-//       Both ends fail.
+//   [a] TRIANGLE BAND. SPEC CHANGE (b3.4a, 2026-09-26): the band is no longer
+//       hard-coded here; it is the D27 / PLAN 3.12 family band read from the
+//       TIERS table in test-asset-tiers.mjs (FP weapons 18-30k, cannon 14-20k,
+//       wheel 10-14k, capstan 8-12k, lantern 3-5k), so the two suites cannot
+//       disagree. The old bands (guns 3.5-9k, eye 4-11k, cannon 2.5-7k, wheel
+//       2-5k, capstan 1.8-4.5k, lantern 0.6-2.5k) were the 2026-09 atlas pass,
+//       not a budget; the upper bounds all RISE because the spec moved (D6: higher
+//       poly through LOD chains), which is declared, not a loosening. While a
+//       file's `<key>:band` row is still in the test-asset-tiers RATCHET (not yet
+//       rebuilt), [a] grades the D27 ceiling plus the OLD floor as a no-regress
+//       floor, so a pre-rebuild file can neither shrink toward a primitive nor
+//       outgrow the D27 ceiling. Both ends fail.
 //   [b] ONE MATERIAL, WITH A TEXTURE. The whole point of the authored atlas
 //       (PLAN 2.4b) is that a five-material union collapses to one draw with
 //       one baseColorTexture. A file that comes back with the palette materials
@@ -29,11 +38,12 @@
 //       `<name>_far.glb` under 45% of its triangles (LOD1 at 60 m).
 //
 // Mutation proof: PIRATES_BR_MUTATE_HERO=cutlass:tris tightens the cutlass band
-// to an impossible window, and the gate must go red.
+// to an impossible window (ratchet ignored), and the gate must go red.
 //
 //   node scripts/test-hero-assets.mjs
 import fs from 'node:fs';
 import path from 'node:path';
+import { TIERS, RATCHET, tierOf } from './test-asset-tiers.mjs';
 
 const DIR = path.resolve('public/assets/models');
 let failures = 0, checks = 0;
@@ -154,11 +164,23 @@ const HERO = [
       Math.abs(b.get('ship_lantern_body').max[1]) < 0.04 && b.get('ship_lantern_body').min[1] < -0.4]] },
 ];
 
+// [a] band source: the `tris` literals above are the pre-D27 bands, kept ONLY as the no-regress
+// floor for files the test-asset-tiers ratchet still lists as off-band (see the header).
+const ratchet = new Set(RATCHET);
+for (const h of HERO) {
+  const tier = tierOf(h.file);
+  if (!tier || !TIERS[tier].band) throw new Error(`${h.file}: no D27 tier band in test-asset-tiers.mjs TIERS`);
+  const d27 = TIERS[tier].band;
+  h.bandNote = `D27 ${tier} [${d27[0]}, ${d27[1]}]`;
+  if (ratchet.has(`${h.file}:band`)) { h.tris = [h.tris[0], d27[1]]; h.bandNote += `, ratcheted: pre-D27 floor ${h.tris[0]}`; }
+  else h.tris = d27;
+}
+
 const mutate = process.env.PIRATES_BR_MUTATE_HERO ?? '';
 if (mutate) {
   const [file, what] = mutate.split(':');
   const row = HERO.find((h) => h.file === file);
-  if (row && what === 'tris') { row.tris = [row.tris[1] + 1, row.tris[1] + 2]; console.log(`  ! mutation: ${file} triangle band -> ${row.tris}`); }
+  if (row && what === 'tris') { row.tris = [1, 2]; console.log(`  ! mutation: ${file} triangle band -> ${row.tris}`); }
 }
 
 console.log(`HERO GLB census — ${HERO.length} files\n`);
@@ -169,7 +191,7 @@ for (const h of HERO) {
   const s = stats(g);
   const boxes = nodeBoxes(g);
   console.log(`  ${h.file.padEnd(16)} ${String(s.tris).padStart(6)} tris  ${s.prims} prims  ${s.mats} mat  ${s.images} img  ${(g.bytes / 1024).toFixed(0)} KB`);
-  expect(`[a] ${h.file}: ${s.tris} tris in [${h.tris[0]}, ${h.tris[1]}]`, s.tris >= h.tris[0] && s.tris <= h.tris[1],
+  expect(`[a] ${h.file}: ${s.tris} tris in [${h.tris[0]}, ${h.tris[1]}] (${h.bandNote})`, s.tris >= h.tris[0] && s.tris <= h.tris[1],
     s.tris < h.tris[0] ? 'too coarse for a hero asset' : 'blows the viewmodel budget on the low tier');
   // `mats: 2` is the lantern: its glass is emissive, and an emissive pane baked
   // flat into an albedo atlas is just a yellow sticker.

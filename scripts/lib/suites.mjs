@@ -520,7 +520,13 @@ export const LOGIC = [
   //                                 address, the pivots, and the far LOD. PIRATES_BR_MUTATE_HERO is its red
   //                                 proof (WEAPON-01 / HWGLB-01, lane 5.3)
   quick({ file: 'test-hero-assets.mjs', cmd: ['node', 'scripts/test-hero-assets.mjs'] }),
-  quick({ file: 'test-tool-assets.mjs', cmd: ['node', 'scripts/test-tool-assets.mjs'] }), // b2.3h: bucket/planks/hammer GLBs: LOD bands, named nodes, pivots, factory wiring (<0.1 s)
+  quick({ file: 'test-tool-assets.mjs', cmd: ['node', 'scripts/test-tool-assets.mjs'] }),
+  //   test-asset-tiers            — b3.4a (assets-16/09): every LOD0 GLB in exactly one D27 family tier; LOD0 band,
+  //                                 `<key>_lods.glb` LOD1/LOD2/far ratios, baseColor+normal+ORM maps, verts/tris
+  //                                 <= 1.3 (non-foliage), meshopt + KTX2 packed sibling. Known-failing rows live in
+  //                                 a RATCHET that only shrinks (git-checked). `--prove` runs the 8 PIRATES_BR_MUTATE
+  //                                 clauses as its red proof (~0.2 s; ~0.7 s with --prove)
+  quick({ file: 'test-asset-tiers.mjs', cmd: ['node', 'scripts/test-asset-tiers.mjs'] }), // b2.3h: bucket/planks/hammer GLBs: LOD bands, named nodes, pivots, factory wiring (<0.1 s)
   //   glb-census --check          — the models README's counts vs disk + ASSET_NAMES/FAR_ASSET_NAMES
   //                                 (64 / 63 / 61 / 56 were all quoted as the contract; assets-20, lane 2.5)
   quick({ file: 'glb-census.mjs', cmd: ['node', 'scripts/glb-census.mjs', '--check'] }),
