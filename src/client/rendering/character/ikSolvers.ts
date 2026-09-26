@@ -25,6 +25,7 @@
  * cannon's yaw and pitch and the hull's heel for free.
  */
 import * as THREE from 'three';
+import { pitchUpToBoneX } from '../signConventions.js';
 
 export type GripKind = 'helm' | 'capstan' | 'cannon' | 'ladder';
 /** The palm sits this far past the wrist bone along the forearm: the grip
@@ -246,6 +247,47 @@ export function pickGrips(holder: THREE.Object3D, body: THREE.Object3D, arms: Re
     out[s] = t;
   }
   return out;
+}
+
+/** LOOK SPLIT (animations-08): the share of a large look pitch the chest takes. */
+export const LOOK_CHEST_SHARE = 0.4;
+/** Most look pitch the body carries at all (rad); past it the camera outruns the spine. */
+export const LOOK_TOTAL_MAX = 1.0;
+/** Most the neck alone bends (PLAN 2.5's head limit). */
+export const LOOK_HEAD_MAX = 0.5;
+
+/**
+ * Split a look pitch (rad, + up) 40/60 between the chest and the head, so a
+ * pirate aiming at a crow's nest bends back from the chest instead of snapping
+ * his neck, and the arms (children of the chest) follow the look. Runs AFTER
+ * the factory's head solve and BEFORE applyStationContacts: the chest write goes
+ * through the same stash as the station IK (restoreContactClipPose undoes it
+ * before the next mixer step, so it never compounds); the head is re-set
+ * absolutely from its clip value, which the factory restores itself.
+ * Returns the chest angle applied (rad, + up).
+ */
+export function applyLookSplit(
+  rigRoot: THREE.Object3D,
+  body: THREE.Object3D,
+  head: THREE.Object3D | null,
+  headClipX: number,
+  lookPitch: number,
+): number {
+  const c = contactChainsOf(rigRoot);
+  stash(c);
+  const total = THREE.MathUtils.clamp(lookPitch, -LOOK_TOTAL_MAX, LOOK_TOTAL_MAX);
+  const chest = c.lean ? LOOK_CHEST_SHARE * total : 0;
+  if (c.lean && chest !== 0) {
+    body.updateWorldMatrix(true, false);
+    // - about her own left (+X) tips her forward axis UP (leanToReach's + tips it down)
+    U.set(1, 0, 0).transformDirection(body.matrixWorld);
+    rotateWorld(c.lean, DQ.setFromAxisAngle(U, -chest));
+  }
+  if (head) {
+    head.rotation.x = headClipX + pitchUpToBoneX(THREE.MathUtils.clamp(total - chest, -LOOK_HEAD_MAX, LOOK_HEAD_MAX));
+    head.updateMatrixWorld(true);
+  }
+  return chest;
 }
 
 /**

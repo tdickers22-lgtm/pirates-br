@@ -13,7 +13,7 @@
  * The fallback is still graded end to end there (vm:animations:1): head
  * pitch, forward station reach, aim lift and a contralateral gait.
  */
-import { applyStationContacts, nearestGripHolder } from './character/ikSolvers.js';
+import { applyLookSplit, applyStationContacts, nearestGripHolder } from './character/ikSolvers.js';
 import * as THREE from 'three';
 import { PLAYER, WEAPONS } from '../../shared/constants/index.js';
 import type { Player, Ship } from '../../shared/types/index.js';
@@ -368,7 +368,13 @@ export class PlayerAnimator {
         const shipRoot = kind && ship ? this.view.shipRoot?.(ship.id) ?? null : null;
         const holder = shipRoot && kind ? nearestGripHolder(shipRoot, kind, mesh.position) : null;
         const aiming = !holder && (rig.upper.name === 'aim_pistol' || rig.upper.name === 'fire_pistol');
-        applyStationContacts(rig.root, mesh, holder, dt, aiming ? (remote ? remote.pitch : player.rotation.y) : null);
+        const pitch = remote ? remote.pitch : player.rotation.y;
+        // Look split (b3.3d, animations-08): off a station, on her feet, a big
+        // look pitch bends the chest 40% and the neck 60%, so the arms follow it.
+        if (!kind && (player.state === 'alive' || player.state === 'boarding')) {
+          applyLookSplit(rig.root, mesh, rig.bones.head, rig.headClipX, pitch);
+        }
+        applyStationContacts(rig.root, mesh, holder, dt, aiming ? pitch : null);
       }
       applyRigFlinch(mesh, flinchYaw(mesh), flinchEnvelope(mesh, dt));
       return;

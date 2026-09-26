@@ -826,6 +826,71 @@ console.log('First-person viewmodel');
     expect(`${rigName} aim_pistol (post-solve): hand_r >= 0.35 m forward and within 0.12 m of the eye line`, hr.z >= 0.35 && Math.abs(hr.y - eye) <= 0.12,
       `hand_r f ${hr.z.toFixed(2)} y ${hr.y.toFixed(2)} eye ${eye.toFixed(2)}`);
   }
+  // b3.3d (animations-08 remainder): a large look pitch splits 40/60 between the
+  // chest and the head, so a pirate aiming at a crow's nest bends back from the
+  // chest instead of snapping his neck, and the aimed pistol arm follows the look.
+  // Real update order per pitch: restore -> mixer step -> factory head solve
+  // (clipX + pitchUpToBoneX(clamp(p, +-0.5))) -> applyLookSplit -> contacts.
+  const PITCHES = [-0.9, -0.6, -0.3, 0, 0.3, 0.6, 0.9];
+  const fwdOf = (q) => V(0, 0, 1).applyQuaternion(q);
+  const angUp = (v) => Math.atan2(v.y, v.z);
+  for (const [rigName, g, clipsOverride] of rigs) {
+    const expect = rigName.startsWith('v2') && !v2Live ? pending : expectFn;
+    const has = typeof IK.applyLookSplit === 'function';
+    if (!has) { expect(`${rigName} look split: ikSolvers exports applyLookSplit`, false, 'missing'); continue; }
+    const body = g.scene.parent;
+    const head = g.scene.getObjectByName('head');
+    const chest = g.scene.getObjectByName('spine_02') ?? g.scene.getObjectByName('spine2');
+    const m = new THREE.AnimationMixer(g.scene);
+    const pose = (clipName, p, aim) => {
+      const clip = (clipsOverride ?? g.animations).find((c) => c.name === clipName);
+      m.stopAllAction(); m.clipAction(clip).reset().play(); m.setTime(clip.duration * 0.5);
+      IK.restoreContactClipPose(g.scene); m.update(0); body.updateMatrixWorld(true);
+      const hx = head.rotation.x;
+      head.rotation.x = hx + pitchUpToBoneX(THREE.MathUtils.clamp(p, -0.5, 0.5));
+      body.updateMatrixWorld(true);
+      IK.applyLookSplit(g.scene, body, head, hx, p);
+      if (aim) IK.applyStationContacts(g.scene, body, null, 1, p);
+      body.updateMatrixWorld(true);
+      const out = {
+        hq: head.getWorldQuaternion(new THREE.Quaternion()), cq: chest.getWorldQuaternion(new THREE.Quaternion()),
+        hand: g.scene.getObjectByName('hand_r').getWorldPosition(new THREE.Vector3()),
+        eye: head.getWorldPosition(new THREE.Vector3()).add(V(0, 0.08, 0)),
+      };
+      head.rotation.x = hx; IK.restoreContactClipPose(g.scene);
+      return out;
+    };
+    pose('idle', 0, false); // settle: the first restore drops whatever the station rows above left stashed
+    const lvl = pose('idle', 0, false);
+    const rows = PITCHES.map((p) => {
+      const o = pose('idle', p, false);
+      const gaze = angUp(fwdOf(o.hq.clone().multiply(lvl.hq.clone().invert())));
+      const ch = angUp(fwdOf(o.cq.clone().multiply(lvl.cq.clone().invert())));
+      return { p, gaze, ch };
+    });
+    const mono = rows.every((r, i) => i === 0 || r.gaze > rows[i - 1].gaze + 0.05);
+    expect(`${rigName} look split: gaze rises monotonically for look pitch -0.9..+0.9 (idle)`, mono && rows[0].gaze < -0.6 && rows.at(-1).gaze > 0.6,
+      rows.map((r) => `${r.p}:${r.gaze.toFixed(2)}`).join(' '));
+    const big = rows.filter((r) => Math.abs(r.p) >= 0.3);
+    const shareOk = big.every((r) => r.ch / r.p >= 0.35 && r.ch / r.p <= 0.45);
+    expect(`${rigName} look split: the chest takes 0.35-0.45 of the pitch, same sign`, shareOk,
+      big.map((r) => `${r.p}:${(r.ch / r.p).toFixed(2)}`).join(' '));
+    const zero = rows.find((r) => r.p === 0);
+    expect(`${rigName} look split: level look leaves the chest and head on the clip`, Math.abs(zero.ch) < 1e-3 && Math.abs(zero.gaze) < 1e-3,
+      `chest ${zero.ch.toExponential(1)} gaze ${zero.gaze.toExponential(1)}`);
+    // restore after the split puts the chest back exactly (the stash, no compounding)
+    const c0 = chest.quaternion.clone();
+    for (let f = 0; f < 5; f++) { IK.applyLookSplit(g.scene, body, head, head.rotation.x, 0.8); IK.restoreContactClipPose(g.scene); }
+    expect(`${rigName} look split: restore returns the chest to the clip (no compounding over 5 frames)`, chest.quaternion.angleTo(c0) < 1e-4,
+      `angle ${chest.quaternion.angleTo(c0).toExponential(2)}`);
+    // The aimed pistol arm bends with the look: hand_r rises with pitch and stays on the eye line.
+    const aims = [-0.6, 0, 0.6].map((p) => ({ p, ...pose('aim_pistol', p, true) }));
+    const rise = aims[2].hand.y > aims[1].hand.y + 0.1 && aims[1].hand.y > aims[0].hand.y + 0.1;
+    expect(`${rigName} aim_pistol: hand_r rises with the look pitch (-0.6 < 0 < +0.6)`, rise, aims.map((a) => `${a.p}:${a.hand.y.toFixed(2)}`).join(' '));
+    const lineRes = (a) => { const d = V(0, Math.sin(a.p), Math.cos(a.p)); const r = a.hand.clone().sub(a.eye); r.x = 0; return r.sub(d.multiplyScalar(r.dot(d))).length(); };
+    expect(`${rigName} aim_pistol: hand_r within 0.12 m of the eye line at every pitch`, aims.every((a) => lineRes(a) <= 0.12),
+      aims.map((a) => `${a.p}:${lineRes(a).toFixed(3)}`).join(' '));
+  }
 }
 
 const ms = performance.now() - t0;
