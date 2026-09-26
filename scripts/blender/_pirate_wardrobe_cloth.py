@@ -689,7 +689,7 @@ def upper(B, name, hem, torso_off, arm_off, gap, mats, out_dir, cuff, lapels, co
         def up(v):
             r = Vector((v.co.x - c.x, v.co.y - c.y, 0)).normalized()
             return v.co + UP * collar + r * 0.012
-        extrude(bm, neck, up, 0)
+        smooth_polar(extrude(bm, neck, up, 0), c)
     if lapels:
         z0 = B.waist + 0.04
 
@@ -710,6 +710,84 @@ def upper(B, name, hem, torso_off, arm_off, gap, mats, out_dir, cuff, lapels, co
     if bridge_folds(o, B, ["spine_02", "spine_03", "upperarm_l", "upperarm_r"], passes=4):
         refair_outer(o, B, passes=80)
     return o
+
+
+def smooth_polar(vs, c, win=0.55):
+    """R2 F1 (stout collar): the collar is extruded straight up from the neck hole, and on the stout the hole follows
+    the kit's face grid out over a high trapezius (x 0.21) and turns round the back in two kinks, so the collar top
+    kept three spikes the rim fairing could not remove without eating the collar's front corners. The collar top is
+    free (only the collar hangs off it), so it is smoothed in polar form round the neck: radius and height averaged
+    over +-win rad (Hann weights, no wrap across the front opening), which rounds the kinks without shrinking it."""
+    pol = [(math.atan2(v.co.x - c.x, v.co.y - c.y), math.hypot(v.co.x - c.x, v.co.y - c.y), v.co.z, v) for v in vs]
+    out = []
+    for th, _r, _z, v in pol:
+        sw = sr = sz = 0.0
+        for t2, r2, z2, _ in pol:
+            d = abs(t2 - th)
+            if d < win:
+                w = math.cos(0.5 * math.pi * d / win) ** 2
+                sw, sr, sz = sw + w, sr + w * r2, sz + w * z2
+        # the front ends (the collar's authored corners at the opening) keep their place; inward moves are capped
+        # at 4 mm so the collar never leans into a stout's trapezius (a free inward average cut the skin at x 0.24)
+        a = 1.0 - smoothstep(math.pi - 0.9, math.pi - 0.3, abs(th))
+        # only a kink moves (>= 4-10 mm off the running average): a collar that is already a clean curve (male,
+        # female) keeps its authored shape and its two front corners
+        a *= smoothstep(0.004, 0.010, max(abs(sr / sw - _r), abs(sz / sw - _z)))
+        out.append((th, _r + a * (max(sr / sw, _r - 0.004) - _r), _z + a * (sz / sw - _z), v))
+    for th, r, z, v in out:
+        v.co.x, v.co.y, v.co.z = c.x + r * math.sin(th), c.y + r * math.cos(th), z
+
+
+def hold_out_radial(o, B, bones=("spine_02", "spine_03"), outer=0.004, lining=0.0015):
+    """R2 F1 regression (waistcoat armholes): the re-fair rounds the strap corners, and at the armhole the lining
+    ended 5-7 mm under the chest / shoulder-blade skin (male 1, stout 4 gate probes from spine_03 crossed it).
+    Nearest-surface clearance cannot see it there (the nearest skin is the arm's, facing sideways), and
+    bridge_folds() works from skin probes. This works from the garment: every face centre and edge midpoint is seen
+    from the spine bin centres the gate casts from; a sample the skin still covers along that ray moves its face (or
+    edge) out along it to the skin + clearance (outer cloth 4 mm, lining 1.5 mm), up to four passes."""
+    mw = B.arm.matrix_world
+    segs = []
+    for n in bones:
+        bo = B.arm.data.bones.get(n)
+        if bo is not None:
+            h = mw @ bo.head_local
+            segs += [(h, mw @ ch.head_local) for ch in bo.children] or [(h, mw @ bo.tail_local)]
+    me, ow = o.data, o.matrix_world
+    inv = ow.inverted()
+    # the probes are face samples, not vertices: after decimate a long armhole triangle has its corners on the
+    # skin and its middle chord 5-7 mm under the shoulder ridge (the vertices alone were never covered)
+    moved = 0
+    for _ in range(4):
+        W = [ow @ v.co for v in me.vertices]
+        disp = {}
+        for f in me.polygons:
+            c = outer if f.material_index == 0 else lining
+            vs = list(f.vertices)
+            samples = [(sum((W[i] for i in vs), Vector()) / len(vs), vs)]
+            samples += [((W[a] + W[b]) * 0.5, (a, b)) for a, b in zip(vs, vs[1:] + vs[:1])]
+            for sp, owners in samples:
+                for h, t in segs:   # the gate's origins: the centre of the bin (1/8 of a bone axis) it projects into
+                    ax = t - h
+                    k = min(7, max(0, int(8 * (sp - h).dot(ax) / max(ax.length_squared, 1e-9))))
+                    q = h + ax * ((k + 0.5) / 8)
+                    d = sp - q
+                    L = d.length
+                    if L < 0.02:
+                        continue
+                    d /= L
+                    loc, _n, _i, bd = B.bvh.ray_cast(q, d, L + 0.03)
+                    if loc is not None and L - c < bd < L + 0.02:
+                        dv = d * (bd + c - L)
+                        for i in owners:
+                            if dv.length > disp.get(i, Vector()).length:
+                                disp[i] = dv
+        if not disp:
+            break
+        for i, dv in disp.items():
+            me.vertices[i].co = inv @ (W[i] + dv)
+        moved += len(disp)
+    me.update()
+    return moved
 
 
 def bridge_folds(o, B, bones, passes=8, r=0.03, margin=0.0035):
@@ -889,6 +967,7 @@ def vest_waistcoat(B, out_dir):
     refair_outer(o, B, max_corners=1, open_corners=0, passes=80)   # only the V / hem front point stays sharp: the strap corners round off at ~2 cm
     if bridge_folds(o, B, ["spine_02", "spine_03"], passes=4):
         refair_outer(o, B, max_corners=1, open_corners=0, passes=80)
+    o["heldOut"] = hold_out_radial(o, B)
     pts = [Vector((B.cx, B.cy, hem + 0.03 + k * (zv - 0.02 - hem - 0.03) / 5)) for k in range(6)]
     append(o, buttons_on(o, pts, Vector((0, 1, 0)), r=0.006))
     transfer_weights(o, B)
