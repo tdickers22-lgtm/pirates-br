@@ -2,6 +2,16 @@
  * Third-person avatar animation: gait, arms, tool/weapon poses, cutlass swing
  * timing, hit reactions, airborne/landing poses and the death crumple. Pure
  * presentation — mesh creation and removal stay in Game.
+ *
+ * Two bodies, ONE animation truth (D25). A skinned pirate (`mesh.userData.rig`)
+ * plays authored clips on the named 55-bone skeleton through updatePlayerRig.
+ * The procedural box body below is RETIRED to a fallback: the island skeleton,
+ * and a pirate whose character asset failed to load. It still draws the low
+ * tier until the v2 character ships its LOD1/LOD2 (lane b3.2e/f2); from then
+ * on the low tier is skinned too, and scripts/test-anim-no-inversion.mjs goes
+ * red if pirate_v2.glb exists while makePlayerRig still returns null on 'low'.
+ * The fallback is still graded end to end there (vm:animations:1): head
+ * pitch, forward station reach, aim lift and a contralateral gait.
  */
 import * as THREE from 'three';
 import { PLAYER, WEAPONS } from '../../shared/constants/index.js';
@@ -328,8 +338,8 @@ export class PlayerAnimator {
   animatePlayerMesh(mesh: THREE.Group, player: Player, ship: Ship | null, dt: number, remote?: RemoteAnimPose | null) {
     // A SKINNED pirate plays her own clips (RIG-01). This branch must come
     // BEFORE the `parts` read, because a rig deliberately carries no parts
-    // table: everything below is the procedural box body, which survives as the
-    // LOW-tier and load-failure fallback and as the island skeleton.
+    // table: everything below is the procedural box body, the load-failure
+    // fallback and the island skeleton (D25; low tier until v2 LODs ship).
     if (mesh.userData.rig) {
       const cam = this.view.camera;
       const distSq = cam ? cam.position.distanceToSquared(mesh.position) : 0;

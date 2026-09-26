@@ -18,7 +18,7 @@
 // grepped: a helper nobody calls fixes nothing.
 //
 //   node --import tsx scripts/test-anim-no-inversion.mjs
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import * as THREE from 'three';
 import { installCanvasStub } from './lib/canvas-stub.mjs';
 installCanvasStub();
@@ -33,6 +33,7 @@ import { SHIP, SHIP_STATS } from '../src/shared/constants/index.ts';
 import { assets } from '../src/client/assets/AssetLibrary.ts';
 import { makePlayerRig, updatePlayerRig, playerRigOf } from '../src/client/rendering/factories/PlayerRigFactory.ts';
 import { makePlayerMesh } from '../src/client/rendering/factories/PlayerMeshFactory.ts';
+import { PlayerAnimator } from '../src/client/rendering/PlayerAnimator.ts';
 import {
   weaponPose, recoilEnvelope, recoilSpecFor, recoilDelta, drawDelta, muzzleTipFor, cutlassSlashPose, slashRibbonPose,
   CUTLASS_TIP, SLASH_RIBBON_HALF_SPAN, SLASH_SWING_TIME, VIEW_DRAW_TIME, toolPose, TOOL_MIN_OFF_AXIS,
@@ -211,6 +212,254 @@ console.log('Head pitch, rigged and low tier');
   expect('LOW: wrist lifts the muzzle when aiming up', muzzle.y > 0.4, `muzzle y ${muzzle.y.toFixed(3)}`);
 }
 
+// ── 5b. THE NEW SKELETON (b3.3a, D25): named bones, three.js mixer, all three bodies ──
+// The no-inversion family re-pointed at the 55-bone named set (thigh/calf/
+// upperarm/lowerarm/head): pirate_clips.glb bound BY NAME to each of the three
+// bodies through a real THREE.AnimationMixer, which is the path the runtime
+// plays clips on. test-anim-rig-anatomy grades the clip file on its own node
+// hierarchy with hand-rolled FK; this grades what three.js produces on the
+// male, female AND stout bodies (a retarget by name that lands on the wrong
+// bone, or a body whose rest roll differs, shows up here and not there).
+// Knee: hinge fixed to the thigh from the rest pose (the calf folds behind).
+// Elbow: the clinical shoulder-frame metric of test-anim-rig-anatomy (the UAL
+// upper arm carries no humeral twist, so a bone-fixed hinge is wrong there).
+// Head: the RUNTIME look formula (updatePlayerRig: head.rotation.x +=
+// pitchUpToBoneX(pitch)) on the new `head` bone must raise the gaze.
+console.log('New skeleton (55-bone named set): mixer on male, female, stout');
+{
+  const qm = (a, b) => [a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1], a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+    a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3], a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]];
+  const qi = (q) => [-q[0], -q[1], -q[2], q[3]];
+  const qr = (q, v) => qm(qm(q, [...v, 0]), qi(q)).slice(0, 3);
+  const sub = (a, b) => a.map((x, i) => x - b[i]); const dt3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const cr = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const un = (a) => { const l = Math.hypot(...a) || 1; return a.map((x) => x / l); };
+  const swingQ = (a, b) => { const c = cr(a, b); const d = dt3(a, b); if (d < -0.9999) return [1, 0, 0, 0]; return un([c[0], c[1], c[2], 1 + d]); };
+  const ELBOW = { extMax: 145 * DEG, intMax: 90 * DEG, bendMax: 150 * DEG, bendMin: 0.2 };
+  const MARGIN = 0.05;
+  const loadGlb = async (p) => {
+    const b = readFileSync(new URL(`../${p}`, import.meta.url));
+    return new Promise((res, rej) => new GLTFLoader().parse(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength), '', res, rej));
+  };
+  const NAMED = ['thigh_l', 'calf_l', 'foot_l', 'thigh_r', 'calf_r', 'foot_r', 'clavicle_l', 'upperarm_l', 'lowerarm_l', 'hand_l',
+    'clavicle_r', 'upperarm_r', 'lowerarm_r', 'hand_r', 'head'];
+  const LEGACY_NAMES = ['shin_l', 'shin_r', 'forearm_l', 'forearm_r', 'spine1', 'hips'];
+  const tq = new THREE.Quaternion(); const tv = new THREE.Vector3();
+  /** World rotation [x,y,z,w] and position of every named bone, right now. */
+  const snap = (bones) => {
+    const wr = {}; const wp = {};
+    for (const [n, b] of Object.entries(bones)) { b.getWorldQuaternion(tq); b.getWorldPosition(tv); wr[n] = tq.toArray(); wp[n] = tv.toArray(); }
+    return { wr, wp };
+  };
+  /** The graders for one body, set up from its rest pose. */
+  function grader(bones, legNames = { calf: 'calf' }) {
+    const R = snap(bones);
+    const hinge = {};
+    for (const s of ['l', 'r']) {
+      const kd = un(sub(R.wp[`${legNames.calf}_${s}`], R.wp[`thigh_${s}`]));
+      hinge[`knee_${s}`] = qr(qi(R.wr[`thigh_${s}`]), un(cr(kd, [0, 0, -1])));
+      if (bones[`upperarm_${s}`] && bones[`lowerarm_${s}`]) {
+        const ed = un(sub(R.wp[`lowerarm_${s}`], R.wp[`upperarm_${s}`]));
+        hinge[`elbow_${s}`] = qr(qi(R.wr[`upperarm_${s}`]), un(cr(ed, [0, 0, 1])));
+      }
+    }
+    const ARM = {};
+    for (const s of bones.clavicle_l ? ['l', 'r'] : []) {
+      const js = `clavicle_${s}`;
+      const dRest = un(qr(qi(R.wr[js]), sub(R.wp[`lowerarm_${s}`], R.wp[`upperarm_${s}`])));
+      const hRest = un(qr(qi(R.wr[js]), qr(R.wr[`upperarm_${s}`], hinge[`elbow_${s}`])));
+      const down = un(qr(qi(R.wr[js]), [0, -1, 0]));
+      ARM[s] = { js, dRest, hRest, down, hDown: un(qr(swingQ(dRest, down), hRest)), sg: s === 'l' ? 1 : -1 };
+    }
+    const knee = (P, s) => {
+      const u = un(sub(P.wp[`${legNames.calf}_${s}`], P.wp[`thigh_${s}`])); const f = un(sub(P.wp[`foot_${s}`], P.wp[`${legNames.calf}_${s}`]));
+      const h = un(qr(P.wr[`thigh_${s}`], hinge[`knee_${s}`]));
+      return -Math.atan2(dt3(cr(u, f), h), dt3(u, f)); // margin: > 0 = bent backward
+    };
+    const elbow = (P, s) => {
+      const A = ARM[s]; const toS = (v) => qr(qi(P.wr[A.js]), v);
+      const u = un(toS(sub(P.wp[`lowerarm_${s}`], P.wp[`upperarm_${s}`]))); const f = un(toS(sub(P.wp[`hand_${s}`], P.wp[`lowerarm_${s}`])));
+      const bend = Math.acos(Math.max(-1, Math.min(1, dt3(u, f))));
+      if (bend < ELBOW.bendMin) return -1;
+      const n = un(cr(u, f));
+      const psiOf = (h) => A.sg * Math.atan2(dt3(cr(h, n), u), dt3(h, n));
+      const p1 = psiOf(un(qr(swingQ(A.dRest, u), A.hRest))); const p2 = psiOf(un(qr(swingQ(A.down, u), A.hDown)));
+      const psi = Math.abs(p1) < Math.abs(p2) ? p1 : p2;
+      return Math.max(bend - ELBOW.bendMax, -psi - ELBOW.extMax, psi - ELBOW.intMax);
+    };
+    const headGaze = bones.head ? qr(qi(R.wr.head), [0, 0, 1]) : null; const headUp = bones.head ? qr(qi(R.wr.head), [0, 1, 0]) : null;
+    return { R, hinge, knee, elbow, headGaze, headUp };
+  }
+
+  const clipsGltf = await loadGlb('public/assets/models/pirate_clips.glb');
+  const clipList = clipsGltf.animations;
+  expect(`pirate_clips.glb carries the clip library (${clipList.length} clips)`, clipList.length >= 80);
+  let maleBones = null; let maleScene = null;
+  for (const body of ['male', 'female', 'stout']) {
+    const scene = (await loadGlb(`assets-src/quaternius/out/pirate_base_${body}.glb`)).scene;
+    scene.updateMatrixWorld(true);
+    const bones = Object.fromEntries(NAMED.map((n) => [n, scene.getObjectByName(n)]));
+    const missing = NAMED.filter((n) => !bones[n]?.isBone);
+    const legacy = LEGACY_NAMES.filter((n) => scene.getObjectByName(n));
+    expect(`${body}: every graded bone is found BY NAME on the new skeleton, no legacy name left`, !missing.length && !legacy.length,
+      `missing ${missing.join(', ')} legacy ${legacy.join(', ')}`);
+    if (missing.length) continue;
+    const G = grader(bones);
+    // Handedness (section 3.10: facing +Z, the right hand is -X).
+    expect(`${body}: the pirate faces +Z with hand_r on -X at rest`, G.R.wp.hand_r[0] < -0.2 && G.R.wp.hand_l[0] > 0.2,
+      `hand_r x ${G.R.wp.hand_r[0].toFixed(2)} hand_l x ${G.R.wp.hand_l[0].toFixed(2)}`);
+    if (body === 'male') { maleBones = bones; maleScene = scene; }
+    const mixer = new THREE.AnimationMixer(scene);
+    const worst = []; let bad = 0; let gazeBad = 0; let ctlCaught = 0; let graded = 0;
+    for (const clip of clipList) {
+      const action = mixer.clipAction(clip); action.play();
+      let clipWorst = -Infinity; let where = '';
+      for (let k = 0; k <= 20; k++) {
+        mixer.setTime(clip.duration * k / 20); scene.updateMatrixWorld(true);
+        const P = snap(bones);
+        for (const s of ['l', 'r']) {
+          const km = G.knee(P, s); if (km > clipWorst) { clipWorst = km; where = `knee_${s} ${k}/20`; }
+          const em = G.elbow(P, s); if (em > clipWorst) { clipWorst = em; where = `elbow_${s} ${k}/20`; }
+        }
+        if (k === 10) {
+          const head = bones.head; const keep = head.quaternion.clone();
+          // Toward the head's OWN up before the look (a pirate lying on his back
+          // already gazes at +Y world), as test-anim-rig-anatomy grades it.
+          scene.updateMatrixWorld(true); head.getWorldQuaternion(tq); const up0 = qr(tq.toArray(), G.headUp);
+          const gazeUp = () => { scene.updateMatrixWorld(true); head.getWorldQuaternion(tq); return dt3(qr(tq.toArray(), G.headGaze), up0); };
+          const g0 = gazeUp();
+          head.rotation.x += pitchUpToBoneX(0.4); const g1 = gazeUp();
+          head.quaternion.copy(keep); head.rotation.x -= pitchUpToBoneX(0.4); const gInv = gazeUp(); // the inverted sign
+          head.quaternion.copy(keep);
+          graded++;
+          if (!(g1 > g0 + 0.1)) gazeBad++;
+          if (gInv < g0 - 0.1) ctlCaught++;
+        }
+      }
+      action.stop(); mixer.uncacheAction(clip);
+      if (clipWorst > MARGIN) { bad++; worst.push(`${clip.name}: ${clipWorst.toFixed(3)} rad (${where})`); }
+    }
+    expect(`${body}: every clip keeps knee and elbow flexion margins <= +${MARGIN} rad at 21 phases (${clipList.length - bad}/${clipList.length})`,
+      bad === 0, worst.slice(0, 8).join('\n      '));
+    expect(`${body}: runtime head look (rotation.x += pitchUpToBoneX(+0.4)) raises the gaze in every clip (${graded - gazeBad}/${graded})`, gazeBad === 0);
+    expect(`${body}: negative control, the inverted look sign lowers the gaze in every clip`, ctlCaught === graded, `${ctlCaught}/${graded}`);
+  }
+  // Negative controls on the metric itself (male rest pose): a backward knee and
+  // elbow fold must fail, a natural bend must pass.
+  if (maleBones) {
+    const G = grader(maleBones);
+    const bendAt = (bone, hingeLocal, ang) => {
+      const b = maleBones[bone]; const keep = b.quaternion.clone();
+      // rotate about the parent limb's hinge, expressed in the bone's parent frame
+      const parentBone = b.parent; parentBone.updateMatrixWorld(true);
+      const limbQ = new THREE.Quaternion(); maleBones[bone === 'calf_l' || bone === 'calf_r' ? `thigh_${bone.slice(-1)}` : `upperarm_${bone.slice(-1)}`].getWorldQuaternion(limbQ);
+      const parentQ = new THREE.Quaternion(); parentBone.getWorldQuaternion(parentQ);
+      const axisW = new THREE.Vector3(...hingeLocal).applyQuaternion(limbQ);
+      const axisP = axisW.applyQuaternion(parentQ.clone().invert()).normalize();
+      b.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(axisP, ang));
+      maleScene.updateMatrixWorld(true); const P = snap(maleBones); b.quaternion.copy(keep); maleScene.updateMatrixWorld(true);
+      return P;
+    };
+    const kBack = G.knee(bendAt('calf_l', G.hinge.knee_l, -0.5), 'l'); const kOk = G.knee(bendAt('calf_l', G.hinge.knee_l, 1.0), 'l');
+    const eBack = G.elbow(bendAt('lowerarm_r', G.hinge.elbow_r, -0.5), 'r'); const eOver = G.elbow(bendAt('lowerarm_r', G.hinge.elbow_r, 2.8), 'r');
+    const eOk = G.elbow(bendAt('lowerarm_r', G.hinge.elbow_r, 1.2), 'r');
+    expect('negative controls: a 29 deg backward knee, a 29 deg backward elbow and a 160 deg elbow over-fold fail; natural bends pass',
+      kBack > MARGIN && kOk <= MARGIN && eBack > MARGIN && eOver > MARGIN && eOk <= MARGIN,
+      `knee back ${kBack.toFixed(3)} ok ${kOk.toFixed(3)} elbow back ${eBack.toFixed(3)} over ${eOver.toFixed(3)} ok ${eOk.toFixed(3)}`);
+  }
+  // A REAL negative control: the legacy rig animations-01 convicted (thigh/shin
+  // names) still fails the same knee grader on its run clip.
+  {
+    const v1 = await loadGlb('public/assets/models/pirate_base.glb');
+    const bones = Object.fromEntries(['thigh_l', 'shin_l', 'foot_l', 'thigh_r', 'shin_r', 'foot_r'].map((n) => [n, v1.scene.getObjectByName(n)]));
+    v1.scene.updateMatrixWorld(true);
+    const G = grader(bones, { calf: 'shin' });
+    const run = v1.animations.find((c) => c.name === 'run');
+    const mixer = new THREE.AnimationMixer(v1.scene); mixer.clipAction(run).play();
+    let w = -Infinity;
+    for (let k = 0; k <= 20; k++) { mixer.setTime(run.duration * k / 20); v1.scene.updateMatrixWorld(true); const P = snap(bones); w = Math.max(w, G.knee(P, 'l'), G.knee(P, 'r')); }
+    expect('negative control: the legacy pirate_base.glb run clip (reverse knees, animations-01) fails the knee grader', w > MARGIN, `margin ${w.toFixed(3)} rad`);
+  }
+}
+
+// ── 5c. LOW TIER, end to end (b3.3a, vm:animations:1, D25) ───────────────────
+// The procedural body (makePlayerMesh + PlayerAnimator) is the load-failure
+// fallback and the island skeleton; phones drew it for every pirate, so its
+// signs are graded through animatePlayerMesh itself, not just the helpers.
+// Pivot convention: a limb hangs along -Y, rotation.x < 0 swings it toward +Z
+// (the way the body faces). Each case also grades the MIRRORED pose (pivot
+// rotation.x negated, the animations-02 shape) and requires it to fail.
+console.log('Low tier (procedural fallback), through animatePlayerMesh');
+{
+  let clock = 0;
+  const view = {
+    input: { isAiming: () => false }, ocean: { getTime: () => clock }, localPlayerId: 'local',
+    tempSlashPos: new THREE.Vector3(), spawnRemoteSlashArc: () => {}, getCutlassSwingProgress: () => 0,
+  };
+  const animator = new PlayerAnimator(view);
+  const cutlass = () => ({ weaponId: 'cutlass', ammo: 0, reserve: 0, reloading: false, reloadTimer: 0 });
+  const pistol = () => ({ weaponId: 'pistol', ammo: 6, reserve: 12, reloading: false, reloadTimer: 0 });
+  const mk = (over = {}) => ({
+    id: 'low', position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0 }, velocity: { x: 0, y: 0, z: 0 }, health: 100,
+    state: 'walking', weapons: [cutlass(), pistol(), null, null], activeSlot: 0, knockbackVelocity: { x: 0, y: 0, z: 0 },
+    atCannon: false, atHelm: false, atCrowNest: false, blocking: false, bailing: false, cutlassCharge: 0, mastClimb: null,
+    crouching: false, equippedTool: null, hullRepairProgress: 0, downedUntil: 0, reviveProgress: 0, ...over,
+  });
+  const pose = (over, frames = 60) => {
+    const mesh = makePlayerMesh(0x3366cc, 'pirate'); const player = mk(over);
+    for (let i = 0; i < frames; i++) { clock += 1 / 60; animator.animatePlayerMesh(mesh, player, null, 1 / 60); }
+    mesh.updateMatrixWorld(true);
+    return mesh;
+  };
+  const parts = (m) => m.userData.animation.parts;
+  const local = (m, o, p = V(0, 0, 0)) => m.worldToLocal(o.localToWorld(p.clone()));
+  const ARM_TIP = V(0, -0.6, 0); // the left hand, in its pivot frame (the right has a named hand part)
+  const hands = (m) => {
+    const p = parts(m);
+    return { r: local(m, p.rightHand), l: local(m, p.leftArmPivot, ARM_TIP), sh: local(m, p.rightArmPivot) };
+  };
+  const mirrored = (m) => {
+    const p = parts(m); p.leftArmPivot.rotation.x *= -1; p.rightArmPivot.rotation.x *= -1; m.updateMatrixWorld(true);
+    return hands(m);
+  };
+  const gazeY = (m) => V(0, 0, 1).transformDirection(parts(m).head.matrixWorld).y;
+
+  const level = pose({}); const up = pose({ rotation: { x: 0, y: 0.4 } });
+  expect('LOW e2e: look pitch +0.4 raises the head gaze', gazeY(up) > gazeY(level) + 0.2, `gaze y ${gazeY(level).toFixed(3)} -> ${gazeY(up).toFixed(3)}`);
+  parts(up).head.rotation.x *= -1; up.updateMatrixWorld(true);
+  expect('LOW e2e: negative control, the head pitch sign flipped is caught', !(gazeY(up) > gazeY(level) + 0.2));
+
+  const stations = [
+    ['helm', { atHelm: true }, (h) => h.r.z >= 0.35 && h.l.z >= 0.35 && h.r.y >= 1.0 && h.r.y <= 1.5 && h.l.y >= 1.0 && h.l.y <= 1.5],
+    ['cannon', { atCannon: true }, (h) => h.r.z >= 0.3 && h.l.z >= 0.3],
+    ['aimed pistol', { activeSlot: 1 }, (h) => h.r.z - h.sh.z >= 0.35],
+  ];
+  for (const [name, over, ok] of stations) {
+    const m = pose(over); const h = hands(m);
+    expect(`LOW e2e: ${name} hands reach FORWARD`, ok(h), `r ${h.r.toArray().map((v) => v.toFixed(2))} l ${h.l.toArray().map((v) => v.toFixed(2))}`);
+    expect(`LOW e2e: ${name} negative control, mirrored arms (hands behind, animations-02) are caught`, !ok(mirrored(m)));
+  }
+  const lowAim = hands(pose({ activeSlot: 1 })).r.y; const highAim = hands(pose({ activeSlot: 1, rotation: { x: 0, y: 0.4 } })).r.y;
+  expect('LOW e2e: aiming up lifts the pistol hand', highAim > lowAim + 0.05, `hand y ${lowAim.toFixed(3)} -> ${highAim.toFixed(3)}`);
+
+  // Gait: the arm swings OPPOSITE to the leg on the same side (a same-side
+  // swing is the pacing-camel read). Unarmed so the blade pose does not hold the arm.
+  const walker = makePlayerMesh(0x3366cc, 'pirate'); const wp = mk({ weapons: [null, null, null, null], velocity: { x: 0, y: 0, z: 3.5 } });
+  const arm = []; const leg = [];
+  for (let i = 0; i < 150; i++) {
+    clock += 1 / 60; animator.animatePlayerMesh(walker, wp, null, 1 / 60);
+    if (i >= 30) { arm.push(parts(walker).leftArmPivot.rotation.x); leg.push(parts(walker).leftLegPivot.rotation.x); }
+  }
+  const corr = (a, b) => {
+    const ma = a.reduce((s, v) => s + v, 0) / a.length; const mb = b.reduce((s, v) => s + v, 0) / b.length;
+    const cov = a.reduce((s, v, i) => s + (v - ma) * (b[i] - mb), 0);
+    return cov / Math.sqrt(a.reduce((s, v) => s + (v - ma) ** 2, 0) * b.reduce((s, v) => s + (v - mb) ** 2, 0) || 1);
+  };
+  const c = corr(arm, leg);
+  expect('LOW e2e: walking, the left arm swings opposite to the left leg', c < -0.5, `corr ${c.toFixed(3)}`);
+  expect('LOW e2e: negative control, a same-side swing is caught', !(corr(arm.map((x) => -x), leg) < -0.5));
+}
+
 // ── 6. THE CONSUMERS: a helper nobody calls fixes nothing ───────────────────
 console.log('Wiring');
 {
@@ -227,6 +476,17 @@ console.log('Wiring');
   expect('PlayerAnimator low-tier head uses lowTierHeadPitchX', /lowTierHeadPitchX\(lookPitchRaw\)/.test(anim) && !/lookPitchRaw \* 0\.55/.test(anim));
   expect('PlayerAnimator aim arm and wrist use pitchUpToBoneX', (anim.match(/pitchUpToBoneX\(/g) ?? []).length >= 2
     && !/\+ aimPitch \* 0\.52/.test(anim) && !/wristX \+= THREE\.MathUtils\.clamp\(lookPitchRaw/.test(anim));
+  // D25 tripwire (b3.3a): the procedural body is the LOW tier only until the
+  // v2 character (pirate_v2.glb + LOD1/LOD2, lane b3.2e/f2) ships. The day it
+  // does, makePlayerRig must stop returning null on 'low' (skinned LOD1/LOD2,
+  // one animation truth) and makePlayerMesh is the load-failure fallback only.
+  const rigFactory = src('src/client/rendering/factories/PlayerRigFactory.ts');
+  const lowStillBoxes = /quality === 'low'[^\n]*return null/.test(rigFactory);
+  const v2Shipped = existsSync(new URL('../public/assets/models/pirate_v2.glb', import.meta.url));
+  expect(`D25: once pirate_v2.glb ships the low tier draws the skinned rig, boxes only on load failure (v2 shipped: ${v2Shipped}, low tier still boxes: ${lowStillBoxes})`,
+    !(v2Shipped && lowStillBoxes));
+  expect('D25: PlayerAnimator keeps the procedural branch behind the rig branch (fallback still animates)',
+    /if \(mesh\.userData\.rig\) \{[\s\S]{0,1600}?return;\s*\}\s*\n\s*const animation = mesh\.userData\.animation/.test(anim));
   const phys = src('src/server/systems/PhysicsSystem.ts');
   expect('PhysicsSystem attitude uses shipTurnHeel', /const turnHeel = shipTurnHeel\(/.test(phys));
 }
@@ -463,4 +723,4 @@ console.log('First-person viewmodel');
 const ms = performance.now() - t0;
 console.log(`\n${checks - failures}/${checks} checks, ${ms.toFixed(0)} ms`);
 if (failures) { console.error(`FAIL: ${failures} inversion check(s)`); process.exit(1); }
-console.log('PASS: nothing inverted (wheel, flag, foliage, heel, head pitch, viewmodel recoil/ribbon/draw)');
+console.log('PASS: nothing inverted (wheel, flag, foliage, heel, head pitch, new-skeleton knees/elbows/head on 3 bodies, low-tier e2e, viewmodel recoil/ribbon/draw)');
