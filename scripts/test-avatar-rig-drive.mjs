@@ -213,7 +213,9 @@ camDistSq = 200 * 200;
 const far = stepped();
 expect('a pirate in your face is stepped every frame', near === 60, `${near}/60`);
 expect('a pirate at 40 m is stepped ~half as often', mid < near && mid > 0, `${mid}/60`);
-expect('a pirate past 120 m is not stepped at all', far === 0, `${far}/60`);
+// b3.2f mixer LOD (mixerIntervalFor): 5 Hz beyond 40 m and never frozen, so a far
+// pirate walks in coarse steps instead of sliding across the deck in one pose.
+expect('a pirate past 120 m is stepped at ~5 Hz, never frozen', far === 5, `${far} steps in 1 s`);
 
 // ── the head look-at is ABSOLUTE, not accumulated (review-6 P1) ────────────
 // The mixer is rate-limited by distance, but the head post-solver runs EVERY
