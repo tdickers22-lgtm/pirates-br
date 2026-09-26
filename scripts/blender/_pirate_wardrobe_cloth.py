@@ -480,7 +480,83 @@ def upper(B, name, hem, torso_off, arm_off, gap, mats, out_dir, cuff, lapels, co
     orient(B, bm)
     o = to_obj(name, bm, mats, out_dir)
     solidify(o, 0.0032)
+    bridge_folds(o, B, ["spine_02", "spine_03", "upperarm_l", "upperarm_r", "lowerarm_l", "lowerarm_r"])
     return o
+
+
+def bridge_folds(o, B, bones, passes=8, r=0.03, margin=0.0035):
+    """the garment must enclose every skin vertex it wraps as seen from the bone (the test-character-asset probe:
+    rays from 8 bins along each covered bone to the skin vertices that bone dominates). Where the body folds on
+    itself (a stout's back-armpit crease under the arm, the belly underside over the thigh) the shell tucked into the
+    fold and the ray to the fold's outer sheet crossed it. Push the crossing sheet (shell and lining together) out
+    past the skin with a smooth falloff, so the garment bridges the fold like cloth does."""
+    from mathutils.kdtree import KDTree
+    mw = B.arm.matrix_world
+    axes = {}
+    for n in bones:
+        bo = B.arm.data.bones.get(n)
+        if bo is None:
+            continue
+        h = mw @ bo.head_local
+        axes[n] = [(h, mw @ c.head_local) for c in bo.children] or [(h, mw @ bo.tail_local)]
+    me = o.data
+    zs = [v.co.z for v in me.vertices]
+    z0, z1 = min(zs), max(zs) - 0.02
+    probes = []
+    for i, p in enumerate(B.P):
+        if not (z0 < p.z < z1) or not B.Wt[i]:
+            continue
+        # every covered bone carrying >= 30% of the vertex (the gate takes the dominant joint AFTER the 4-limit and
+        # renormalise of the export, which can differ from Blender's where two bones share a vertex)
+        js = [j for j, wt in B.Wt[i].items() if j in axes and wt >= 0.3] or \
+            [j for j in (max(B.Wt[i].items(), key=lambda kv: kv[1])[0],) if j in axes]
+        for j, (h, t) in ((j, a) for j in js for a in axes[j]):
+            if j.startswith("thigh_") and abs(p.x) < 0.03:
+                continue
+            ax = t - h
+            k = min(7, max(0, int(8 * (p - h).dot(ax) / max(ax.length_squared, 1e-9))))
+            probes.append((h + ax * ((k + 0.5) / 8), p, i))
+    moved = 0
+    for _ in range(passes):
+        bvh = BVHTree.FromPolygons([v.co for v in me.vertices], [list(q.vertices) for q in me.polygons])
+        hits = []
+        for c, p, i in probes:
+            d = p - c
+            L = d.length
+            if L < 0.01:
+                continue
+            d = d / L
+            loc, fn, fi, hd = bvh.ray_cast(c, d, L - 0.001)
+            if loc is None:
+                continue
+            bl, _, _, bd = B.bvh.ray_cast(c, d, L - 0.001)
+            if bl is not None and bd < L - 0.004:
+                continue   # hidden from the bone by the body's own skin (the gate drops these probes too)
+            # move the crossing sheet along its own normal (away from the bone): a plane moved by t along n moves the
+            # crossing by t / (n.d). Sliding it along the ray instead barely moved a sheet the ray grazes (the stout's
+            # belly underside over the thigh: 0.6 mm a pass, never cleared)
+            nf = fn if fn.dot(d) > 0 else -fn
+            # (a sheet the ray meets head-on, the stout's back-armpit crease, slides out along the ray: that cleared it)
+            dv = d * (L - hd + margin) if nf.dot(d) >= 0.5 else nf * min(0.02, (L - hd + margin) / max(0.25, nf.dot(d)))
+            hits.append((loc, dv, fi))
+        if not hits:
+            break
+        kd = KDTree(len(me.vertices))
+        for v in me.vertices:
+            kd.insert(v.co, v.index)
+        kd.balance()
+        disp = {}
+        for loc, dv, fi in hits:
+            own = set(me.polygons[fi].vertices)   # the crossed face itself moves the full amount
+            for _co, vi, dd in kd.find_range(loc, r):
+                w = 1.0 if vi in own else (1 - (dd / r) ** 2) ** 2
+                if w * dv.length > disp.get(vi, Vector()).length:
+                    disp[vi] = dv * w
+        for vi, dv in disp.items():
+            me.vertices[vi].co += dv
+        moved += len(hits)
+    o["bridgedProbes"] = moved
+    return moved
 
 
 def buttons_on(o, pts, d, r=0.0075, mat=3):
@@ -695,6 +771,7 @@ def breeches(B, kind, out_dir):
     cls = "breeches" if knee else "canvas"
     o = to_obj(name, bm, [cls, cls, cls, "gold"], out_dir)
     solidify(o, 0.0025, 0)
+    bridge_folds(o, B, ["thigh_l", "thigh_r"])
     if knee:
         btn = []
         for s in "lr":
@@ -707,41 +784,161 @@ def breeches(B, kind, out_dir):
     return finish(o, B, "legs")
 
 
+def _hull2(pts):
+    """2D convex hull (Andrew's monotone chain), counter-clockwise."""
+    pts = sorted(set(pts))
+    if len(pts) < 3:
+        return pts
+
+    def cr(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    lo, up = [], []
+    for q in pts:
+        while len(lo) >= 2 and cr(lo[-2], lo[-1], q) <= 0:
+            lo.pop()
+        lo.append(q)
+    for q in reversed(pts):
+        while len(up) >= 2 and cr(up[-2], up[-1], q) <= 0:
+            up.pop()
+        up.append(q)
+    return lo[:-1] + up[:-1]
+
+
+def _outline(pts, off, back, n):
+    """offset convex outline of a point slab (Minkowski sum with a disc of radius off), resampled at n points of equal
+    arc length, counter-clockwise, starting where a ray from the centroid along `back` leaves it (so consecutive rings
+    of a loft correspond heel to heel and toe to toe)."""
+    ring = [(x + off * math.cos(a), y + off * math.sin(a)) for (x, y) in _hull2(pts)
+            for a in (2 * math.pi * k / 16 for k in range(16))]
+    h = _hull2(ring)
+    cx, cy = sum(q[0] for q in h) / len(h), sum(q[1] for q in h) / len(h)
+    start, k0 = None, 0
+    for k in range(len(h)):
+        ax, ay = h[k]
+        ex, ey = h[(k + 1) % len(h)][0] - ax, h[(k + 1) % len(h)][1] - ay
+        den = back[0] * ey - back[1] * ex
+        if abs(den) < 1e-12:
+            continue
+        t = ((ax - cx) * ey - (ay - cy) * ex) / den
+        u = ((ax - cx) * back[1] - (ay - cy) * back[0]) / den
+        if t > 0 and -1e-9 <= u <= 1 + 1e-9:
+            start, k0 = (ax + u * ex, ay + u * ey), k
+            break
+    if start is None:
+        start, k0 = h[0], 0
+    path = [start] + [h[(k0 + 1 + j) % len(h)] for j in range(len(h))] + [start]
+    seg = [math.dist(path[j], path[j + 1]) for j in range(len(path) - 1)]
+    total, out, j, acc = sum(seg), [], 0, 0.0
+    for m in range(n):
+        want = total * m / n
+        while acc + seg[j] < want:
+            acc += seg[j]
+            j += 1
+        f = (want - acc) / max(seg[j], 1e-12)
+        out.append((path[j][0] + f * (path[j + 1][0] - path[j][0]), path[j][1] + f * (path[j + 1][1] - path[j][1])))
+    return out, (cx, cy)
+
+
 def boots(B, kind, out_dir):
+    """a boot is NOT a shell of the foot (b3.2d R2 own check: toes and the arch read through, footwear looked like
+    socks). Each side is lofted from horizontal slices of the leg and foot: every ring is the convex outline of the
+    skin within the slab around it (so the toes merge into one toe box and the arch is bridged), offset outward, with
+    extra room over the toes. Below it a welted sole (outset, dark) and a stacked heel block at the back."""
     tall = kind == "tall"
     top = B.knee + 0.04 if tall else B.ankle + 0.035
+    N = 48
+    bm = bmesh.new()
+    heels = []
+    for s in "lr":
+        idx = [i for i in range(len(B.P)) if B.P[i].z < top + 0.03 and B.side(B.P[i]) == s
+               and B.w(i, "upperarm", "lowerarm", *HAND) < 0.2 and B.w(i, "thigh", "calf", "foot", "ball") > 0.3]
+        A = B.A[idx]
+        zmin = float(A[:, 2].min())
+        f3 = B.b(f"ball_{s}") - B.b(f"foot_{s}")
+        fwd = Vector((f3.x, f3.y)).normalized()
+        back = (-fwd.x, -fwd.y)
+        toe_z = zmin + 0.045   # over the toes and the ball: the toe box
 
-    def keep(i):
-        return B.P[i].z < top + 0.015 and B.w(i, "upperarm", "lowerarm", *HAND) < 0.2
+        def slab(z, half):
+            sel = A[np.abs(A[:, 2] - z) <= half]
+            if not len(sel):
+                sel = A[np.abs(A[:, 2] - z) <= half + 0.02]
+            return [(float(x), float(y)) for x, y in sel[:, :2]]
 
-    def off(i):
-        if B.N[i].z < -0.5:
-            return 0.006
-        return 0.007 + (0.010 * smoothstep(B.ankle + 0.02, B.ankle + 0.08, B.P[i].z) if tall else 0.0)
-    # the sole and the heel corner stay unsmoothed: once the welded shell closed the kit's seam at the heel,
-    # smoothing cut that 90 deg corner and the heel skin poked through the chord (shoes, all three bodies)
-    bm, src = shell(B, keep, off, smooth=2, pin=lambda i: B.P[i].z < B.ankle * 0.45)
-    # only the TOP rim: the kit foot has its own sole boundary, and snapping that to the knee made pillars
-    top_v = [v for v in bm.verts if v.is_boundary and v.co.z > top - 0.04]
-    for v in top_v:
-        v.co.z = top
-    if tall:   # bucket top: flares out and up past the knee
-        nv = extrude(bm, top_v, lambda v: v.co + B.leg_radial(v.co, B.side(v.co)) * 0.012 + UP * 0.022, 0)
-        extrude(bm, nv, lambda v: v.co + B.leg_radial(v.co, B.side(v.co)) * 0.02 + UP * 0.03, 0)
-    else:      # shoe collar lip
-        extrude(bm, top_v, lambda v: v.co + B.leg_radial(v.co, B.side(v.co)) * 0.002 + UP * 0.006, 0)
+        def off(z):
+            o = 0.007 + (0.010 * smoothstep(B.ankle + 0.02, B.ankle + 0.08, z) if tall else 0.0)
+            return o + 0.004 * (1 - smoothstep(toe_z - 0.02, toe_z, z))   # toe box room
+        # ring heights: dense over the foot, sparser up the shaft
+        zs, z = [], zmin + 0.016
+        while z < top - 1e-4:
+            zs.append(z)
+            z += 0.007 if z < B.ankle + 0.06 else 0.02
+        zs.append(top)
+        rings = []   # (z, pts, material of the band BELOW this ring)
+        sole_pts = slab(zmin + 0.006, 0.012)
+        sole, c0 = _outline(sole_pts, off(zmin) + 0.005, back, N)
+        rings.append((zmin - 0.008, sole, 2))
+        rings.append((zmin + 0.009, sole, 2))
+        up0, _ = _outline(sole_pts, off(zmin), back, N)
+        rings.append((zmin + 0.009, up0, 0))
+        for z in zs:
+            # the slab is dilated vertically by the offset too, so a ring above the toes still clears them
+            ring, _ = _outline(slab(z, off(z) + 0.004), off(z), back, N)
+            rings.append((z, ring, 0))
+        zt, rt, _ = rings[-1]
+        cx, cy = sum(q[0] for q in rt) / N, sum(q[1] for q in rt) / N
+
+        def flare(dr, dz):
+            return (zt + dz, [(x + dr * (x - cx) / max(1e-6, math.hypot(x - cx, y - cy)),
+                               y + dr * (y - cy) / max(1e-6, math.hypot(x - cx, y - cy))) for x, y in rt], 0)
+        if tall:   # bucket top: flares out and up past the knee
+            rings += [flare(0.012, 0.022), flare(0.032, 0.052)]
+        else:      # shoe collar lip
+            rings.append(flare(0.002, 0.006))
+        vs = [[bm.verts.new((x, y, z)) for (x, y) in r] for (z, r, _) in rings]
+        for k in range(len(rings) - 1):
+            for j in range(N):
+                f = bm.faces.new((vs[k][j], vs[k][(j + 1) % N], vs[k + 1][(j + 1) % N], vs[k + 1][j]))
+                f.material_index = rings[k][2] if k < 2 else 0
+        cap = bm.verts.new((c0[0], c0[1], zmin - 0.008))
+        for j in range(N):
+            bm.faces.new((vs[0][(j + 1) % N], vs[0][j], cap)).material_index = 2
+        # stacked heel: the back of the sole outline (behind 27% of the foot length), 3 cm tall, outset 2 mm
+        proj = [(x - c0[0]) * fwd.x + (y - c0[1]) * fwd.y for x, y in sole]
+        cut = min(proj) + 0.27 * (max(proj) - min(proj))
+        arc = [j for j in list(range(N // 2, N)) + list(range(0, N // 2)) if proj[j] < cut]
+        def toward(q, d):   # move an outline point d toward the sole centroid
+            vx, vy = c0[0] - q[0], c0[1] - q[1]
+            ln = max(1e-6, math.hypot(vx, vy))
+            return (q[0] + d * vx / ln, q[1] + d * vy / ln)
+        poly = [toward(sole[j], -0.002) for j in arc]
+        inner = [toward(sole[j], 0.006) for j in arc]
+        heels.append((poly, inner, zmin - 0.008, zmin + 0.030))
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=1e-5)
     orient(B, bm)
-    o = to_obj(f"boots_{kind}", bm, ["leather", "leather", "leather", "gold"], out_dir)
+    o = to_obj(f"boots_{kind}", bm, ["leather", "leather", "band", "gold"], out_dir)
     solidify(o, 0.003, 0)
+    parts = []
+    for n_, (poly, inner, z0, z1) in enumerate(heels):
+        # a C-section solid round the back of the sole: outer wall, top lift, inner wall buried in the upper, and
+        # end caps. NOT a filled prism: that filled the heel of the foot and every ray from the foot bone to the heel
+        # skin crossed its top (first loft build: shoes 38/23/42 pokes)
+        m = len(poly)
+        rows = [[(x, y, z0) for x, y in poly], [(x, y, z1) for x, y in poly],
+                [(x, y, z1) for x, y in inner], [(x, y, z0) for x, y in inner]]
+        verts = [q for r in rows for q in r]
+        faces = [(a * m + j, a * m + j + 1, (a + 1) % 4 * m + j + 1, (a + 1) % 4 * m + j)
+                 for a in range(4) for j in range(m - 1)]
+        faces += [(3 * m, 2 * m, m, 0), (m - 1, 2 * m - 1, 3 * m - 1, 4 * m - 1)]
+        parts.append(part(f"heel{n_}", verts, faces, 2))
     if not tall:
-        parts = []
         for s in "lr":
             a, bb = B.b(f"foot_{s}"), B.b(f"ball_{s}")
             p = a.lerp(bb, 0.55)
             loc, n = hit(o, Vector((p.x, p.y, p.z + 0.3)), -UP)
             if loc is not None:
                 parts.append(frame(loc, n, Vector((1, 0, 0)), 0.03, 0.024, 0.005, 0.003, 3))
-        append(o, parts)
+    append(o, parts)
     transfer_weights(o, B)
     return finish(o, B, "feet")
 

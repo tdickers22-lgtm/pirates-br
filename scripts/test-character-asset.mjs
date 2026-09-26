@@ -729,6 +729,55 @@ if (!argv.includes('--glb')) {
       expect(`${b}: ${slot} clearance probes hidden by a skin fold <= 3% (${hidden}/${probes})`, hidden <= 0.03 * probes);
       const crew = gltf.meshes[node.mesh].primitives.some((p) => gltf.materials?.[p.material]?.extras?.crewTint === true);
       expect(`${b}: ${slot} ${CREW.has(slot) ? 'carries' : 'has no'} crew-mask material`, crew === CREW.has(slot));
+      // FOOTWEAR IS NOT A SOCK (b3.2d R2 own check: the skin-tight shells showed every toe in the posed sheets).
+      // Toe box: vertical rays from above across the forefoot (3 lateral lines ahead of the ball, 17 samples each)
+      // meet the footwear's top in a profile with no valley deeper than 1 mm between two higher points (a shell
+      // of the toes has one per toe gap). Welt: at 4 mm above the lowest foot skin, the footwear outline stands
+      // >= 15 mm (and < 45 mm, no clown shoe) clear of the foot's skin outline in all 16 horizontal directions (a sole,
+      // not a lining). Red: the 7a3c0dbf shells (valley 1.8/5.5/1.8 mm, welt 9.8/13.3/7.9 mm male/female/stout).
+      if (/^boots_/.test(slot)) {
+        const hitT = (u, P) => { // Moller-Trumbore, origin 0
+          const e1 = sub(P[1], P[0]); const e2 = sub(P[2], P[0]);
+          const px = [u[1] * e2[2] - u[2] * e2[1], u[2] * e2[0] - u[0] * e2[2], u[0] * e2[1] - u[1] * e2[0]];
+          const det = dot(e1, px); if (Math.abs(det) < 1e-14) return -1;
+          const tv = [-P[0][0], -P[0][1], -P[0][2]]; const uu = dot(tv, px) / det; if (uu < 0 || uu > 1) return -1;
+          const qv = [tv[1] * e1[2] - tv[2] * e1[1], tv[2] * e1[0] - tv[0] * e1[2], tv[0] * e1[1] - tv[1] * e1[0]];
+          const vv = dot(u, qv) / det; if (vv < 0 || uu + vv > 1) return -1;
+          return dot(e2, qv) / det;
+        };
+        const firstHit = (M, tris, o, d) => { let best = Infinity; for (const t of tris) { const T = hitT(d, t.map((q) => sub(M[q].p, o))); if (T > 0 && T < best) best = T; } return best; };
+        const lastHit = (M, tris, o, d) => { let best = -Infinity; for (const t of tris) { const T = hitT(d, t.map((q) => sub(M[q].p, o))); if (T > 0 && T > best) best = T; } return best; };
+        const footTris = (L.body.tris ?? []).filter((t) => t.some((q) => /^(foot|ball)_/.test(L.body[q].j ?? '')));
+        let valley = 0; let welt = Infinity;
+        for (const s of ['l', 'r']) {
+          const f = jw(`foot_${s}`); const bl = jw(`ball_${s}`); if (!f || !bl) continue;
+          const fw = unit([bl[0] - f[0], 0, bl[2] - f[2]]); const lat = [fw[2], 0, -fw[0]];
+          const foot = L.body.filter((x) => x.j === `foot_${s}` || x.j === `ball_${s}`).map((x) => x.p);
+          const near = foot.filter((q) => dot(sub(q, bl), fw) > -0.01);
+          if (!near.length) continue;
+          const la = near.map((q) => dot(sub(q, bl), lat)); const fa = near.map((q) => dot(sub(q, bl), fw));
+          const lmin = Math.min(...la) + 0.004; const lmax = Math.max(...la) - 0.004; const fmax = Math.max(...fa);
+          for (const u of [0.25, 0.45, 0.65]) {
+            const h = [];
+            for (let k = 0; k <= 16; k++) {
+              const l = lmin + (lmax - lmin) * k / 16; const fo = fmax * u;
+              const o = [bl[0] + fw[0] * fo + lat[0] * l, 0.5, bl[2] + fw[2] * fo + lat[2] * l];
+              const T = firstHit(v, v.tris ?? [], o, [0, -1, 0]); if (T < Infinity) h.push(0.5 - T);
+            }
+            for (let k = 1; k < h.length - 1; k++) valley = Math.max(valley, Math.min(Math.max(...h.slice(0, k)), Math.max(...h.slice(k + 1))) - h[k]);
+          }
+          const ymin = Math.min(...foot.map((q) => q[1])); const sole = foot.filter((q) => q[1] < ymin + 0.02);
+          const c = [sole.reduce((a, q) => a + q[0], 0) / sole.length, ymin + 0.004, sole.reduce((a, q) => a + q[2], 0) / sole.length];
+          for (let k = 0; k < 16; k++) {
+            const a = 2 * Math.PI * k / 16; const d = [Math.cos(a), 0, Math.sin(a)];
+            const sk = lastHit(L.body, footTris, c, d);
+            const gw = lastHit(v, v.tris ?? [], c, d);
+            if (sk > 0 && gw > 0) welt = Math.min(welt, gw - sk);
+          }
+        }
+        expect(`${b}: ${slot} has a toe box, not toes (deepest valley across the forefoot ${(1000 * valley).toFixed(1)} mm <= 1)`, valley <= 0.001);
+        expect(`${b}: ${slot} has a welted sole (outline 15-45 mm clear of the foot at the sole, min ${(1000 * welt).toFixed(1)} mm)`, welt >= 0.015 && welt < 0.045);
+      }
     }
     const gold = ['coat_frock', 'coat_jacket', 'vest_waistcoat', 'belt', 'boots_shoes'].filter((s) => { const i = nodeOf(s); return i >= 0 && gltf.meshes[gltf.nodes[i].mesh].primitives.some((p) => gltf.materials?.[p.material]?.extras?.wardrobeClass === 'gold'); });
     expect(`${b}: buttons/buckles present on coat, jacket, waistcoat, belt and shoes (${gold.length}/5)`, gold.length === 5);

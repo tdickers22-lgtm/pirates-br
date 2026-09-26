@@ -213,7 +213,7 @@
        "foot_l",
        "foot_r"
       ],
-      "tris": 3264
+      "tris": 7576
      },
      "boots_tall": {
       "groups": [
@@ -226,7 +226,7 @@
        "thigh_l",
        "thigh_r"
       ],
-      "tris": 5288
+      "tris": 17880
      },
      "breeches_knee": {
       "groups": [
@@ -548,7 +548,7 @@
        "foot_l",
        "foot_r"
       ],
-      "tris": 3200
+      "tris": 8344
      },
      "boots_tall": {
       "groups": [
@@ -561,7 +561,7 @@
        "thigh_l",
        "thigh_r"
       ],
-      "tris": 5424
+      "tris": 18264
      },
      "breeches_knee": {
       "groups": [
@@ -878,7 +878,7 @@
        "foot_l",
        "foot_r"
       ],
-      "tris": 3192
+      "tris": 8344
      },
      "boots_tall": {
       "groups": [
@@ -891,7 +891,7 @@
        "thigh_l",
        "thigh_r"
       ],
-      "tris": 5432
+      "tris": 18264
      },
      "breeches_knee": {
       "groups": [
