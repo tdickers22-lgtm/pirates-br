@@ -28,6 +28,8 @@
  */
 
 import { FLOODING, PLAYER } from '../../shared/constants/index.js';
+import { CREW_PALETTE, type VisionMode } from '../../shared/crewPalette.js';
+
 
 export type HudElementId =
   | 'compass'
@@ -465,3 +467,66 @@ export function breathPlan(p: { state: string; swimTimer?: number }): BreathPlan
   const visible = p.state !== 'dead' && p.state !== 'spectating' && timer > 0;
   return { visible, fraction, low: visible && fraction < BREATH_LOW_FRACTION };
 }
+
+// ---------------------------------------------------------------------------
+// ACCESSIBILITY (b3.5d; crossdevice-15, vm:mechanicshud:5, D33).
+// Colour-blind HUD mode, reduced flashing and HUD text scale. Stored in the
+// shared 'piratesBR.settings' record beside the audio fields; MenuController
+// mounts the rows and applies them to <html> (applyA11ySettings).
+// ---------------------------------------------------------------------------
+
+
+export interface A11ySettings {
+  /** The HUD recolours crew colours for this vision type ('normal' = the hull dye). */
+  colorVision: VisionMode;
+  /** Blinking/pulsing HUD animations play once instead of looping; no screen flashes. */
+  reducedFlashing: boolean;
+  /** HUD text multiplier, HUD_TEXT_SCALE_MIN..MAX. */
+  hudTextScale: number;
+}
+
+export const HUD_TEXT_SCALE_MIN = 0.85;
+export const HUD_TEXT_SCALE_MAX = 1.5;
+export const A11Y_DEFAULTS: A11ySettings = { colorVision: 'normal', reducedFlashing: false, hudTextScale: 1 };
+const VISION_IDS: readonly VisionMode[] = ['normal', 'deut', 'prot', 'trit'];
+
+export function parseA11ySettings(raw: string | null): A11ySettings {
+  let rec: Record<string, unknown> = {};
+  try {
+    const parsed = raw ? JSON.parse(raw) as unknown : null;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) rec = parsed as Record<string, unknown>;
+  } catch { /* corrupt record: defaults */ }
+  const colorVision = VISION_IDS.includes(rec.colorVision as VisionMode) ? rec.colorVision as VisionMode : 'normal';
+  const scale = typeof rec.hudTextScale === 'number' && Number.isFinite(rec.hudTextScale) ? rec.hudTextScale : 1;
+  return {
+    colorVision,
+    reducedFlashing: rec.reducedFlashing === true,
+    hudTextScale: Math.min(HUD_TEXT_SCALE_MAX, Math.max(HUD_TEXT_SCALE_MIN, scale)),
+  };
+}
+
+/**
+ * One HUD colour per crew dye for each dichromacy, index-matched to
+ * CREW_PALETTE. Each set is optimised for its ONE vision type alone, so it
+ * spreads further than the hull dyes (which must satisfy all three at once):
+ * min dE2000 deut 22.5 (hull dyes 20.7), prot 21.5 (20.7), trit 26.7 (20.7).
+ */
+const HUD_CVD_PALETTES: Record<Exclude<VisionMode, 'normal'>, readonly number[]> = {
+  deut: [0xFE5700, 0xA7F0FF, 0x0000E7, 0x689797, 0x060003, 0x2B5A5A, 0x522101, 0xFFFF71, 0x24874F, 0xB3CBAD, 0x0086FF, 0x00004F],
+  prot: [0xF31440, 0xFFFFFE, 0x3E12C3, 0x50B596, 0x00003A, 0x201E02, 0x8E2C4C, 0xFFFF3F, 0x0F9605, 0xFFB4F9, 0xF65A89, 0x7469FF],
+  trit: [0xF92978, 0xD3FF28, 0x7900FF, 0x829030, 0x041047, 0x1B0115, 0x780000, 0xEDE400, 0x00A5FF, 0xBE6FFF, 0x186C00, 0x8504B4],
+};
+
+const cssHex = (c: number) => '#' + c.toString(16).padStart(6, '0');
+
+/** The CSS colour the HUD paints for a crew whose hull dye is `teamColor`. */
+export function hudCrewColor(teamColor: number, mode: VisionMode): string {
+  if (mode === 'normal') return cssHex(teamColor);
+  const i = CREW_PALETTE.indexOf(teamColor);
+  return cssHex(i >= 0 ? HUD_CVD_PALETTES[mode][i] : teamColor);
+}
+
+/** The live settings, read by HUD writers each paint (MenuController keeps it current). */
+let activeA11y: A11ySettings = { ...A11Y_DEFAULTS };
+export function setActiveA11ySettings(next: A11ySettings): void { activeA11y = { ...next }; }
+export function activeA11ySettings(): A11ySettings { return activeA11y; }

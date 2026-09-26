@@ -98,14 +98,10 @@ import { hullPointVelocity, hullRatesOf } from '../../shared/ballistics.js';
 import { sanitizePlayerInput } from '../net/validate.js';
 import { TickProfiler, type TickCost } from './TickProfiler.js';
 import { EatingSystem, EATING, eatRequestFor } from '../systems/EatingSystem.js';
+import { pickCrewColor } from '../../shared/crewPalette.js';
 
-// Weathered banner dyes — team identity without the LED-strip look.
-const TEAM_COLORS = [
-  0xB33A3A, 0x3A6EA8, 0x3F8A5E, 0xC08A3E,
-  0x8E4B8E, 0x3E8E8E, 0xB8A23E, 0xA85A32,
-  0x6A4BA8, 0x5E8E3E, 0xA84B66, 0x7E8E3E,
-  0x4B6AA8, 0xA87878, 0x6E9E9E, 0xB8B87E,
-];
+// Crew dyes live in shared/crewPalette (b3.5d, D33): twelve dyes >= 20 dE2000
+// apart under deut/prot/trit and normal vision, dealt greedily per match.
 
 type ShipSpawn = ReturnType<MapGenerator['generateShipSpawns']>[number];
 
@@ -1256,7 +1252,7 @@ export class Match {
       const memberIds: string[] = [];
       for (let j = 0; j < hands; j++) memberIds.push(uuid());
       const ship = this.mapGen.buildShip(
-        shipId, memberIds[0], spawn, TEAM_COLORS[i % TEAM_COLORS.length],
+        shipId, memberIds[0], spawn, pickCrewColor(ships.map((built) => built.teamColor)),
         { crewId: null, crewIds: memberIds },
       );
       ships.push(ship);
@@ -1647,9 +1643,9 @@ export class Match {
   }
 
   private getNextTeamColor() {
-    const usedColors = new Set(this.state.ships.map((ship) => ship.teamColor));
-    return TEAM_COLORS.find((color) => !usedColors.has(color))
-      ?? TEAM_COLORS[this.state.ships.length % TEAM_COLORS.length];
+    // Greedy (b3.5d): the free dye farthest, for every kind of eye, from the
+    // dyes already afloat. A late join or a rejoin still gets a safe one.
+    return pickCrewColor(this.state.ships.map((ship) => ship.teamColor));
   }
 
   private statsDelta(playerId: string): PlayerMatchDeltas {

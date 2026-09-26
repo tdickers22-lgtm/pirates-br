@@ -4,7 +4,7 @@
  * through a narrow `HudView` handed in by Game; it never touches the scene.
  */
 import { braceCatch, idealBrace } from '../../shared/sailing.js';
-import { breathPlan, hudMessagePlan, hudVisibility, crosshairMode, shipCardNear, floodCard, bilgeGaugeHidden, BILGE_GAUGE_PREF_KEY, TIER_SEVERITY, type HudMessagePlan, type HudPlayerState, type HudElementId } from './hudModel';
+import { breathPlan, hudMessagePlan, hudVisibility, crosshairMode, shipCardNear, floodCard, bilgeGaugeHidden, BILGE_GAUGE_PREF_KEY, TIER_SEVERITY, hudCrewColor, activeA11ySettings, type HudMessagePlan, type HudPlayerState, type HudElementId } from './hudModel';
 import * as THREE from 'three';
 import { BOT_EARLY_PEACE_SECONDS, ECONOMY, FIRST_SAIL_ASSIST, KILL_STREAK_LADDER, PLAYER, RESPAWN_HOLD_MAX_SECONDS, SHIP, STORM_ARC_SECONDS, STORM_PHASES, WEAPONS } from '../../shared/constants/index.js';
 import { WHEEL_SLOTS } from '../../shared/wheel.js';
@@ -2011,7 +2011,8 @@ export class HudController {
     if (sig === this.crewStripSig) return;
     this.crewStripSig = sig;
     host.style.display = 'flex';
-    host.style.setProperty('--crew-color', this.view.getLocalCrewColor());
+    // b3.5d: colour-blind mode repaints the crew colour for the chosen vision type.
+    host.style.setProperty('--crew-color', hudCrewColor(parseInt(this.view.getLocalCrewColor().slice(1), 16), activeA11ySettings().colorVision));
     host.innerHTML = rows.map((r) => {
       const cls = r.station === 'downed' ? 'downed'
         : r.station === 'out' ? 'out'

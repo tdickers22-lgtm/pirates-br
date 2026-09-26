@@ -1,4 +1,5 @@
 import { queueLines } from './queueText.js';
+import { parseA11ySettings, setActiveA11ySettings, HUD_TEXT_SCALE_MIN, HUD_TEXT_SCALE_MAX, type A11ySettings } from '../ui/hudModel.js';
 import { checkName, NAME_MIN } from '../../shared/names.js';
 import type {
   LobbyUpdatePayload, QueueUpdatePayload, PlayerStatsRecord, MatchStartPayload, WelcomePayload,
@@ -591,6 +592,7 @@ export class MenuController {
       this.persistSettings({ muted });
     });
     this.mountAudioMixer();
+    this.mountAccessibilitySettings();
 
 
     // GRAPHICS TIER. The renderer reads this at construction, so a change here
@@ -854,6 +856,77 @@ export class MenuController {
   private readonly mixerSliders = new Map<keyof typeof AUDIO_SLIDER_BUS, { input: HTMLInputElement; val: HTMLElement }>();
   private muteUnfocusedBox: HTMLInputElement | null = null;
   private mixWithOthersBox: HTMLInputElement | null = null;
+
+  /** ACCESSIBILITY rows (b3.5d; crossdevice-15, vm:mechanicshud:5, D33): colour-blind HUD mode,
+   *  reduced flashing, HUD text scale. Stored beside the audio fields in the ONE settings record. */
+  private mountAccessibilitySettings(): void {
+    const anchor = this.settingsMuteCheckbox.closest('.lobby-row')?.parentElement;
+    let current = parseA11ySettings((() => { try { return localStorage.getItem(SETTINGS_KEY); } catch { return null; } })());
+    applyA11ySettings(current);
+    if (!anchor || document.getElementById('settings-color-vision')) return;
+    const save = (patch: Partial<A11ySettings>) => {
+      current = { ...current, ...patch };
+      applyA11ySettings(current);
+      try {
+        let rec: Record<string, unknown> = {};
+        try {
+          const raw = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}') as unknown;
+          if (raw && typeof raw === 'object' && !Array.isArray(raw)) rec = raw as Record<string, unknown>;
+        } catch { /* corrupt record: rewrite it */ }
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...rec, ...current }));
+      } catch { /* private mode */ }
+    };
+    const row = (text: string, title: string, control: HTMLElement) => {
+      const r = document.createElement('div');
+      r.className = 'lobby-row';
+      r.title = title;
+      const label = document.createElement('span');
+      label.className = 'label';
+      label.textContent = text;
+      r.append(label, control);
+      return r;
+    };
+    const vision = document.createElement('select');
+    vision.id = 'settings-color-vision';
+    vision.setAttribute('aria-label', 'Colour-blind mode');
+    for (const [value, text] of [['normal', 'Off'], ['deut', 'Deuteranopia'], ['prot', 'Protanopia'], ['trit', 'Tritanopia']] as const) {
+      const o = document.createElement('option');
+      o.value = value; o.textContent = text;
+      vision.append(o);
+    }
+    vision.value = current.colorVision;
+    vision.addEventListener('change', () => save({ colorVision: vision.value as A11ySettings['colorVision'] }));
+    const flashing = document.createElement('input');
+    flashing.type = 'checkbox';
+    flashing.id = 'settings-reduced-flashing';
+    flashing.style.cssText = 'transform:scale(1.4);margin-left:8px;';
+    flashing.checked = current.reducedFlashing;
+    flashing.addEventListener('change', () => save({ reducedFlashing: flashing.checked }));
+    const scale = document.createElement('input');
+    scale.type = 'range';
+    scale.id = 'settings-hud-text-scale';
+    scale.min = String(Math.round(HUD_TEXT_SCALE_MIN * 100));
+    scale.max = String(Math.round(HUD_TEXT_SCALE_MAX * 100));
+    scale.step = '5';
+    scale.style.flex = '1';
+    scale.setAttribute('aria-label', 'HUD text size');
+    scale.value = String(Math.round(current.hudTextScale * 100));
+    const scaleVal = document.createElement('span');
+    scaleVal.style.cssText = 'font-family:monospace;color:#f4e2b2;min-width:44px;text-align:right;';
+    scaleVal.textContent = `${scale.value}%`;
+    scale.addEventListener('input', () => {
+      scaleVal.textContent = `${scale.value}%`;
+      save({ hudTextScale: Number(scale.value) / 100 });
+    });
+    const scaleWrap = document.createElement('span');
+    scaleWrap.style.cssText = 'display:flex;flex:1;align-items:center;gap:6px;';
+    scaleWrap.append(scale, scaleVal);
+    anchor.append(
+      row('Colour-Blind Mode', 'Recolour crew colours on the HUD for your colour vision. Every crew dye is already chosen to stay distinct for all three types.', vision),
+      row('Reduce Flashing', 'Blinking and pulsing HUD warnings play once instead of looping.', flashing),
+      row('HUD Text Size', 'Scale the in-match HUD.', scaleWrap),
+    );
+  }
 
   private mountAudioMixer(): void {
     const anchor = this.settingsMuteCheckbox.closest('.lobby-row');
@@ -1584,4 +1657,25 @@ export function partyRosterModel(
       + (fits ? `; switch to ${MODES[fits].label}` : '; too many hands for any mode');
   }
   return { rows, groups, refusal };
+}
+
+/** Apply the accessibility settings to the live document (b3.5d). HUD writers read the colour
+ *  mode through activeA11ySettings(); CSS does the rest from one injected sheet. */
+export function applyA11ySettings(a: A11ySettings): void {
+  setActiveA11ySettings(a);
+  if (typeof document === 'undefined') return;
+  const root = document.documentElement;
+  root.dataset.colorVision = a.colorVision;
+  root.classList.toggle('pbr-reduced-flashing', a.reducedFlashing);
+  root.style.setProperty('--hud-text-scale', String(a.hudTextScale));
+  if (!document.getElementById('pbr-a11y-style')) {
+    const style = document.createElement('style');
+    style.id = 'pbr-a11y-style';
+    style.textContent = [
+      '#hud-top-nav, #hud-right-tactical, #hud-center-prompt, #hud-bottom-combat { zoom: var(--hud-text-scale, 1); }',
+      'html.pbr-reduced-flashing #hud *, html.pbr-reduced-flashing #hud *::before, html.pbr-reduced-flashing #hud *::after'
+        + ' { animation-iteration-count: 1 !important; animation-duration: 0.01s !important; }',
+    ].join('\n');
+    document.head.append(style);
+  }
 }
