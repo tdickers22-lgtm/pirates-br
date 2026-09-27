@@ -428,6 +428,20 @@ if (TCL) {
   const css = (await import('node:fs')).readFileSync(new URL('../src/client/styles/touch.css', import.meta.url), 'utf8');
   const lefty = /#touch-controls\.tc-lefty \.tc-satchel[^{]*\.tc-special[^{]*\{[^}]*left:\s*auto;[^}]*right:\s*calc\(var\(--tc-ux\)\s*\+\s*env\(safe-area-inset-left\)\)/.test(css);
   expect('leftHanded: the utility row stays top-left (mirrored right: offset), clear of the minimap', lefty);
+  // b3-device-03: the Crews button is part of the utility row (CSS --tc-ux,
+  // not an inline left), follows the lefty override, and no two row buttons
+  // touch at the phone (56 px) or iPad (60 px) size.
+  const tcSrc = (await import('node:fs')).readFileSync(new URL('../src/client/input/TouchControls.ts', import.meta.url), 'utf8');
+  expect('Crews has no inline left (styled by the utility row CSS)', !/tc-crews[\s\S]{0,400}style\.left\s*=/.test(tcSrc));
+  expect('leftHanded: Crews follows the utility-row override', /#touch-controls\.tc-lefty \.tc-crews[^{]*\{[^}]*left:\s*auto/.test(css) || /\.tc-special,\s*#touch-controls\.tc-lefty \.tc-crews/.test(css));
+  const ipadAt = css.indexOf('@media (min-width: 900px) and (min-height: 700px)');
+  const uxOf = (block, cls) => { const m = block.match(new RegExp(`\\.${cls}\\s*\\{\\s*--tc-ux:\\s*(\\d+)px`)); return m ? Number(m[1]) : null; };
+  const row = ['tc-satchel', 'tc-spyglass', 'tc-keg', 'tc-special', 'tc-crews'];
+  for (const [label, size, block, fallback] of [['phone', 56, css.slice(0, ipadAt), null], ['iPad', 60, css.slice(ipadAt, ipadAt + 1600), css.slice(0, ipadAt)]]) {
+    const xs = row.map((c) => uxOf(block, c) ?? (fallback ? uxOf(fallback, c) : null));
+    const gaps = xs.slice(1).map((x, i) => (x == null || xs[i] == null ? -Infinity : x - xs[i] - size));
+    expect(`${label}: utility row buttons (incl. Crews) keep >= 4 px apart (${xs.join(',')}; gaps ${gaps.join(',')})`, gaps.every((g) => g >= 4));
+  }
 }
 if (WG) {
   // A chart model with MapRenderer's rules: focus = world at the canvas centre,

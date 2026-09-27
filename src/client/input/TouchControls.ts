@@ -353,9 +353,7 @@ export class TouchControls {
     btn.className = 'tc-btn tc-crews';
     btn.dataset.touch = 'scoreboard';
     btn.textContent = 'Crews';
-    btn.style.top = 'calc(12px + env(safe-area-inset-top))';
-    btn.style.left = 'calc(272px + env(safe-area-inset-left))';
-    btn.style.fontSize = '11px';
+    // Position, size and the lefty override come from the utility row in touch.css.
     const ids = new Set<number>();
     const up = (e: PointerEvent) => {
       if (!ids.delete(e.pointerId) || ids.size > 0) return;
