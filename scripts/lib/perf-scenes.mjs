@@ -182,9 +182,18 @@ export const TALLY_DRAW_SOURCES = () => {
       if (n === 'environment') break;
     }
     for (let c = node; c; c = c.parent) {
-      if (c.parent === scene) return c.name || '(scene child)';
+      if (c.parent === scene && c.name) return c.name;
     }
-    return '(unnamed)';
+    // An unnamed scene child used to fold into one '(scene child)' bucket that
+    // held 258-439 draws, the single biggest source at every device view, and
+    // no regression inside it could be bisected. Key it by the nearest name on
+    // the way up, else by what the node is (geometry / material type), so the
+    // report names the module even when its root was never named.
+    for (let c = node; c && c !== scene; c = c.parent) {
+      if (c.name) return `?${c.name.replace(/[-_]?\d+$/, '')}`;
+    }
+    const mat = Array.isArray(node.material) ? node.material[0] : node.material;
+    return `?${node.type}/${node.geometry?.type ?? '-'}/${mat?.name || mat?.type || '-'}`;
   };
 
   const tally = {};

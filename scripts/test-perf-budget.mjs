@@ -392,6 +392,37 @@ async function measureTier(browser, quality, { wantWreck }) {
       }
       if (profile) {
         console.log(`      framebuffer ${fill?.width}x${fill?.height} = ${fill?.mpx?.toFixed(3)} Mpx at ratio ${fill?.ratio?.toFixed(4)}`);
+        // WHICH programs. A count over the cap says Safari will stall on first
+        // play; the name histogram says which material family to merge.
+        const progNames = await page.evaluate(() => {
+          // Keyed by material name, else by the program's shader id (the first
+          // field of three's cache key: 'physical', 'standard', 'sprite', or a
+          // custom shader's source id), so an unnamed family still reads.
+          const out = {};
+          for (const p of window.__piratesBR.renderer.renderer.info.programs ?? []) {
+            const head = String(p.cacheKey ?? '').split(',')[0].slice(0, 24);
+            const k = p.name || `(${head || 'anon'})`;
+            out[k] = (out[k] ?? 0) + 1;
+          }
+          // A named material that owns two programs is a variant split (the same
+          // material on instanced and plain meshes, a two-pass transparent
+          // DoubleSide, a fog/shadow flag). Print which cache-key fields differ.
+          const byName = {};
+          for (const p of window.__piratesBR.renderer.renderer.info.programs ?? []) {
+            if (p.name) (byName[p.name] ??= []).push(String(p.cacheKey ?? '').split(','));
+          }
+          const splits = [];
+          for (const [name, keys] of Object.entries(byName)) {
+            if (keys.length < 2) continue;
+            const [a, b] = keys;
+            const diff = [];
+            for (let i = 0; i < Math.max(a.length, b.length); i++) if (a[i] !== b[i]) diff.push(`#${i}:${a[i]}/${b[i]}`);
+            splits.push(`${name}{${diff.slice(0, 6).join(' ')}}`);
+          }
+          return { hist: Object.entries(out).sort((a, b) => b[1] - a[1]), splits };
+        }).catch(() => ({ hist: [], splits: [] }));
+        if (progNames.hist.length) console.log(`      programs by shader: ${progNames.hist.map(([k, v]) => `${k}=${v}`).join('  ')}`);
+        if (progNames.splits.length) console.log(`      program splits: ${progNames.splits.join('  ')}`);
         expect(
           `[${quality}] ${budget.label} links no more than ${budget.programs} programs`,
           r.programs <= budget.programs,
