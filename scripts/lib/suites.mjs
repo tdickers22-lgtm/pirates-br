@@ -705,6 +705,20 @@ export const LOGIC = [
   //                                 the sync, and on a fake registry: FAIL/VACUOUS/TIMEOUT/MISSING exit 1, a re-run
   //                                 skips the saved PASS, --fresh and a stale PASS re-run (~3 s, no ports)
   plain('test-run-batch-gate.mjs'),
+  // b3 gate slices, registered at the b3 gate (they were written by their slices but never
+  // entered here, so the runner reported them MISSING):
+  //   test-ship-hardware-wired — b3.4: hero hardware GLBs mounted on every class, first-draw allowance
+  //   test-eating              — b3.5a/b3-bugs: bite, cancel on downed/death, heal-over-time, 70 % walk cap
+  //   test-cannon-load         — b3.5b D20 load cycle (empty/loading/loaded, refusals)
+  //   test-cannon-ammo         — b3.5b shot types and stores
+  //   test-music-instruments   — b3.5g sampled shanty instruments, degree -> midi, sample coverage
+  tsx('test-ship-hardware-wired.mjs'),
+  tsx('test-eating.mjs'),
+  tsx('test-cannon-load.mjs'),
+  tsx('test-cannon-ammo.mjs'),
+  tsx('test-music-instruments.mjs'),
+  tsx('test-fp-arms.mjs'), // b3.2h: first-person arms are the pirate's own arms, <= 4k tris, never fill the screen
+  tsx('test-gold-race.mjs'), // b3.5c: D18 gold race line past 50 %, D19 spawn kit (Wrecker's Glass reserve 2)
 ];
 
 /**
@@ -751,6 +765,17 @@ export const SERVER = [
   { ...plain('probes/hold-water-probe.mjs'), timeoutMs: 600_000 },
   { ...plain('probes/founder-probe.mjs'), timeoutMs: 600_000 },
   { ...plain('probes/audio-render-probe.mjs'), timeoutMs: 600_000 },
+  // b3 probes, registered at the b3 gate. Same shape as the b2 probes: each boots its OWN
+  // 3101/8091 stack (or, for webkit-ktx2-probe, routes a fake origin in one headless WebKit)
+  // and one browser, killed in finally, so they run before the runner's browser stack exists.
+  //   char-probe             — b3.2: pirate LOD0 faces/variants, fp_arms present <= 4k tris
+  //   rig-contacts           — b3.3: hands/feet on the wheel, capstan, ladder, cannon contacts
+  //   webkit-ktx2-probe      — b3.1: KTX2 textures decode in WebKit and match the PNG reference
+  //   viewmodel-states-probe — b3.2h: hands inside 45 % of the screen in every viewmodel state
+  { ...plain('probes/char-probe.mjs'), timeoutMs: 900_000 },
+  { ...plain('probes/rig-contacts.mjs'), timeoutMs: 900_000 },
+  { ...plain('probes/webkit-ktx2-probe.mjs'), timeoutMs: 600_000 },
+  { ...plain('probes/viewmodel-states-probe.mjs'), timeoutMs: 900_000 },
 ];
 
 /** Watchdog per tier (ms); an entry's `timeoutMs` overrides it. A suite silent
@@ -886,6 +911,16 @@ export const EXCLUDED = {
     'the post-deploy smoke against a LIVE URL (deploy.yml, the batch gate live block); its offline gate is test-smoke-online (b1.3b)',
   'run-batch-gate.mjs':
     'the cumulative batch-gate RUNNER (b1.3f): runs every suite a batch gate names, resumably, plus the live block; graded by test-run-batch-gate',
+  'build-credits.mjs':
+    'build step (b2/b3 audio + asset credits): regenerates the in-game credits from the LICENSES tables; graded by test-asset-provenance',
+  'pack-models.mjs':
+    'asset build step (b3.1 transport): gltfpack/meshopt + KTX2 packing of public/assets/models; `--check` is graded by test-model-transport',
+  'postbuild-compress.mjs':
+    'build step after `vite build`: writes the br/gz siblings the server sends; graded by test-static-serving',
+  'provenance-scan.mjs':
+    'provenance tooling (D4/D27): scans asset sources for generator output; its gate is test-asset-provenance',
+  'test-match-worker.mjs':
+    'CONDITIONAL gate (b2.0b match worker): runs only if b2.0b ran (MAX_MATCHES < 4 after b1); b2.0b did not run',
   'wait-idle.mjs':
     'deploy.yml step: polls the live /health until no match runs (20 min cap); graded by test-smoke-online section F (b1.3b)',
 };

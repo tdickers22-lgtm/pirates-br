@@ -41,7 +41,7 @@
 //   node scripts/run-all-tests.mjs --only hud,minimap
 //   node scripts/run-all-tests.mjs --list
 import { execSync, spawn } from 'node:child_process';
-import { createWriteStream, mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { createWriteStream, mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync, existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -234,7 +234,9 @@ function audit() {
   const onDisk = readdirSync(path.join(ROOT, 'scripts'))
     .filter((f) => f.endsWith('.mjs') && !f.startsWith('.') && f !== 'run-all-tests.mjs');
   const orphans = onDisk.filter((f) => !known.has(f) && !(f in EXCLUDED));
-  const ghosts = [...known, ...Object.keys(EXCLUDED)].filter((f) => !onDisk.includes(f));
+  // A wired name may live below scripts/ (probes/x.mjs, tools/x.mjs): check the path itself,
+  // not the top-level listing, or every registered probe reads as a ghost.
+  const ghosts = [...known, ...Object.keys(EXCLUDED)].filter((f) => !existsSync(path.join(ROOT, 'scripts', f)));
   console.log(`[audit] ${known.size} suites wired, ${Object.keys(EXCLUDED).length} top-level non-gates declared, ${onDisk.length} top-level .mjs files on disk`);
   for (const [f, why] of Object.entries(EXCLUDED)) console.log(`  – not a gate ${f}: ${why}`);
   let bad = 0;
