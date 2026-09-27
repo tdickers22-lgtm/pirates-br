@@ -53,6 +53,7 @@ type Chains = {
   arm: Record<Side, Chain | null>;
   leg: Record<Side, Chain | null>;
   /** The spine bone the reach lean bends (spine2 / spine_02), and its clip value. */
+  head: THREE.Object3D | null;
   lean: THREE.Bone | null;
   qLean: THREE.Quaternion;
   /** The pelvis the crouch lowers, and its clip position. */
@@ -84,7 +85,7 @@ export function contactChainsOf(root: THREE.Object3D): Chains {
   const leg = (s: Side) => chain(find(root, [`thigh_${s}`]), find(root, [`calf_${s}`, `shin_${s}`]), find(root, [`foot_${s}`]));
   const lean = find(root, ['spine_02', 'spine2', 'spine_01', 'spine1']);
   const hips = find(root, ['pelvis', 'hips']);
-  c = { arm: { l: arm('l'), r: arm('r') }, leg: { l: leg('l'), r: leg('r') }, lean, qLean: lean?.quaternion.clone() ?? new THREE.Quaternion(), hips, pHips: hips?.position.clone() ?? new THREE.Vector3(), stashed: false, w: 0, kind: null };
+  c = { arm: { l: arm('l'), r: arm('r') }, leg: { l: leg('l'), r: leg('r') }, head: root.getObjectByName('head') ?? null, lean, qLean: lean?.quaternion.clone() ?? new THREE.Quaternion(), hips, pHips: hips?.position.clone() ?? new THREE.Vector3(), stashed: false, w: 0, kind: null };
   CHAINS.set(root, c);
   return c;
 }
@@ -308,7 +309,10 @@ export function applyStationContacts(
   if (kind) c.kind = kind;
   c.w = THREE.MathUtils.clamp(c.w + (holder || aimPitch !== null ? 1 : -1) * dt * 7, 0, 1);
   stash(c);
-  body.updateWorldMatrix(true, true);
+  // b3-device-04: ancestors + the body only. Every read below goes through
+  // getWorldPosition / updateMatrixWorld on the bone it needs, so refreshing
+  // the whole subtree (55 bones, skins, hat, weapon) each frame bought nothing.
+  body.updateWorldMatrix(true, false);
   const res: ContactResult = { l: NaN, r: NaN, targetL: null, targetR: null };
   if (c.w > 0 && holder) {
     const grips = pickGrips(holder, body, c.arm);
@@ -328,7 +332,7 @@ export function applyStationContacts(
   } else if (c.w > 0 && aimPitch !== null && c.arm.r) {
     // Pistol out on the eye line: 0.42 m from the eye along the look, a hand's
     // width right of centre (her right is -X), elbow down and out.
-    const head = rigRoot.getObjectByName('head');
+    const head = c.head; // cached: no tree walk per frame (b3-device-04)
     if (head) {
       head.getWorldPosition(A);
       const eye = body.worldToLocal(A.clone()); eye.y += 0.08;

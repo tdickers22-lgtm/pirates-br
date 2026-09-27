@@ -13,6 +13,7 @@
  * The fallback is still graded end to end there (vm:animations:1): head
  * pitch, forward station reach, aim lift and a contralateral gait.
  */
+import { mixerIntervalFor } from './factories/characterVariants.js';
 import { applyLookSplit, applyStationContacts, nearestGripHolder } from './character/ikSolvers.js';
 import * as THREE from 'three';
 import { PLAYER, WEAPONS } from '../../shared/constants/index.js';
@@ -362,7 +363,10 @@ export class PlayerAnimator {
       // Station contacts (b3.3c): hands onto the live wheel pegs / capstan bars /
       // breech handles / rungs, the aimed pistol out on the eye line, boots out of the deck.
       const rig = playerRigOf(mesh);
-      if (rig) {
+      // b3-device-04: the post-solvers follow the MIXER LOD. Beyond 40 m the
+      // clip itself steps at 5 Hz, so per-frame IK there is bone work nobody
+      // can see; the factory's restore is a no-op once nothing is stashed.
+      if (rig && mixerIntervalFor(distSq) < 1 / 5) {
         const kind = player.mastClimb !== null ? 'ladder' : player.atHelm ? 'helm' : player.atCannon ? 'cannon'
           : (player as { atCapstan?: boolean }).atCapstan ? 'capstan' : null;
         const shipRoot = kind && ship ? this.view.shipRoot?.(ship.id) ?? null : null;
