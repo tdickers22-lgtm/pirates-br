@@ -4703,8 +4703,10 @@ export class Match {
         return;
       }
       if (inHold) { walkTo(stair.cx, stair.stairBackZ - 0.9); return; }
-      const linedUp = Math.abs(local.x - stair.cx) < stair.stairHalfWidth && local.z < stair.stairFrontZ + 1.4;
-      walkTo(stair.cx, linedUp ? stair.stairBackZ - 0.9 : stair.stairFrontZ + 1.0);
+      // Same approach as a repair trip: round the coamings, in at the mouth.
+      const wp = this.companionwayApproachLocal(local, stair);
+      const inWell = wp.x === stair.cx && wp.z === stair.stairBackZ + 0.25;
+      walkTo(wp.x, inWell ? stair.stairBackZ - 0.9 : wp.z);
       return;
     }
     // Carrying a bucketful: up the ladder, then the nearest rail.
@@ -4816,15 +4818,44 @@ export class Match {
         ? { x: laneX, z: below.z }
         : { x: laneX, z: work.z };
     }
-    // Still topside: the stairwell is the only way below, and it is open at the
-    // FORWARD end only (coamings on the other three sides), so line up on the
-    // mouth first and walk aft down the steps.
-    const local = this.toShipLocal(player.position, ship);
-    const linedUp = Math.abs(local.x - stair.cx) < stair.stairHalfWidth
+    // Still topside: the stairwell is the only way below.
+    return this.companionwayApproachLocal(this.toShipLocal(player.position, ship), stair);
+  }
+
+  /**
+   * Next topside waypoint for a bot heading below (ship-local x/z).
+   *
+   * The stairwell is open at the FORWARD end only; coamings wall it on port,
+   * starboard and AFT (PhysicsSystem pushAABB). "Lined up" used to be any
+   * point on the centreline short of the mouth, which includes every point
+   * AFT of the well, and the helm is aft on the centreline. So a lone hand who
+   * let go of the wheel to plank a keel breach walked straight into the aft
+   * coaming and stood there, pinned, while she filled (b3-ask-05: 11 of 38
+   * founders in 150-300 s across the pacing seeds were one size-1 keel breach
+   * with the hand alive on deck). That is part of what the 520 s bot grounding
+   * forgiveness was papering over. A hand beside or behind the well now steps
+   * out into the side lane, walks forward along it past the mouth, and only
+   * then turns in and goes down, the way a human walks round a hatch.
+   */
+  private companionwayApproachLocal(local: { x: number; z: number }, stair: ReturnType<typeof getShipCompanionwayConfig>): { x: number; z: number } {
+    const dx = local.x - stair.cx;
+    const inWell = Math.abs(dx) < stair.stairHalfWidth
+      && local.z > stair.stairBackZ - 0.05
       && local.z < stair.stairFrontZ + 1.4;
-    return linedUp
-      ? { x: stair.cx, z: stair.stairBackZ + 0.25 }
-      : { x: stair.cx, z: stair.stairFrontZ + 1.0 };
+    if (inWell) {
+      // Square up on the centreline BEFORE stepping in, or the diagonal clips
+      // the forward tip of a side coaming.
+      if (local.z > stair.stairFrontZ && Math.abs(dx) > 0.2) return { x: stair.cx, z: local.z };
+      return { x: stair.cx, z: stair.stairBackZ + 0.25 };
+    }
+    // Well forward of the mouth: nothing between him and it.
+    if (local.z > stair.stairFrontZ + 0.6) return { x: stair.cx, z: stair.stairFrontZ + 1.0 };
+    const lane = stair.halfX + PLAYER.RADIUS + 0.3;
+    const laneX = stair.cx + (dx >= 0 ? lane : -lane);
+    // Beside or behind the well: out into the side lane first...
+    if (Math.abs(dx) < lane - 0.15) return { x: laneX, z: local.z };
+    // ...then forward along it to abreast of the mouth.
+    return { x: laneX, z: stair.stairFrontZ + 1.0 };
   }
 
   private getHoleRailLocal(ship: Ship, hole: ShipHole): { x: number; z: number } {

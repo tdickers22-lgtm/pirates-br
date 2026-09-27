@@ -18,7 +18,7 @@ import { WeaponSystem } from '../src/server/systems/WeaponSystem.ts';
 import { Match } from '../src/server/core/Match.ts';
 import { TRUCE_SECONDS } from '../src/shared/truce.ts';
 import { SHIP, SHIP_STATS, FLOODING, PLAYER } from '../src/shared/constants/index.ts';
-import { gerstnerHeight, WAVE_PARAMS } from '../src/shared/utils/index.ts';
+import { gerstnerHeight, WAVE_PARAMS, getShipCompanionwayConfig } from '../src/shared/utils/index.ts';
 import { countOpenHoles, getShipFloorYAt, isStandingInShipHold, toShipLocalPoint } from '../src/shared/interactions.ts';
 import { buildHotSnapshot, buildWireSnapshot } from '../src/server/core/snapshot.ts';
 
@@ -665,6 +665,54 @@ console.log('\n6. Bots bail under player-like constraints');
   expect('planking it consumed a plank',
     (ship.inventory.find((e) => e.item === 'wood_plank')?.qty ?? 0) < 6);
   expect('the patched breach stops leaking', evaluateHoleFlood(ship, 0).length === 0);
+
+  // b3-ask-05: THE HAND WHO LEFT THE WHEEL. The helm is aft on the centreline,
+  // and the stairwell is walled on port, starboard and AFT (PhysicsSystem's
+  // coaming AABBs; only the forward lip is open). "Lined up" used to mean any
+  // centreline point short of the mouth, so a lone bot starting aft walked
+  // straight into the aft coaming and stood pinned there while a keel breach
+  // filled her (the founders that made b3.5c stretch bot grounding forgiveness
+  // to 520 s). This harness has no collider, so it grades the PATH: no topside
+  // step may land inside a coaming wall, and he still has to plank the breach.
+  {
+    const cw = getShipCompanionwayConfig(stats6);
+    ship.holes = [];
+    ship.nextHoleId = 1;
+    ship.waterLevel = 0.3;
+    ship.inventory = [...ship.inventory.filter((e) => e.item !== 'wood_plank'), { item: 'wood_plank', qty: 6 }];
+    match.physics.openHoleAt(ship, { x: 0, y: 0.1, z: stats6.length * 0.3 }, 1, 'ground');
+    const keel = ship.holes[0];
+    for (const b of [b1, b2]) { b.onShipId = null; b.shipId = null; b.bailing = false; }
+    b0.bailing = false; b0.bucketFilled = false;
+    match.botRepairCooldownAt.delete(b0.id);
+    match.botRepairHeld.delete(b0.id);
+    const helm = match.toShipWorld(cw.cx, cw.stairBackZ - 1.6, ship);
+    b0.position = { x: helm.x, y: ship.position.y + stats6.height + 0.3, z: helm.z };
+    const R = PLAYER.RADIUS - 0.02;
+    const hx0 = cw.cx - cw.stairHalfWidth, hx1 = cw.cx + cw.stairHalfWidth, coamT = 0.05;
+    const walls = [
+      [hx0 - coamT, hx0 + coamT, cw.stairBackZ, cw.stairFrontZ],
+      [hx1 - coamT, hx1 + coamT, cw.stairBackZ, cw.stairFrontZ],
+      [hx0, hx1, cw.stairBackZ - coamT, cw.stairBackZ + coamT],
+    ];
+    const deckY = stats6.height + SHIP.DECK_STAND_OFFSET;
+    let inWall = null;
+    let planked = false;
+    for (let i = 0; i < 1500 && !planked; i++) {
+      match.updateBotFlooding(DT);
+      b0.position.y = getShipFloorYAt(b0.position, ship);
+      const l = toShipLocalPoint(b0.position, ship);
+      // The same gate PhysicsSystem uses to apply the deck obstacle colliders.
+      const topside = b0.position.y - ship.position.y >= deckY - 0.25;
+      if (!inWall && topside && walls.some(([x0, x1, z0, z1]) => l.x > x0 - R && l.x < x1 + R && l.z > z0 - R && l.z < z1 + R)) {
+        inWall = `tick ${i} local=(${l.x.toFixed(2)},${l.z.toFixed(2)})`;
+      }
+      planked = keel.patched === true;
+    }
+    expect('a lone hand leaving the helm (aft of the stairwell) never walks into a coaming', inWall === null, inWall ?? '');
+    expect('...and still gets below and planks the keel breach', planked,
+      JSON.stringify(toShipLocalPoint(b0.position, ship)));
+  }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
