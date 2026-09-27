@@ -312,6 +312,10 @@ try {
       const m = await run(page, mode, id);
       report.stations[kind] = { mode, id, ...m };
       if (m?.noWheel) { console.log(`  ${kind} [LIVE bot at the wheel of a ${m.ship}]: skipped, the hull is not drawn at full detail (no tagged wheel)`); continue; }
+      // A live bot may leave the wheel during the settle (b3 gate: one stepped off to aim a pistol,
+      // atHelm false, clip aim_pistol, and was graded against the wheel). Off the helm his hands
+      // SHOULD be off it; the non-vacuous row below still needs >= 1 helmsman graded at the wheel.
+      if (mode === 'live-helm' && m && m.atHelm === false) { console.log(`  ${kind} [LIVE bot, left the helm during the settle, clip ${m.clip}]: not graded`); continue; }
       if (mode === 'live-helm' && m && !m.noHolder && !m.noBody && !m.error) liveHelmGraded += 1;
       if (!m || m.noHolder || m.noBody || m.error) { expect(`${kind}: holder found`, false, JSON.stringify(m)); continue; }
       if (m.ship) report.stations[kind].shipType = m.ship;
