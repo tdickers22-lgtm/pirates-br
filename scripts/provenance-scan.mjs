@@ -168,6 +168,13 @@ export function scanProvenance({
       via = 'far-lod';
       hits = writers.map((s) => ({ s, hit: farHit(s.text, name.slice(0, -4)) })).filter((h) => h.hit);
     }
+    if (!hits.length && name.endsWith('_lods') && glbs.includes(`${name.slice(0, -5)}.glb`)) {
+      // b3.4d/f: a <key>_lods.glb is the LOD1/LOD2/far chain build_lods.py derives from <key>.glb
+      // (written as f'{name}_lods.glb' through _detail.py, so no literal carries the key).
+      via = 'lod-chain';
+      hits = writers.filter((s) => s.file === 'build_lods.py' && /_lods\.glb/.test(s.text))
+        .map((s) => ({ s, hit: { line: lineOf(s.text, s.text.indexOf('_lods.glb')), match: '<key>_lods.glb' } }));
+    }
     const lic = licenses.find((r) => new RegExp(`(?:^|[\\s,/\`])${esc(glb)}(?:$|[\\s,\`])`).test(r.files));
     const ov = overrides[glb];
     let pick = null;
@@ -270,7 +277,7 @@ export function auditProvenance({
       if (basename(abs).startsWith('_')) fail(`dangling script: ${g} -> ${r.script} is a helper module, not a build script`);
       if (!exportsGlb(text, helpers)) fail(`dangling script: ${g} -> ${r.script} never exports a GLB`);
       const name = g.slice(0, -4);
-      const ok = r.via === 'far-lod' ? farHit(text, name.slice(0, -4)) : writerHit(text, name);
+      const ok = r.via === 'far-lod' ? farHit(text, name.slice(0, -4)) : r.via === 'lod-chain' ? /_lods\.glb/.test(text) : writerHit(text, name);
       if (!ok) fail(`dangling script: ${g} -> ${r.script} no longer carries the literal output name`);
     } else if (r.kind === 'license') {
       licenseRows++;

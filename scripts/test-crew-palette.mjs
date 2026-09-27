@@ -119,5 +119,5 @@ ok(/applyA11ySettings\(/.test(menu), 'MenuController applies the settings to the
 const hudCtl = fs.readFileSync(new URL('../src/client/ui/HudController.ts', import.meta.url), 'utf8');
 ok(/hudCrewColor\(/.test(hudCtl), 'HudController paints the crew strip through hudCrewColor');
 
-console.log(`test-crew-palette: ${pass} passed, ${fail} failed`);
+console.log(`${fail || !pass ? "FAIL" : "PASS"} test-crew-palette: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -169,5 +169,5 @@ ok(/settings-captions/.test(menu) && /save\(\{ captions:/.test(menu), 'Settings 
 const hudSrc = fs.readFileSync(new URL('../src/client/ui/HudController.ts', import.meta.url), 'utf8');
 ok(/mountCueCaptions\(\)/.test(hudSrc), 'HudController mounts the caption strip');
 
-console.log(`test-captions: ${pass} passed, ${fail} failed`);
+console.log(`${fail || !pass ? "FAIL" : "PASS"} test-captions: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

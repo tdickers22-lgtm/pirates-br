@@ -882,9 +882,16 @@ if (!argv.includes('--glb')) {
 if (!argv.includes('--glb')) {
   const CLIPS = argv.includes('--clips') ? argv[argv.indexOf('--clips') + 1] : `${ROOT}public/assets/models/pirate_clips.glb`;
   console.log(`\nclips (${CLIPS.replace(ROOT, '')})`);
+  // b3.3b (97760d43) moved the clip state machine into character/locomotion.ts
+  // (its LOOPING / ONE_SHOT sets and the pick functions); PlayerRigFactory keeps
+  // the rest. Read both, or the list shrinks to the four ids left behind.
   const src = readFileSync(`${ROOT}src/client/rendering/factories/PlayerRigFactory.ts`, 'utf8');
+  const loco = readFileSync(`${ROOT}src/client/rendering/character/locomotion.ts`, 'utf8');
   const wanted = new Set();
-  for (const line of src.split('\n')) {
+  for (const set of loco.matchAll(/export const [A-Z_]+ = new Set\(\[([\s\S]*?)\]\)/g)) {
+    for (const m of set[1].matchAll(/'([a-z][a-z0-9_]*)'/g)) wanted.add(m[1]);
+  }
+  for (const line of `${src}\n${loco}`.split('\n')) {
     if (/\breturn\b|const clip = /.test(line)) for (const m of line.matchAll(/(?:return|\?|:)\s*'([a-z][a-z0-9_]*)'/g)) wanted.add(m[1]);
     for (const m of line.matchAll(/setLayer\(rig, '(?:lower|upper)', '([a-z][a-z0-9_]*)'\)/g)) wanted.add(m[1]);
   }

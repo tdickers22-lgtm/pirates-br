@@ -169,5 +169,5 @@ ok(/getElementById\('hud-top-right'\)/.test(sbSrc) && /#hud-top-right>#net-pill\
 const hud = read('src/client/ui/HudController.ts');
 ok(/updateHud\(\) \{\s*this\.updateScoreboard\(\);/.test(hud), 'HudController paints the board every HUD repaint');
 
-console.log(`\ntest-scoreboard: ${pass} passed, ${fail} failed`);
+console.log(`\n${fail || !pass ? "FAIL" : "PASS"} test-scoreboard: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

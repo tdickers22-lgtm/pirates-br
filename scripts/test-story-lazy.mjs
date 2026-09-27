@@ -30,6 +30,10 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import * as THREE from 'three';
+// A model URL back to its asset key. Since b3.1b a packed model is served as
+// /assets/models/packed/<key>.<hash8>.glb (content-hashed), the raw one as
+// /assets/models/<key>.glb; the queue under test is keyed by name either way.
+const modelKey = (url) => String(url).replace(/^.*\/assets\/models\/(?:packed\/)?/, '').replace(/(?:\.[0-9a-f]{8})?\.glb$/, '');
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (rel) => readFileSync(resolve(root, rel), 'utf8');
@@ -68,7 +72,7 @@ const started = [];
 const gates = new Map();
 lib.loader = {
   loadAsync(url) {
-    started.push(url.replace('/assets/models/', '').replace('.glb', ''));
+    started.push(modelKey(url));
     return new Promise((res) => gates.set(started[started.length - 1], () => res({ scene: new THREE.Group(), animations: [] })));
   },
 };
@@ -221,7 +225,7 @@ expect('fetch lines: 600 m desktop, 400 m phone, evict beyond 1500 m (phone)',
   // AssetLibrary: proxies ride the world set, LOD0 does not; evict releases.
   const lib2 = new Lib.AssetLibrary();
   const urls = [];
-  lib2.loader = { loadAsync(url) { urls.push(url.replace('/assets/models/', '').replace('.glb', '')); return Promise.resolve({ scene: new THREE.Group(), animations: [] }); } };
+  lib2.loader = { loadAsync(url) { urls.push(modelKey(url)); return Promise.resolve({ scene: new THREE.Group(), animations: [] }); } };
   await lib2.preloadWorld();
   const proxies = Lib.STORY_PROXY_NAMES;
   expect(`preloadWorld fetches every shipped story proxy (${proxies.length}/15) and no story LOD0`,
