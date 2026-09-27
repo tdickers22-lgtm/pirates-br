@@ -363,22 +363,26 @@ export class PlayerAnimator {
       // Station contacts (b3.3c): hands onto the live wheel pegs / capstan bars /
       // breech handles / rungs, the aimed pistol out on the eye line, boots out of the deck.
       const rig = playerRigOf(mesh);
-      // b3-device-04: the post-solvers follow the MIXER LOD. Beyond 40 m the
-      // clip itself steps at 5 Hz, so per-frame IK there is bone work nobody
-      // can see; the factory's restore is a no-op once nothing is stashed.
-      if (rig && mixerIntervalFor(distSq) < 1 / 5) {
+      // b3-device-04: the look split and the pistol aim follow the MIXER LOD
+      // (beyond 40 m the clip itself steps at 5 Hz, so that bone work is not
+      // seen). Station contacts do NOT: a helmsman on a hull still drawn at full
+      // detail 60 m off shows hands a metre off the wheel (probes/rig-contacts,
+      // b3 gate). Their cost is bounded by the hull LOD, since nearestGripHolder
+      // finds no tagged grips on a far hull.
+      const near = mixerIntervalFor(distSq) < 1 / 5;
+      if (rig) {
         const kind = player.mastClimb !== null ? 'ladder' : player.atHelm ? 'helm' : player.atCannon ? 'cannon'
           : (player as { atCapstan?: boolean }).atCapstan ? 'capstan' : null;
         const shipRoot = kind && ship ? this.view.shipRoot?.(ship.id) ?? null : null;
         const holder = shipRoot && kind ? nearestGripHolder(shipRoot, kind, mesh.position) : null;
-        const aiming = !holder && (rig.upper.name === 'aim_pistol' || rig.upper.name === 'fire_pistol');
+        const aiming = near && !holder && (rig.upper.name === 'aim_pistol' || rig.upper.name === 'fire_pistol');
         const pitch = remote ? remote.pitch : player.rotation.y;
         // Look split (b3.3d, animations-08): off a station, on her feet, a big
         // look pitch bends the chest 40% and the neck 60%, so the arms follow it.
-        if (!kind && (player.state === 'alive' || player.state === 'boarding')) {
+        if (near && !kind && (player.state === 'alive' || player.state === 'boarding')) {
           applyLookSplit(rig.root, mesh, rig.bones.head, rig.headClipX, pitch);
         }
-        applyStationContacts(rig.root, mesh, holder, dt, aiming ? pitch : null);
+        if (near || kind) applyStationContacts(rig.root, mesh, holder, dt, aiming ? pitch : null);
       }
       applyRigFlinch(mesh, flinchYaw(mesh), flinchEnvelope(mesh, dt));
       return;
