@@ -159,9 +159,11 @@ export const LOGIC = [
   // b3.2a: the CC0 character base (assets-src/quaternius/out/pirate_base_{male,female,stout}.glb): the
   // 55-bone NAMED set, drawn head centre at PLAYER.HEAD_Y, crown <= HEIGHT + 3 cm, eye meshes on eye_l/r,
   // UV0 everywhere, head:height 1:6.5-7, hands 1.1-1.2x, LICENSES.md rows + CC0 licence texts. Rest-pose
-  // skinned vertices, pure GLB parse, ~0.3 s. Red: --glb public/assets/models/pirate_base.glb (23 bones,
+  // skinned vertices, pure GLB parse. Red: --glb public/assets/models/pirate_base.glb (23 bones,
   // 0 UVs, no eyes) and --glb on a build_pirates.py --raw export (head 1:7.79, centre 1.69).
-  quick(tsx('test-character-asset.mjs')),
+  // NOT quick: the wardrobe II / R2 rows (ray clearance, rim spikes, eyelid covers on three bodies) grew
+  // it from ~0.3 s to 58-77 s, alone past the quick tier's 60 s ceiling. Logic tier + every batch gate.
+  tsx('test-character-asset.mjs'),
   // test-anim-rig-anatomy (b3.2b): every pirate_clips.glb clip at 21 phases, FK on the GLB nodes: knees
   // about the thigh hinge, elbows about the shoulder-frame clinical hinge (humeral rotation ext <= 145,
   // int <= 90, bend <= 150 deg; negative controls prove a backward fold fails), head pitch raises the gaze,
