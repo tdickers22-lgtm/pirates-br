@@ -13,7 +13,7 @@
 // The four rules are pure functions on Game's module surface: no DOM, no stack.
 import {
   isOwnCrewActorIn, parleyConcernsMe, isDuplicateSinkLine, pointerLockHintFor,
-  shipSunkLine, crewEliminatedLine, carpenterPatchLine,
+  shipSunkLine, crewEliminatedLine, carpenterPatchLine, interactRefusalLine,
 } from '../src/client/core/Game.ts';
 
 let failures = 0;
@@ -91,6 +91,15 @@ expect('at the wheel it says steer, not WASD',
 expect('at a gun it says aim, not move',
   pointerLockHintFor('cannon').includes('aim') && !pointerLockHintFor('cannon').includes('WASD'));
 expect('on foot it still says WASD', pointerLockHintFor('foot').includes('WASD'));
+
+console.log('\nA refused eat says why the food was kept (b3-bugs-05, D21)');
+{
+  const line = interactRefusalLine('eat', 'health_full');
+  expect('eat at full health names the reason', /full health/i.test(line), line);
+  expect('eat at full health is not the generic fallback', !line.startsWith("Can't do that"), line);
+  const busy = interactRefusalLine('eat', 'nothing_there');
+  expect('an eat refusal names the food, not "that"', busy.includes('food'), busy);
+}
 
 console.log(failures === 0 ? '\nPASS feed scope + hint' : `\nFAIL feed scope + hint (${failures})`);
 process.exit(failures === 0 ? 0 : 1);

@@ -161,7 +161,7 @@ const INTERACT_INTENT_NOUN: Record<string, string> = {
   gold_hoarder: `the ${BROKER_NAME}`, stow_chest: 'the hold', helm: 'the wheel',
   sails: 'the halyard', brace: 'the brace', crow: 'the mast ladder', anchor: 'the capstan',
   repair: 'that breach', bail: 'the bilge', revive: 'your crewmate', cannon: 'that cannon',
-  ammo: 'the ammo chest', reload: 'that reload', fire: 'that shot',
+  ammo: 'the ammo chest', reload: 'that reload', fire: 'that shot', eat: 'that food',
 };
 
 /** 'the Black Fin' read attributively — "a Black Fin pennant". Derived, never
@@ -432,7 +432,7 @@ function cannonLoadedLine(payload: unknown): string | null {
   return `No ${sel}: loaded ${shot}.`;
 }
 
-function interactRefusalLine(intent?: string, reason?: string, atCannon = false): string {
+export function interactRefusalLine(intent?: string, reason?: string, atCannon = false): string {
   const noun = INTERACT_INTENT_NOUN[intent ?? ''] ?? 'that';
   // D20: at a gun the trigger on an empty bore names the load key, and "no
   // ammo" is the ship's shot stores (the crate refills firearms, not cannons).
@@ -449,6 +449,8 @@ function interactRefusalLine(intent?: string, reason?: string, atCannon = false)
     case 'sinking': return "She's going down — that station is closed.";
     case 'no_ammo': return 'Out of shot. An ammo crate refills.';
     case 'truce': return 'Truce: no crew may fire until 2:30.';
+    // D21: the eat was refused and the food stays in the pocket; say why.
+    case 'health_full': return 'Already at full health. The food keeps.';
     default: return `Can't do that with ${noun} right now.`;
   }
 }
