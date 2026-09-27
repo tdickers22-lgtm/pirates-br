@@ -162,6 +162,10 @@ export const ALL = ${JSON.stringify([
   ok(!('cond-x' in e) && /SKIPPED .*cond-x/.test(r.out), 'an unregistered conditional suite is reported as not triggered, not run');
   ok(res('f2').summary?.bad?.length === 5, `summary.bad names the 5 non-green entries (${res('f2').summary?.bad?.join(', ')})`);
 
+  const f4 = tmp('fake-fixture-f4.json', { aliases: {}, retired: {}, batches: [b('f4', ['pass-a', 'fail-b'], { deploy: true, liveSteps: ['deploy-config'] })] });
+  r = g('--fixture', f4, '--batch', 'f4', '--deploy');
+  ok(r.code === 1 && /live block NOT run/.test(r.out) && !('live:deploy-config' in res('f4').entries), `--deploy over a red suite skips the live block (exit ${r.code}, want 1, no live:* entry)`, r.out.slice(-300));
+
   r = g('--fixture', f3, '--batch', 'f3');
   ok(r.code === 4 && /INCOMPLETE/.test(r.out), `a green deploy gate without --deploy exits ${r.code} (want 4, INCOMPLETE)`, r.out.slice(-200));
   r = g('--fixture', f3, '--batch', 'f3', '--suites-only');

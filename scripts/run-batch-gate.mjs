@@ -388,7 +388,17 @@ try {
   }
   teardown();
 
-  if (gate.deploy && has('deploy')) {
+  // PLAN rule 11: the live block (it deploys) runs only over a green suite set.
+  // A red suite, review or conditional means the build is not shippable, so the
+  // live block is skipped and the gate stays red on the suites themselves.
+  const suiteBad = [
+    ...(gate.quickTier ? ['pre:typecheck', 'pre:quick'] : []),
+    ...plan.map((p) => p.name), ...gate.reviews.map((r) => `review:${r.id}`),
+    ...gate.conditional.filter((c) => state.entries[c.name]).map((c) => c.name),
+  ].filter((k) => BAD.has(state.entries[k]?.verdict) || !state.entries[k]);
+  if (gate.deploy && has('deploy') && suiteBad.length) {
+    console.log(`  ✗ live block NOT run (no deploy over red suites): ${suiteBad.length} not green: ${suiteBad.slice(0, 10).join(', ')}${suiteBad.length > 10 ? ' ...' : ''}`);
+  } else if (gate.deploy && has('deploy')) {
     liveRan = true;
     console.log(`[gate] ── live block: ${gate.liveSteps.join(' -> ')} ──`);
     let authed = null;
