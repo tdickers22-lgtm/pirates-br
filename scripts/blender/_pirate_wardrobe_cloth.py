@@ -790,7 +790,7 @@ def hold_out_radial(o, B, bones=("spine_02", "spine_03"), outer=0.004, lining=0.
     return moved
 
 
-def bridge_folds(o, B, bones, passes=8, r=0.03, margin=0.0035):
+def bridge_folds(o, B, bones, passes=8, r=0.03, margin=0.0035, min_w=0.3):
     """the garment must enclose every skin vertex it wraps as seen from the bone (the test-character-asset probe:
     rays from 8 bins along each covered bone to the skin vertices that bone dominates). Where the body folds on
     itself (a stout's back-armpit crease under the arm, the belly underside over the thigh) the shell tucked into the
@@ -814,7 +814,7 @@ def bridge_folds(o, B, bones, passes=8, r=0.03, margin=0.0035):
             continue
         # every covered bone carrying >= 30% of the vertex (the gate takes the dominant joint AFTER the 4-limit and
         # renormalise of the export, which can differ from Blender's where two bones share a vertex)
-        js = [j for j, wt in B.Wt[i].items() if j in axes and wt >= 0.3] or \
+        js = [j for j, wt in B.Wt[i].items() if j in axes and wt >= min_w] or \
             [j for j in (max(B.Wt[i].items(), key=lambda kv: kv[1])[0],) if j in axes]
         for j, (h, t) in ((j, a) for j in js for a in axes[j]):
             if j.startswith("thigh_") and abs(p.x) < 0.03:
@@ -1309,6 +1309,11 @@ def shirt_linen(B, out_dir):
     # the stout's shoulder fold: one decimated face chord under the skin seen from the bone (gate 1/1115 probes)
     o["heldOut"] = hold_out_radial(o, B, bones=("spine_02", "spine_03", "upperarm_l", "upperarm_r", "lowerarm_l",
                                                 "lowerarm_r"), outer=0.003, lining=0.0015)
+    # last word on clearance (b3.gate): nothing re-fairs after this. The stout's back-armpit probe at
+    # (0.206, 1.312, -0.086) is dominated by upperarm_r only after the export's 4-limit renormalise, so the
+    # pass grades every covered bone carrying >= 10% of a vertex, with a wider falloff so the chord moves as cloth
+    bridge_folds(o, B, ["spine_02", "spine_03", "upperarm_l", "upperarm_r", "lowerarm_l", "lowerarm_r"],
+                 passes=8, r=0.04, margin=0.005, min_w=0.1)
     transfer_weights(o, B)
     return finish(o, B, "shirt")
 
