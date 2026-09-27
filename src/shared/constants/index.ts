@@ -1139,6 +1139,9 @@ export const POCKET = {
   DIG_RATE: 0.42,
   /** Seconds between pocket-wheel uses (eat one fruit at a time) */
   USE_COOLDOWN: 0.85,
+  /** D21: ground-speed scale while a bite is in progress. Shared so the
+   *  server cap (EatingSystem) and the client's input lead use one number. */
+  EAT_MOVE_SCALE: 0.7,
 } as const;
 
 // ── Tick rate ────────────────────────────────────────────────

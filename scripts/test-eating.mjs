@@ -13,7 +13,7 @@
 import { Match } from '../src/server/core/Match.ts';
 import { readFileSync } from 'node:fs';
 import { SERVER_TICK_MS, PLAYER, WILDLIFE, DBNO } from '../src/shared/constants/index.ts';
-import { EatingSystem, eatRequestFor } from '../src/server/systems/EatingSystem.ts';
+import { EatingSystem, eatRequestFor, EATING } from '../src/server/systems/EatingSystem.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -235,6 +235,20 @@ console.log('Going down ends the bite and the heal (b3-bugs-02)');
   e.player.health = DBNO.DOWNED_HEALTH;
   const ok = e.match.eating.begin(e.player, { item: 'banana', heal: 10, over: 1, consume: () => true });
   expect("downed: EatingSystem.begin refuses with 'dead'", !ok && e.match.eating.lastRefusal === 'dead', `ok=${ok} refusal=${e.match.eating.lastRefusal}`);
+}
+
+// b3-bugs-04: the local pirate's input lead walks at the same 70 % cap the
+// server applies mid-bite, or the drawn body leads the server's by
+// (1 - 0.7) * MOVE_SPEED * lead and eases back when the bite ends.
+{
+  const { predictedWalkSpeed } = await import('../src/client/core/Game.ts');
+  for (const crouching of [false, true]) {
+    const server = PLAYER.MOVE_SPEED * (crouching ? 0.55 : 1) * EATING.MOVE_SCALE;
+    const client = predictedWalkSpeed(PLAYER.MOVE_SPEED, crouching, true);
+    expect(`client lead cap mid-bite matches the server (crouching=${crouching})`, Math.abs(client - server) < 1e-9, `client=${client} server=${server}`);
+  }
+  expect('no bite: the client lead is uncapped', predictedWalkSpeed(PLAYER.MOVE_SPEED, false, false) === PLAYER.MOVE_SPEED);
+  expect('a slower hold cap still wins mid-bite', predictedWalkSpeed(1.2, false, true) === 1.2);
 }
 
 if (failures > 0) { console.error(`\ntest-eating: ${failures} FAILED`); process.exit(1); }

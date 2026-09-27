@@ -21,14 +21,14 @@
  * here is a pure function of the ticks it is fed, so a replay is identical.
  * Bots and humans reach it through the same `begin` call.
  */
-import { PLAYER } from '../../shared/constants/index.js';
+import { PLAYER, POCKET } from '../../shared/constants/index.js';
 import type { Player } from '../../shared/types/index.js';
 
 export const EATING = {
   /** Seconds the bite takes before the food is consumed and the heal starts. */
   ACTION_TIME: 0.9,
   /** Ground speed while the bite is in progress. */
-  MOVE_SCALE: 0.7,
+  MOVE_SCALE: POCKET.EAT_MOVE_SCALE,
   BANANA_HEAL: 20,
   BANANA_OVER: 1.2,
   /** Coconut and mango. */

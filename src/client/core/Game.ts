@@ -3,7 +3,7 @@ import { locomotionFacing, queueStagger, setHoldImmersion } from '../rendering/c
 import { holdSpeedCap, sampleHoldWater } from '../../shared/flooding/hullVolume.js';
 import { ballisticPositionAt, projectileGravity } from '../../shared/ballistics.js';
 import * as THREE from 'three';
-import { ECONOMY, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, SHOP_PRICES, SHOP_QUANTITIES, WEAPONS, WILDLIFE, type ShopLine } from '../../shared/constants/index.js';
+import { ECONOMY, PHYSICS, PLAYER, POCKET, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, SHOP_PRICES, SHOP_QUANTITIES, WEAPONS, WILDLIFE, type ShopLine } from '../../shared/constants/index.js';
 import type {
   BountyRaisedPayload, CargoSpilledPayload, CarpenterPatchPayload, CrewEliminatedPayload, GameState, HotSnapshotPayload, ShipSunkPayload, SpoilClaimedPayload, InteractIntent, MatchCountdownPayload, MatchHornPayload, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SeaRock, Shark, SharkAttackState, Ship, ShipHole, ShipUpgradeType, TradeSession, TreasureChest, WeaponId,
 } from '../../shared/types/index.js';
@@ -432,6 +432,14 @@ function cannonLoadedLine(payload: unknown): string | null {
   return `No ${sel}: loaded ${shot}.`;
 }
 
+/** Walk speed the local input lead aims at: the station/hold cap `base`, and
+ *  mid-bite (D21) the server's 70 % eating cap on top (Match.applyInput), so
+ *  the drawn body does not lead the server's and ease back after each bite. */
+export function predictedWalkSpeed(base: number, crouching: boolean, eating: boolean): number {
+  if (!eating) return base;
+  return Math.min(base, PLAYER.MOVE_SPEED * (crouching ? 0.55 : 1) * POCKET.EAT_MOVE_SCALE);
+}
+
 export function interactRefusalLine(intent?: string, reason?: string, atCannon = false): string {
   const noun = INTERACT_INTENT_NOUN[intent ?? ''] ?? 'that';
   // D20: at a gun the trigger on an empty bore names the load key, and "no
@@ -787,6 +795,9 @@ export class Game {
   private readonly tempRenderPos = new THREE.Vector3();
   private readonly tempBallisticPos = new THREE.Vector3();
   private pocketUsePreviewKind: PocketPreviewKind | null = null;
+  /** Latched on the rising edge of pocketUseCooldown: the use in flight is a
+   *  bite (D21, 70 % walk) rather than a plank stowed. */
+  private localBiteIsFood = false;
   private pocketUsePreviewTimer = 0;
   private hitMarkerTimer = 0;
   private hitMarkerHeadshot = false;
@@ -4738,9 +4749,9 @@ export class Game {
           // b3.3d: in the flooded hold the server caps the walk (holdMovement,
           // wade/swim); lead with the same cap or the body runs ahead and snaps back.
           const holdShip = player.onShipId ? this.shipsById.get(player.onShipId) ?? null : null;
-          const moveSpeed = holdShip
+          const moveSpeed = predictedWalkSpeed(holdShip
             ? Math.min(PLAYER.MOVE_SPEED, holdSpeedCap(sampleHoldWater(player.position, holdShip).mode, player.crouching))
-            : PLAYER.MOVE_SPEED;
+            : PLAYER.MOVE_SPEED, player.crouching, (player.pocketUseCooldown ?? 0) > 0 && this.localBiteIsFood);
           const desiredVx = (Math.sin(yaw) * nz - Math.cos(yaw) * nx) * moveSpeed;
           const desiredVz = (Math.cos(yaw) * nz + Math.sin(yaw) * nx) * moveSpeed;
           const response = player.onShipId ? 0.42 : 0.62;
@@ -7415,6 +7426,7 @@ export class Game {
       const cooldown = player.pocketUseCooldown ?? 0;
       if (cooldown > this.prevPocketUseCooldown + 0.2) {
         const kind = this.pocketUsePreviewKind;
+        this.localBiteIsFood = kind !== 'wood';
         if (kind === 'wood') {
           this.audio.playWoodPlank();
         } else if (kind === 'meat') {
