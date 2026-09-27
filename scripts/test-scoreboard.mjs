@@ -154,6 +154,18 @@ ok(/onPadScoreboardShown/.test(game), 'Game closes the chart a View hold opened'
 ok(/resetScoreboard\(\)/.test(game), 'Game hides board and pill when the round resets');
 const touch = read('src/client/input/TouchControls.ts');
 ok(/dataset\.touch = 'scoreboard'/.test(touch) && /export function touchScoreboardHeld/.test(touch), 'touch Crews hold button');
+// b3-device-01: a phone-landscape board fits 12 Solo / 9 Duos crews (compact
+// block: smaller font, members on one wrapped line) and keeps the local row in
+// view when it still overflows (the held board takes no scroll input).
+const sbSrc = read('src/client/ui/Scoreboard.ts');
+const compact = sbSrc.match(/@media \(max-height:500px\)\{([^]*?)\n\}\n/);
+ok(!!compact && /#scoreboard\{[^}]*font:calc\(11px/.test(compact[1]) && /#scoreboard td:last-child\{[^}]*flex-wrap:wrap/.test(compact[1]),
+  'phone landscape: compact board (11 px, members on one wrapped line)');
+ok(/keepLocalRowInView\(/.test(sbSrc) && /scrollTop\s*=/.test(sbSrc), 'an overflowing board scrolls the local crew row into view');
+// b3-device-02: the pill lives in the HUD's top-right region (flows under the
+// player count, left of the phone minimap), not a fixed box under #hud.
+ok(/getElementById\('hud-top-right'\)/.test(sbSrc) && /#hud-top-right>#net-pill\{[^}]*position:static/.test(sbSrc),
+  'connection pill mounts in #hud-top-right, clear of the minimap and above nothing');
 const hud = read('src/client/ui/HudController.ts');
 ok(/updateHud\(\) \{\s*this\.updateScoreboard\(\);/.test(hud), 'HudController paints the board every HUD repaint');
 

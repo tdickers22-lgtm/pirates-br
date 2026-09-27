@@ -253,6 +253,12 @@ const CSS = `
 #net-pill{position:fixed;top:calc(8px + env(safe-area-inset-top));right:calc(12px + env(safe-area-inset-right));z-index:61;padding:3px 10px;border-radius:999px;
  font:600 calc(12px * var(--hud-text-scale,1)) system-ui,sans-serif;pointer-events:none;background:rgba(214,160,40,.92);color:#15110a}
 #net-pill.bad{background:rgba(200,60,50,.94);color:#fff}
+#hud-top-right>#net-pill{position:static;top:auto;right:auto;z-index:auto}
+@media (max-height:500px){
+ #scoreboard{font:calc(11px * var(--hud-text-scale,1)) system-ui,sans-serif;padding:6px 10px;max-height:calc(100vh - 16px - env(safe-area-inset-top) - env(safe-area-inset-bottom))}
+ #scoreboard h2{margin-bottom:3px}#scoreboard td{padding:1px 5px}#scoreboard th{padding:0 5px}
+ #scoreboard td:last-child{display:flex;flex-wrap:wrap;gap:0 10px}
+}
 `;
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -290,7 +296,11 @@ export class ScoreboardView {
     this.pill.id = 'net-pill';
     this.pill.setAttribute('role', 'status');
     this.pill.hidden = true;
-    document.body.append(this.board, this.pill);
+    document.body.append(this.board);
+    // b3-device-02: the pill flows in the HUD's top-right region (under the
+    // player count, left of the phone minimap). Fixed on <body> it sat in the
+    // minimap's box below #hud (z 100) and a phone never saw the warning.
+    (document.getElementById('hud-top-right') ?? document.body).append(this.pill);
   }
   showBoard(model: ScoreboardModel | null) {
     this.ensure();
@@ -299,6 +309,19 @@ export class ScoreboardView {
     if (!model) return;
     const html = renderScoreboardHtml(model);
     if (html !== this.lastHtml) { this.board.innerHTML = html; this.lastHtml = html; }
+    this.keepLocalRowInView();
+  }
+  /** b3-device-01: the board is only up while a key/button is HELD and takes
+   *  no pointer input, so when it overflows (a phone in Squads, a large text
+   *  scale) it scrolls itself to keep the local crew's row visible. */
+  private keepLocalRowInView() {
+    const board = this.board;
+    if (!board || board.scrollHeight <= board.clientHeight + 1) return;
+    const row = board.querySelector<HTMLElement>('tr.local');
+    if (!row) return;
+    const top = row.getBoundingClientRect().top - board.getBoundingClientRect().top + board.scrollTop;
+    const want = Math.max(0, top - (board.clientHeight - row.offsetHeight) / 2);
+    if (Math.abs(board.scrollTop - want) > 1) board.scrollTop = want;
   }
   showPill(v: PillView) {
     this.ensure();
