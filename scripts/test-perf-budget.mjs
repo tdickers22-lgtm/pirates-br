@@ -113,7 +113,7 @@ const ALLOW_ANY_MAP = process.env.PIRATES_BR_ANY_MAP === '1';
 
 // Ceilings live in scripts/lib/budgets.mjs (b1.7a, PLAN rule 13); test-budget-ratchet
 // fails any of them looser than at f5fee97e, on release or in the PLAN tables.
-import { PERF_BUDGETS as BUDGETS, WRECK_BUDGET, LOW_TIER_MAX_RATIO, MID_TIER_MAX_RATIO, midRatioFor, SHADOW_PASS_MAX_SHARE, SHADOW_POLICY_MAX_KEEP } from './lib/budgets.mjs';
+import { PERF_BUDGETS as BUDGETS, PERF_DEVIATIONS, WRECK_BUDGET, LOW_TIER_MAX_RATIO, MID_TIER_MAX_RATIO, midRatioFor, SHADOW_PASS_MAX_SHARE, SHADOW_POLICY_MAX_KEEP } from './lib/budgets.mjs';
 /** Seconds after the horn the dev server raises her for this measurement. */
 const WRECK_RAISE_SEC = 12;
 /** How long to wait for her after the join before giving up and skipping. */
@@ -423,11 +423,8 @@ async function measureTier(browser, quality, { wantWreck }) {
         }).catch(() => ({ hist: [], splits: [] }));
         if (progNames.hist.length) console.log(`      programs by shader: ${progNames.hist.map(([k, v]) => `${k}=${v}`).join('  ')}`);
         if (progNames.splits.length) console.log(`      program splits: ${progNames.splits.join('  ')}`);
-        expect(
-          `[${quality}] ${budget.label} links no more than ${budget.programs} programs`,
-          r.programs <= budget.programs,
-          `measured ${r.programs}, ceiling ${budget.programs}`,
-        );
+        gradeRow(quality, budget, 'programs', r.programs, budget.programs,
+          `links no more than ${budget.programs} programs`, (v) => `${v}`);
       }
       graded += 1;
     }
@@ -495,20 +492,44 @@ function report(quality, budget, got, raw) {
     const byTris = [...got.sources].sort((a, b) => (b.tris ?? 0) - (a.tris ?? 0)).slice(0, 8);
     console.log(`      by tris:   ${byTris.map((s) => `${s.source}=${Math.round((s.tris ?? 0) / 1000)}k`).join('  ')}`);
   }
+  gradeRow(quality, budget, 'draws', got.draws, budget.draws,
+    `stays under ${budget.draws} draw calls`, (v) => `${v}`, ` (was ${budget.measured} when the ceiling was set)`);
+  gradeRow(quality, budget, 'tris', got.tris, budget.tris,
+    `stays under ${Math.round(budget.tris / 1000)}k triangles`, (v) => `${Math.round(v / 1000)}k`);
+}
+
+/** One budget cell. A cell with a DECLARED deviation (lib/budgets PERF_DEVIATIONS,
+ *  b3-device-05) is graded against its dated `upTo` and says so on every run;
+ *  the table's ceiling is untouched, and a cell back under it reads STALE. */
+function gradeRow(quality, budget, metric, value, ceiling, what, fmt, note = '') {
+  const key = `${quality}.${budget.scene}.${metric}`;
+  const dev = PERF_DEVIATIONS[key];
+  if (!dev) {
+    expect(`[${quality}] ${budget.label} ${what}`, value <= ceiling, `measured ${fmt(value)}, ceiling ${fmt(ceiling)}${note}`);
+    return;
+  }
+  if (value <= ceiling) {
+    console.log(`  ! STALE deviation ${key}: ${fmt(value)} is back under the ceiling ${fmt(ceiling)}; delete the entry (owner ${dev.owner})`);
+  }
   expect(
-    `[${quality}] ${budget.label} stays under ${budget.draws} draw calls`,
-    got.draws <= budget.draws,
-    `measured ${got.draws}, ceiling ${budget.draws} (was ${budget.measured} when the ceiling was set)`,
-  );
-  expect(
-    `[${quality}] ${budget.label} stays under ${Math.round(budget.tris / 1000)}k triangles`,
-    got.tris <= budget.tris,
-    `measured ${Math.round(got.tris / 1000)}k, ceiling ${Math.round(budget.tris / 1000)}k`,
+    `[${quality}] ${budget.label} ${what} — DECLARED DEVIATION up to ${fmt(dev.upTo)} since ${dev.since} (owner ${dev.owner})`,
+    value <= dev.upTo,
+    `measured ${fmt(value)}, deviation cap ${fmt(dev.upTo)}, table ceiling ${fmt(ceiling)}${note}`,
   );
 }
 
 async function main() {
   console.log(`Draw-call budget — GL: ${describeGl()}`);
+  // A declared deviation must name a real cell, or it excuses nothing and hides
+  // a typo (checked before any browser, so it holds on every run).
+  for (const [key, dev] of Object.entries(PERF_DEVIATIONS)) {
+    const [tier, scene, metric] = key.split('.');
+    const row = (BUDGETS[tier] ?? []).find((b) => b.scene === scene);
+    const ceiling = row?.[metric];
+    expect(`declared deviation ${key} names a budget cell above its ceiling (owner, date, upTo > ceiling)`,
+      Number.isFinite(ceiling) && Number.isFinite(dev.upTo) && dev.upTo > ceiling && !!dev.owner && /^\d{4}-\d{2}-\d{2}$/.test(dev.since ?? ''),
+      `row ${row ? 'found' : 'missing'}, ceiling ${ceiling}, upTo ${dev.upTo}`);
+  }
 
   let browser;
   try {

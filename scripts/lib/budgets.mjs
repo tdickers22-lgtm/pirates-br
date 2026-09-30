@@ -84,6 +84,38 @@ export const DEVICE_ROWS_IPAD = [
   { scene: 'deck-aft', label: 'on-deck aft look (iPad)', measured: 383, draws: 430, tris: 300_000, programs: DEVICE_PROGRAMS },
   { scene: 'open-sea', label: 'open water (iPad)', measured: 237, draws: 265, tris: 76_000, programs: DEVICE_PROGRAMS },
 ];
+/** DECLARED PERF DEVIATIONS (b3-device-05, 2026-09-30). The b3 batch left the
+ *  phone and iPad rows red (draws at the dock vista and the phone deck, the
+ *  70-program cap on every device view) and one low row at its noise edge, with
+ *  no owner in any lane report. The CEILINGS ABOVE DO NOT MOVE: each red row gets
+ *  a dated entry with an owner and an `upTo` a few percent over the reading, and
+ *  test-perf-budget grades the row against `upTo` instead, loudly. A reading
+ *  above `upTo` FAILS; a key that names no row FAILS; a row back under its own
+ *  ceiling prints STALE (delete the entry: this list may only shrink).
+ *  Readings: two pinned SwiftShader runs at 2b7d9a7a, before and after the
+ *  dig-sparkle cull (seed 20260801); `measured` is the higher, `upTo` ~5% over
+ *  it because these views drift 3-5% run to run with the bot fleet. Programs are the cumulative renderer.info.programs count;
+ *  the histogram (profile mode) shows 22 unnamed MeshPhysical + 18 MeshBasic
+ *  programs and three named splits (ocean-surface HULL_MASK, Rock_Grey+1,
+ *  waterfall-water), which is where the cut to 70 (then 66) comes from. */
+const HLOD = 'b4.4a (island HLOD sector batching: the dock vista and deck views are island-decor, sea-rock, loot tells and per-island meshes)';
+const PROGRAMS = 'b4.4a + the program census owner (merge the unnamed physical/basic variants and the three named splits; phones to 70, then the 66 table figure)';
+export const PERF_DEVIATIONS = {
+  'phone.dock-vista.draws': { upTo: 425, measured: 406, owner: HLOD, since: '2026-09-30' },
+  'phone.dock-vista.tris': { upTo: 420_000, measured: 403_000, owner: HLOD, since: '2026-09-30' },
+  'phone.deck-aft.draws': { upTo: 505, measured: 483, owner: HLOD, since: '2026-09-30' },
+  'ipad.dock-vista.draws': { upTo: 355, measured: 338, owner: HLOD, since: '2026-09-30' },
+  'low.island-interior.draws': { upTo: 550, measured: 528, owner: HLOD, since: '2026-09-30' },
+  'low.deck-aft.draws': { upTo: 540, measured: 515, owner: HLOD, since: '2026-09-30' },
+  'phone.dock-vista.programs': { upTo: 80, measured: 77, owner: PROGRAMS, since: '2026-09-30' },
+  'phone.island-interior.programs': { upTo: 80, measured: 77, owner: PROGRAMS, since: '2026-09-30' },
+  'phone.deck-aft.programs': { upTo: 80, measured: 77, owner: PROGRAMS, since: '2026-09-30' },
+  'phone.open-sea.programs': { upTo: 81, measured: 79, owner: PROGRAMS, since: '2026-09-30' },
+  'ipad.dock-vista.programs': { upTo: 79, measured: 76, owner: PROGRAMS, since: '2026-09-30' },
+  'ipad.island-interior.programs': { upTo: 79, measured: 76, owner: PROGRAMS, since: '2026-09-30' },
+  'ipad.deck-aft.programs': { upTo: 79, measured: 76, owner: PROGRAMS, since: '2026-09-30' },
+  'ipad.open-sea.programs': { upTo: 80, measured: 78, owner: PROGRAMS, since: '2026-09-30' },
+};
 export const PERF_BUDGETS = {
   high: [
     // Four pinned runs after the geometry pass: 1646-1727 draws, 1694-1784k
