@@ -8,7 +8,10 @@ import type {
   CarpenterPatchPayload,
   BountyRaisedPayload, CargoSpilledPayload, SpoilClaimedPayload, WreckEventPayload,
   PlayerStatsRecord, ResumeOkPayload, ResumeFailedPayload,
+  StaticWorldRef, WorldSyncPayload, Island, SeaRock,
 } from '../../shared/types/index.js';
+import { WORLD_VERSION } from '../../shared/staticWorld.js';
+import type { StaticWorldResult } from '../world/staticWorld.worker.js';
 import { PROTOCOL_VERSION } from '../../shared/types/index.js';
 import { nextWaitMs, CONNECT_STEPS_MS, type ConnectProgress } from './connectPolicy.js';
 import { VersionGate, type VersionPhase } from './versionGate.js';
@@ -517,6 +520,8 @@ export class NetworkClient {
   }
 
   private noteClosed(code: number, reason: string): void {
+    // A held seed join dies with its socket: a resume gets a full join.
+    this.worldGate = null;
     this.connected = false;
     this.transportOpen = false;
     this.joined = false;
@@ -551,7 +556,108 @@ export class NetworkClient {
     }
   }
 
+  // ─── b4.1c (D30, performance-05): the seed join ─────────────────────
+  /** A 16-hex hash no world has: reported when generation failed, so the
+   *  server answers at once with a full world_sync instead of its 12 s timeout. */
+  private static readonly NO_WORLD_HASH = '0000000000000000';
+  /** The last seed join, for the throttled-load probe and the debug overlay:
+   *  via 'worker' (regenerated off the main thread and the hash agreed) or
+   *  'sync' (the server's world_sync supplied the statics); genMs is the
+   *  worker's MapGenerator time, readyMs join receipt -> world installed. */
+  worldGen: {
+    via: 'worker' | 'sync'; seed: number; version: number; genMs: number | null; workerMs: number | null;
+    readyMs: number; readyAt: number; hashAgreed: boolean; reason?: string;
+  } | null = null;
+  /** Wall time the last match_horn ARRIVED (before any seed-join buffering). */
+  hornReceivedAt: number | null = null;
+  /** While the static world is being regenerated, the join is held and every
+   *  match message after it is buffered in arrival order, then replayed behind
+   *  onJoin: Game sees exactly the full join it always saw, only later. */
+  private worldGate: {
+    id: number; startedAt: number; playerId: string; shipId: string; snapshot: GameState;
+    ref: StaticWorldRef; buffered: Array<[NetMsg, number]>; reported: boolean;
+    genMs: number | null; workerMs: number | null;
+  } | null = null;
+  private worldWorker: Worker | null = null;
+  private worldJobSeq = 0;
+
+  private beginSeedJoin(playerId: string, shipId: string, snapshot: GameState, ref: StaticWorldRef): void {
+    const id = ++this.worldJobSeq;
+    this.hornReceivedAt = null;
+    this.worldGate = { id, startedAt: Date.now(), playerId, shipId, snapshot, ref, buffered: [], reported: false, genMs: null, workerMs: null };
+    const worker = this.staticWorldWorker();
+    if (!worker) { this.reportWorldHash(NetworkClient.NO_WORLD_HASH); return; }
+    worker.postMessage({ id, seed: ref.seed, version: ref.version, deltas: ref.deltas });
+  }
+
+  private staticWorldWorker(): Worker | null {
+    if (this.worldWorker) return this.worldWorker;
+    if (typeof Worker === 'undefined') return null;
+    try {
+      const w = new Worker(new URL('../world/staticWorld.worker.ts', import.meta.url), { type: 'module', name: 'static-world' });
+      w.onmessage = (e: MessageEvent<StaticWorldResult>) => this.onWorldResult(e.data);
+      w.onerror = (err) => {
+        console.error('[Net] static world worker error:', err.message);
+        this.worldWorker = null;
+        this.reportWorldHash(NetworkClient.NO_WORLD_HASH);
+      };
+      this.worldWorker = w;
+      return w;
+    } catch (err) {
+      console.error('[Net] static world worker failed to start:', err);
+      return null;
+    }
+  }
+
+  private onWorldResult(r: StaticWorldResult): void {
+    const g = this.worldGate;
+    if (!g || g.id !== r.id) return; // superseded by a reconnect or a newer join
+    g.workerMs = r.totalMs;
+    if (!r.ok) {
+      console.warn(`[Net] static world generation failed (${r.error}); asking for world_sync`);
+      this.reportWorldHash(NetworkClient.NO_WORLD_HASH);
+      return;
+    }
+    g.genMs = r.genMs;
+    this.reportWorldHash(r.worldHash);
+    // Disagreement: the server answers the report with world_sync (full
+    // current statics), which releases the gate; the local world is dropped.
+    if (r.worldHash !== g.ref.worldHash) {
+      console.warn(`[Net] static world hash ${r.worldHash} != server ${g.ref.worldHash}; waiting for world_sync`);
+      return;
+    }
+    this.releaseWorldGate(r.islands, r.seaRocks, 'worker', true);
+  }
+
+  /** One report per join (the server answers only the first). */
+  private reportWorldHash(worldHash: string): void {
+    const g = this.worldGate;
+    if (!g || g.reported) return;
+    g.reported = true;
+    this.send({ type: 'world_hash', ts: Date.now(), payload: { worldHash, version: g.ref.version } });
+  }
+
+  private releaseWorldGate(islands: Island[], seaRocks: SeaRock[], via: 'worker' | 'sync', hashAgreed: boolean, reason?: string): void {
+    const g = this.worldGate;
+    if (!g) return;
+    this.worldGate = null;
+    const now = Date.now();
+    this.worldGen = {
+      via, seed: g.ref.seed, version: g.ref.version, genMs: g.genMs, workerMs: g.workerMs,
+      readyMs: now - g.startedAt, readyAt: now, hashAgreed, ...(reason ? { reason } : {}),
+    };
+    const snapshot: GameState = { ...g.snapshot, islands, seaRocks };
+    this.emit('join', () => this.onJoin?.(g.playerId, g.shipId, snapshot));
+    // Replay in arrival order; a second seed join among them re-gates the rest.
+    for (const [m, at] of g.buffered) this.handleMsg(m, at);
+  }
+
   private handleMsg(msg: NetMsg, receivedAt: number) {
+    if (msg.type === 'match_horn') this.hornReceivedAt = Date.now();
+    if (this.worldGate && msg.type !== 'world_sync' && msg.type !== 'pong') {
+      this.worldGate.buffered.push([msg, receivedAt]);
+      return;
+    }
     switch (msg.type) {
       case 'welcome': {
         const p = msg.payload as WelcomePayload;
@@ -581,10 +687,19 @@ export class NetworkClient {
         break;
       }
       case 'join': {
-        const p = msg.payload as { playerId: string; shipId: string; snapshot: GameState };
+        const p = msg.payload as { playerId: string; shipId: string; snapshot: GameState; world?: StaticWorldRef };
         // Handshake complete — the match channel is open from here.
         this.joined = true;
+        // b4.1c: a seed join names the world instead of carrying it; the worker
+        // regenerates it and the join is delivered once the statics are in.
+        if (p.world) { this.beginSeedJoin(p.playerId, p.shipId, p.snapshot, p.world); break; }
         this.emit(msg.type, () => this.onJoin?.(p.playerId, p.shipId, p.snapshot));
+        break;
+      }
+      case 'world_sync': {
+        const p = msg.payload as WorldSyncPayload;
+        if (this.worldGate) this.releaseWorldGate(p.islands, p.seaRocks, 'sync', false, p.reason);
+        else console.warn(`[Net] world_sync (${p.reason}) with no seed join pending; ignored`);
         break;
       }
       case 'state_snapshot': {
@@ -813,7 +928,9 @@ export class NetworkClient {
    *  to the name key and anyone typing the same name shares the record. */
   setName(name: string) {
     const deviceId = getDeviceId();
-    this.send({ type: 'set_name', ts: Date.now(), payload: deviceId ? { name, deviceId } : { name } });
+    // b4.1c (D30): worldVersion says this build regenerates the static world
+    // from a seed join; without it the server sends today's full join.
+    this.send({ type: 'set_name', ts: Date.now(), payload: deviceId ? { name, deviceId, worldVersion: WORLD_VERSION } : { name, worldVersion: WORLD_VERSION } });
   }
   createParty() { this.send({ type: 'create_party', ts: Date.now(), payload: {} }); }
   joinParty(code: string) { this.send({ type: 'join_party', ts: Date.now(), payload: { code } }); }

@@ -1629,7 +1629,8 @@ export type EmptyMsgPayload = Record<string, never>;
  */
 export interface ClientMsgPayloads {
   /** deviceId: the anonymous stats key (b1.2f); dropped at the boundary when malformed. */
-  set_name: { name: string; deviceId?: string };
+  /** worldVersion (b4.1c, D30): the client regenerates this static world version from a seed join. */
+  set_name: { name: string; deviceId?: string; worldVersion?: number };
   create_party: EmptyMsgPayload;
   join_party: { code: string };
   leave_party: EmptyMsgPayload;

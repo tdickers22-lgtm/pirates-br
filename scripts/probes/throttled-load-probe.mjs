@@ -25,6 +25,9 @@
 //      Game.benchFrameCpu(1) x 90 <= 12 ms is printed ADVISORY: on SwiftShader
 //      the CPU rasteriser shares the cores, so a millisecond here is not a
 //      phone's millisecond. The long-task count is the graded form.
+//   B0 (b4.1c, D30) inside row B: the solo join is a SEED join, the static
+//      world is regenerated in the worker with the server's worldHash in
+//      <= 1.5 s of generation at 4x CPU, and installed before the horn.
 //
 // Mutations (the gate's proof it can fail, rule 5):
 //   --mutate=bloat   the document gains blocking <script>s naming the heaviest
@@ -84,7 +87,7 @@ if (MUTATE && !ROWS.includes(MUTATION_ROW[MUTATE])) {
 // broken as one that cannot fail), so a RED under the throttle is the product.
 const CALIBRATE = process.argv.includes('--calibrate');
 const THROTTLE = Object.freeze({ downMbit: 9, upMbit: 9, rttMs: 70, cpuRate: 4 });
-const BUDGET = Object.freeze({ playClickableMs: 3500, longTasksAfterHorn: 3, longTaskMs: 50, stepFrameCpuP95Ms: 12 });
+const BUDGET = Object.freeze({ playClickableMs: 3500, longTasksAfterHorn: 3, longTaskMs: 50, stepFrameCpuP95Ms: 12, worldGenMs: 1500 });
 const PLAY_WINDOW_MS = 20_000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -316,6 +319,20 @@ try {
     await page.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', null, { timeout: 240_000, polling: 500 });
     const tier = await page.evaluate(() => ({ q: window.__piratesBR.renderer.getQuality(), reason: window.__piratesBR.renderer.getQualityVerdict?.()?.reason }));
     expect(`phone session detected as low / 'mobile' (got ${tier.q} / ${tier.reason})`, tier.q === 'low' && tier.reason === 'mobile');
+    // b4.1c (D30): the seed join. The static world is regenerated in a worker
+    // (src/client/world/staticWorld.worker.ts) during the countdown, the hash
+    // agrees with the server's, and it is installed BEFORE the horn arrives.
+    // worldGen null = the server sent a full legacy join (no capability).
+    const wg = await page.evaluate(() => {
+      const n = window.__piratesBR?.network;
+      return { gen: n?.worldGen ?? null, hornAt: n?.hornReceivedAt ?? null };
+    });
+    out.worldGen = wg;
+    const g = wg.gen;
+    console.log(`  B0 seed join: ${g ? `via ${g.via}, generation ${g.genMs == null ? '-' : g.genMs.toFixed(0)} ms (worker total ${g.workerMs == null ? '-' : g.workerMs.toFixed(0)} ms), join -> world installed ${g.readyMs} ms, ${g.hashAgreed ? 'hash agreed' : `NO hash agreement (${g.reason ?? '?'})`}, ${wg.hornAt == null ? 'no horn seen' : `${wg.hornAt - g.readyAt} ms before the horn`}` : 'NONE (full legacy join)'}`);
+    expect('the join is a seed join regenerated in the worker with the server\'s worldHash', !!g && g.via === 'worker' && g.hashAgreed === true, JSON.stringify(g));
+    expect(`client static-world generation <= ${BUDGET.worldGenMs} ms at 4x CPU (${g?.genMs == null ? 'none' : g.genMs.toFixed(0)})`, !!g && g.genMs != null && g.genMs <= BUDGET.worldGenMs);
+    expect('the static world is installed before the horn', !!g && wg.hornAt != null && g.readyAt <= wg.hornAt, `readyAt ${g?.readyAt} hornAt ${wg.hornAt}`);
     await page.evaluate(() => window.__piratesBR.setBotPeace?.(true));
     // Let the horn-time island reveal land before the window opens: the gate is
     // about steady play, and the reveal has its own budget (first-draw).
