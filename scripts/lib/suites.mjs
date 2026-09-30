@@ -721,6 +721,7 @@ export const LOGIC = [
   tsx('test-music-instruments.mjs'),
   tsx('test-fp-arms.mjs'), // b3.2h: first-person arms are the pirate's own arms, <= 4k tris, never fill the screen
   tsx('test-gold-race.mjs'), // b3.5c: D18 gold race line past 50 %, D19 spawn kit (Wrecker's Glass reserve 2)
+  tsx('test-static-world-determinism.mjs'), // b4.1a: static world = f(seed, WORLD_VERSION), server vs client graph byte-identical incl. collider geometry, libm-independent (~2.3 s)
 ];
 
 /**
