@@ -5,7 +5,7 @@ import { auditAssetMaterial } from './materialAudit.js';
 import { collapseChunks } from './AssetMaterialCollapse.js';
 import { modelUrl, withMeshopt, modelFamily } from './modelManifest.js';
 import { loadQualityPreference, parseRenderQuality } from '../rendering/QualityPreference.js';
-import { trackUpload, geometryUploaded, releaseGeometryCpu, cpuCopyReleaseEnabled } from '../rendering/CpuCopyRelease.js';
+import { trackUpload, geometryUploaded, releaseGeometryCpu, cpuCopyReleaseEnabled, compactPaddedAttributes } from '../rendering/CpuCopyRelease.js';
 
 /**
  * Preloaded GLB asset library. Assets are authored in Blender
@@ -542,6 +542,9 @@ export class AssetLibrary {
     // (test-memory-budget sums resident texture MB per family from these tags).
     const assetFamily = modelFamily(key) ?? 'shared';
     root.userData.assetFamily = assetFamily;
+    // b1-ask-05: padded quantised positions arrive interleaved and could never
+    // be released; on the release profile they become plain attributes first.
+    if (cpuCopyReleaseEnabled()) compactPaddedAttributes(root);
     root.traverse((o) => {
       o.userData.assetFamily = assetFamily;
       if (o instanceof THREE.Mesh) {
