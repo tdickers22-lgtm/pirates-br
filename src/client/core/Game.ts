@@ -82,7 +82,7 @@ import { registerBudgetLight } from '../rendering/LightBudget.js';
 import { beginFirstDrawFrame, clearFirstDrawBudget, openFirstDrawBudgetForSettle, showWhenAffordable } from '../rendering/FirstDrawBudget.js';
 import { budgeted } from '../rendering/FrameBudget.js';
 import { ClientState } from './ClientState.js';
-import { applyPlayerTeamColor, makePlayerMesh } from '../rendering/factories/PlayerMeshFactory.js';
+import { applyPlayerTeamColor, makePlayerMesh, ownPlayerMaterials } from '../rendering/factories/PlayerMeshFactory.js';
 import { makePlayerRig } from '../rendering/factories/PlayerRigFactory.js';
 import { buildMermaidMesh, hudAnchorLocal, makeNameplateSprite, makeProjectileMesh } from '../rendering/factories/MiscMeshFactory.js';
 import type { PocketPreviewKind } from '../rendering/factories/WeaponMeshFactory.js';
@@ -5593,10 +5593,13 @@ export class Game {
     this.setMeshOpacity(mesh, 1 - k);
   }
 
-  /** Player meshes own their materials (makePlayerMesh builds a fresh set per
-   *  avatar), so fading one body never touches another's. */
+  /** A fading body writes its own copies (ownPlayerMaterials), so fading one
+   *  body never touches another's. */
   private setMeshOpacity(root: THREE.Object3D, opacity: number) {
     const clamped = THREE.MathUtils.clamp(opacity, 0, 1);
+    // Procedural pirates share one material per look (b1-ask-05): take private
+    // copies before the fade writes opacity, or every pirate fades with this one.
+    if (clamped < 1) ownPlayerMaterials(root);
     root.traverse((object) => {
       if (!(object instanceof THREE.Mesh)) return;
       const materials = Array.isArray(object.material) ? object.material : [object.material];
