@@ -40,9 +40,6 @@ function expect(label, condition, detail = '') {
 /** Wire messages the client deliberately does not consume, and why. Each entry
  *  is asserted BOTH ways: still produced, still unconsumed. */
 const KNOWN_DARK = {
-  world_sync: 'b4.1b (D30) landed the server half of the seed join; the client '
-    + 'half (NetworkClient case + static-world worker) is slice b4.1c, which must '
-    + 'delete this entry when it wires the case.',
   revive_start: 'Predates this campaign: the reviver\'s progress is read off the '
     + 'snapshot (player.reviveProgress), so the event carries nothing the HUD '
     + 'needs. Left dark deliberately; CREWHUD-01 either uses it or deletes it.',
@@ -164,8 +161,6 @@ for (const [type, why] of Object.entries(KNOWN_DARK)) {
 // Declared exceptions go in KNOWN_UNSENT and are graded both ways, like
 // KNOWN_DARK.
 const KNOWN_UNSENT = {
-  world_hash: 'b4.1b (D30): the client reports its regenerated worldHash from the '
-    + 'static-world worker in slice b4.1c, which must delete this entry.',
   dev_scuttle: 'b1.5f test hook, not a game message: the server honours it only '
     + 'in Solo with PIRATES_BR_DEV_HOOKS=1, and scripts/test-elimination-spectate.mjs '
     + 'sends it through window.__piratesBR.network.send so the gate sinks a real hull. '
