@@ -590,6 +590,12 @@ export class NetworkClient {
     worker.postMessage({ id, seed: ref.seed, version: ref.version, deltas: ref.deltas });
   }
 
+  /** Start the worker (module fetch + parse) when the player commits to a
+   *  match, not at the join: measured on the 4G phone the cold worker took
+   *  ~2.9 s of the 3.1 s join -> installed. Not at the menu, so it never
+   *  competes with Play becoming clickable. */
+  private prewarmStaticWorld(): void { this.staticWorldWorker(); }
+
   private staticWorldWorker(): Worker | null {
     if (this.worldWorker) return this.worldWorker;
     if (typeof Worker === 'undefined') return null;
@@ -941,17 +947,17 @@ export class NetworkClient {
   // PARTY-01 (netcode-14/15): the server has accepted these three since lane
   // 2.3 and no client ever sent one, so the ready tick, the kick and the crown
   // were server-only vocabulary. A roster row is a control now.
-  partyReady(ready: boolean) { this.send({ type: 'party_ready', ts: Date.now(), payload: { ready } }); }
+  partyReady(ready: boolean) { if (ready) this.prewarmStaticWorld(); this.send({ type: 'party_ready', ts: Date.now(), payload: { ready } }); }
   partyKick(clientId: string) { this.send({ type: 'party_kick', ts: Date.now(), payload: { clientId } }); }
   partyTransferHost(clientId: string) {
     this.send({ type: 'party_transfer_host', ts: Date.now(), payload: { clientId } });
   }
-  startMatch() { this.send({ type: 'start_match', ts: Date.now(), payload: {} }); }
+  startMatch() { this.prewarmStaticWorld(); this.send({ type: 'start_match', ts: Date.now(), payload: {} }); }
   /** The mode picker travels with the request: a lone pirate queueing for Duos
    *  must not be dispatched into Solo's twelve-hull fleet (MODE-01). */
-  queueJoin(mode?: string) { this.send({ type: 'queue_join', ts: Date.now(), payload: mode ? { mode } : {} }); }
+  queueJoin(mode?: string) { this.prewarmStaticWorld(); this.send({ type: 'queue_join', ts: Date.now(), payload: mode ? { mode } : {} }); }
   queueLeave() { this.send({ type: 'queue_leave', ts: Date.now(), payload: {} }); }
-  soloStart(botCount = 9) { this.send({ type: 'solo_start', ts: Date.now(), payload: { botCount } }); }
+  soloStart(botCount = 9) { this.prewarmStaticWorld(); this.send({ type: 'solo_start', ts: Date.now(), payload: { botCount } }); }
   // Leaving is decided HERE, not when the server's answer arrives: close the
   // match channel on the way out so the frames between the request and the
   // reply can't keep driving a player we have already walked away from.

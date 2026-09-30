@@ -75,6 +75,15 @@ function parseRows(argv) {
   return [...new Set(rows)].sort();
 }
 const ROWS = parseRows(process.argv.slice(2));
+/** waitForFunction without in-page string compilation (CSP-safe). */
+async function pollPage(page, fn, timeoutMs, everyMs) {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    if (await page.evaluate(fn).catch(() => false)) return;
+    if (Date.now() > until) throw new Error(`pollPage timed out after ${timeoutMs} ms: ${String(fn).slice(0, 120)}`);
+    await new Promise((r) => setTimeout(r, everyMs));
+  }
+}
 const ONLY = ROWS.length === 1 ? ROWS[0] : '';
 const MUTATION_ROW = { bloat: 'A', busy: 'B' };
 if (MUTATE && !MUTATION_ROW[MUTATE]) { console.error(`  ✗ FAIL: unknown --mutate=${MUTATE} (bloat | busy)`); process.exit(2); }
@@ -307,16 +316,19 @@ try {
   try {
     const page = await ctxB.newPage();
     const errors = [];
-    page.on('pageerror', (e) => errors.push(String(e).slice(0, 200)));
+    page.on('pageerror', (e) => errors.push(`${String(e).slice(0, 200)} @ ${String(e?.stack ?? '').split('\n').slice(1, 3).join(' <- ').slice(0, 200)}`));
     page.on('crash', () => { errors.push('RENDERER CRASHED'); console.error('  ! the phone page crashed (renderer process gone)'); });
     await throttle(page);
     await page.goto(`${BASE}/?server=${PORT}&debug`, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-    await page.waitForFunction(() => {
+    // Polled with page.evaluate, not waitForFunction: the page's CSP has no
+    // 'unsafe-eval', and Playwright's in-page poller compiles the predicate
+    // from a string, which surfaced as EvalError page errors in row B.
+    await pollPage(page, () => {
       const b = document.getElementById('menu-solo-btn');
-      return b && !b.disabled && window.__piratesBR?.network?.isConnected?.() !== false;
-    }, null, { timeout: 90_000 });
+      return !!b && !b.disabled && window.__piratesBR?.network?.isConnected?.() !== false;
+    }, 90_000, 250);
     await page.tap('#menu-solo-btn');
-    await page.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', null, { timeout: 240_000, polling: 500 });
+    await pollPage(page, () => window.__piratesBR?.state?.phase === 'playing', 240_000, 500);
     const tier = await page.evaluate(() => ({ q: window.__piratesBR.renderer.getQuality(), reason: window.__piratesBR.renderer.getQualityVerdict?.()?.reason }));
     expect(`phone session detected as low / 'mobile' (got ${tier.q} / ${tier.reason})`, tier.q === 'low' && tier.reason === 'mobile');
     // b4.1c (D30): the seed join. The static world is regenerated in a worker
@@ -399,7 +411,21 @@ try {
     expect(`long tasks with > ${BUDGET.longTaskMs} ms outside render() after the horn <= ${BUDGET.longTasksAfterHorn} in ${PLAY_WINDOW_MS / 1000} s (${b.tasks.length})`,
       b.tasks.length <= BUDGET.longTasksAfterHorn);
     expect('the play window actually ran (>= 10 rAF frames, >= 10 timed renders)', b.frames >= 10 && b.renders >= 10, `${b.frames} frames, ${b.renders} renders`);
-    expect('no page errors in the match', errors.length === 0, errors.join(' | '));
+    // Playwright's own in-page helpers compile with `new Function`, which this
+    // page's CSP (no 'unsafe-eval') refuses: those EvalErrors carry ONLY the
+    // anonymous `new Function` frame (seen in the b4.1c red run, before any
+    // client change was live). They are printed and not graded, and only
+    // while the shipped build provably contains no eval of its own, so a
+    // real app eval (or any other error) still fails this row.
+    const harnessEval = (e) => /^EvalError: .*'unsafe-eval'/.test(e) && /@\s*<-\s+at new Function \(<anonymous>\)\s*$/.test(e);
+    const assetsDir = join('dist', 'client', 'assets');
+    const appEval = readdirSync(assetsDir).filter((f) => f.endsWith('.js'))
+      .filter((f) => /new Function\(|[^.\w$]eval\(/.test(readFileSync(join(assetsDir, f), 'utf8')));
+    const harnessErrs = errors.filter(harnessEval);
+    const appErrs = appEval.length ? errors : errors.filter((e) => !harnessEval(e));
+    if (harnessErrs.length) console.log(`     ${harnessErrs.length} Playwright-helper EvalError(s) refused by the page CSP (not graded; the build has ${appEval.length ? `eval in ${appEval.join(', ')}` : 'no eval of its own'})`);
+    expect('the shipped build contains no eval / new Function (the page CSP forbids it)', appEval.length === 0, appEval.join(', '));
+    expect('no page errors in the match', appErrs.length === 0, appErrs.join(' | '));
   } finally {
     await ctxB.close().catch(() => {});
   }
