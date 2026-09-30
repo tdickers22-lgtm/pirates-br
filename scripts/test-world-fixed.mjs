@@ -5,6 +5,7 @@
 import { MapGenerator } from '../src/server/world/MapGenerator.ts';
 import { getIslandMaxRadius } from '../src/shared/utils/index.ts';
 import { WORLD } from '../src/shared/constants/index.ts';
+import { WORLD_VERSION, hashString } from '../src/shared/staticWorld.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -12,7 +13,7 @@ function expect(label, condition, detail = '') {
   else { console.error(`  ✗ FAIL: ${label}${detail ? `\n     ${detail}` : ''}`); failures += 1; }
 }
 
-const worldSignature = (islands) => JSON.stringify(islands.map((island) => ({
+const worldSignature = (islands) => `v${WORLD_VERSION}|` + JSON.stringify(islands.map((island) => ({
   id: island.id,
   name: island.name,
   position: island.position,
@@ -35,6 +36,17 @@ expect('Old Maw Caldera anchors the center', (() => {
   const maw = a.find(i => i.id === 'old-maw-caldera');
   return !!maw && Math.hypot(maw.position.x, maw.position.z) < 1;
 })());
+
+// b4.1b (D30, islands-12): the seed join tells clients WORLD_VERSION and they
+// regenerate the world, so a world change that keeps the version would give a
+// stale client a different world under the same name. One pin per version: a
+// world slice bumps WORLD_VERSION (src/shared/staticWorld.ts) and adds its row
+// in a re-pin commit that states the signature diff.
+const SIGNATURE_PINS = { 1: '83f3f8241a029ccb' };
+const signatureHash = hashString(worldSignature(a));
+expect(`the fixed-world signature is pinned for WORLD_VERSION ${WORLD_VERSION}`,
+  SIGNATURE_PINS[WORLD_VERSION] === signatureHash,
+  `signature hash ${signatureHash} vs pin ${SIGNATURE_PINS[WORLD_VERSION]}: a world change must bump WORLD_VERSION and add a pin row`);
 
 console.log('Layout invariants:');
 const MIN_LANE = 70; // meters of open water between any two island footprints
