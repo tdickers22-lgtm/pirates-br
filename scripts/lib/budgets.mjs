@@ -315,7 +315,7 @@ export const SNAPSHOT_BYTES = {
   full: 35 * 1024, // 10 Hz quantised full
   worldFull: 250 * 1024, // full + static world (rides ~1/20 s and the join)
   egressPerSecond: 120 * 1024, // per client, every roster config
-  joinCompressed: 60 * 1024, // compressed join message (printed until WIRE-01 c lands, then asserted)
+  joinCompressed: 20 * 1024, // compressed join message, HARD (b4.1b D30: seed + WORLD_VERSION + deltas, measured 3.3-4.8 KB)
 };
 
 // ═══ test-frame-governor: framebuffer pixel ceilings and governor stability ════════════════════════
