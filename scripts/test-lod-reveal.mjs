@@ -152,6 +152,7 @@ const STORY_SWAP_LIMIT_MS = 2000;
 /** The same 2 s at 60 Hz, in frames: the graded bar (see INSTALL_FRAMES). */
 const STORY_SWAP_LIMIT_FRAMES = 120;
 
+const STORY_GLB_URL = /\/assets\/models\/(?:packed\/)?([a-z0-9_]+)(?:\.[0-9a-f]{8})?\.glb/;
 async function bootStoryPage(query) {
   const p = await browser.newPage({ viewport: VIEWPORT });
   const errors = [];
@@ -159,10 +160,12 @@ async function bootStoryPage(query) {
   let mutated = false;
   p.on('pageerror', (e) => errors.push(e.message));
   p.on('request', (req) => {
-    const m = req.url().match(/\/assets\/models\/([a-z0-9_]+)\.glb/);
+    // b3.1b ships content-hashed siblings (packed/<key>.<hash8>.glb); count both
+    // shapes or every story fetch is invisible and the slot pick and refetch rows grade nothing.
+    const m = req.url().match(STORY_GLB_URL);
     if (m && STORY_NAMES.includes(m[1])) fetched.push({ name: m[1], t: Date.now() });
   });
-  await p.route(/\/assets\/models\/[a-z0-9_]+\.glb/, (route) => route.continue());
+  await p.route(STORY_GLB_URL, (route) => route.continue());
   if (MUTATE_EAGER) {
     await p.route(/\/src\/client\/world\/island\/PropScatterer\.ts/, async (route) => {
       const res = await route.fetch();
