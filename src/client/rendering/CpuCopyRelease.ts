@@ -397,3 +397,51 @@ export function releaseGeometryCpu(g: THREE.BufferGeometry, dead: boolean): numb
   armedBytes += bytes;
   return bytes;
 }
+
+/**
+ * PADDED QUANTISED ATTRIBUTES (b1-ask-05, OD2). pack-models ships
+ * KHR_mesh_quantization positions as Int16 x3 padded to an 8-byte stride, and
+ * GLTFLoader turns every such accessor into an InterleavedBufferAttribute over
+ * a buffer only that one attribute reads. releasable() refuses interleaved
+ * attributes, so releaseGeometryCpu() armed nothing on any geometry carrying
+ * one: every story scene (phone census 2026-09-30: widow_memorial x11,
+ * skull_totem x12, mine_head x8, kraken_wreck x8, ... ~10 MB) kept its CPU
+ * copy all match, uploaded or not. Each such attribute is rewritten as a plain,
+ * tightly packed BufferAttribute (same type, normalized flag, usage and name;
+ * the padding lane is dropped, 25% smaller). A buffer two or more attributes
+ * interleave in is a real interleave and is left alone. Call once per loaded
+ * root, before trackUpload and before any upload. Returns the bytes compacted.
+ */
+export function compactPaddedAttributes(root: THREE.Object3D): number {
+  const geoms = new Set<THREE.BufferGeometry>();
+  root.traverse((o) => { const g = (o as THREE.Mesh).geometry; if (g) geoms.add(g); });
+  const refs = new Map<THREE.InterleavedBuffer, number>();
+  const each = (g: THREE.BufferGeometry, fn: (a: THREE.InterleavedBufferAttribute) => void) => {
+    for (const a of Object.values(g.attributes)) if ((a as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute) fn(a as THREE.InterleavedBufferAttribute);
+    for (const list of Object.values(g.morphAttributes)) for (const a of list) if ((a as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute) fn(a as THREE.InterleavedBufferAttribute);
+  };
+  for (const g of geoms) each(g, (a) => refs.set(a.data, (refs.get(a.data) ?? 0) + 1));
+  let bytes = 0;
+  for (const g of geoms) {
+    if (Object.keys(g.morphAttributes).length > 0) continue;
+    for (const [name, a] of Object.entries(g.attributes)) {
+      const ia = a as THREE.InterleavedBufferAttribute;
+      if (!ia.isInterleavedBufferAttribute || refs.get(ia.data) !== 1) continue;
+      const src = ia.data.array;
+      const stride = ia.data.stride;
+      const k = ia.itemSize;
+      const n = ia.count;
+      const Ctor = src.constructor as new (len: number) => THREE.TypedArray;
+      const out = new Ctor(n * k);
+      for (let i = 0, s = ia.offset, d = 0; i < n; i++, s += stride) {
+        for (let j = 0; j < k; j++) out[d++] = src[s + j];
+      }
+      const plain = new THREE.BufferAttribute(out, k, ia.normalized);
+      plain.name = ia.name;
+      plain.setUsage(ia.data.usage);
+      g.setAttribute(name, plain);
+      bytes += out.byteLength;
+    }
+  }
+  return bytes;
+}

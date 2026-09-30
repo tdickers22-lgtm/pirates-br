@@ -242,5 +242,43 @@ expect('re-arming a released subtree arms nothing', again === 0, `${again}`);
   expect('ctx: disposed geometry stays empty', pos.array.length === 0);
 }
 
+// ── padded quantised attributes (b1-ask-05, OD2) ──
+// pack-models ships KHR_mesh_quantization positions as Int16 x3 in an 8-byte
+// stride; GLTFLoader turns each into an InterleavedBufferAttribute, which
+// releasable() refuses, so releaseGeometryCpu armed NOTHING on every story
+// scene (phone census 2026-09-30: widow_memorial x11, skull_totem x12,
+// mine_head x8 ... ~10 MB never released). RED on 967a6737: no
+// compactPaddedAttributes export, 0 bytes armed.
+{
+  const mod = await import('../src/client/rendering/CpuCopyRelease.ts');
+  const n = 4;
+  const padded = new Int16Array(n * 4);
+  for (let i = 0; i < n; i++) { padded[i * 4] = i * 10; padded[i * 4 + 1] = -i; padded[i * 4 + 2] = 7 * i; padded[i * 4 + 3] = 999; }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.InterleavedBufferAttribute(new THREE.InterleavedBuffer(padded, 4), 3, 0, true));
+  geo.setAttribute('normal', new THREE.BufferAttribute(new Int8Array(n * 3).fill(127), 3, true));
+  geo.setIndex([0, 1, 2, 0, 2, 3]);
+  // A buffer two attributes interleave in is a real interleave: left alone.
+  const shared = new THREE.InterleavedBuffer(new Float32Array(n * 5), 5);
+  const geo2 = new THREE.BufferGeometry();
+  geo2.setAttribute('position', new THREE.InterleavedBufferAttribute(shared, 3, 0));
+  geo2.setAttribute('uv', new THREE.InterleavedBufferAttribute(shared, 2, 3));
+  const root = new THREE.Group();
+  root.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial()), new THREE.Mesh(geo2, new THREE.MeshBasicMaterial()));
+  expect('pad: compactPaddedAttributes is exported', typeof mod.compactPaddedAttributes === 'function');
+  const compacted = mod.compactPaddedAttributes?.(root) ?? 0;
+  const pos = geo.attributes.position;
+  expect('pad: padded position becomes a plain attribute', !pos.isInterleavedBufferAttribute && pos.array instanceof Int16Array && pos.array.length === n * 3, `${compacted}`);
+  expect('pad: values, normalized flag and count kept', pos.normalized === true && pos.count === n
+    && [...Array(n).keys()].every((i) => pos.getX(i) === padded[i * 4] / 32767 && pos.array[i * 3 + 1] === -i && pos.array[i * 3 + 2] === 7 * i));
+  expect('pad: a real two-attribute interleave is untouched', geo2.attributes.position.isInterleavedBufferAttribute && geo2.attributes.uv.isInterleavedBufferAttribute);
+  const trackMod = mod;
+  trackMod.trackUpload(geo);
+  const armed = trackMod.releaseGeometryCpu(geo, false);
+  expect('pad: the compacted geometry arms its release (was 0 bytes)', armed === n * 3 * 2 + n * 3 + 6 * 2, `${armed}`);
+  upload(geo);
+  expect('pad: dropped after upload, count kept for the draw range', geo.attributes.position.array.length === 0 && geo.attributes.position.count === n);
+}
+
 if (failures) { console.error(`\nCPU-copy release: ${failures} failure(s).`); process.exit(1); }
 console.log('\nCPU-copy release passed.');
