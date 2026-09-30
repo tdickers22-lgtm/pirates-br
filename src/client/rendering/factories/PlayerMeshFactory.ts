@@ -1,6 +1,7 @@
 /** Procedural pirate avatar meshes: body build, team tinting, held-item sockets. */
 import * as THREE from 'three';
 import { PLAYER } from '../../../shared/constants/index.js';
+import { assets } from '../../assets/AssetLibrary.js';
 
 /**
  * THE avatar skeleton, in metres above the standing surface (the group origin
@@ -67,11 +68,87 @@ export function applyPlayerTeamColor(mesh: THREE.Group, color: number) {
   };
   if (userData.animation?.variant === 'skeleton' || userData.teamColor === color || !userData.teamMaterials) return;
 
-  userData.teamMaterials.coatMat.color.set(color);
-  userData.teamMaterials.clothMat.color.copy(makeTeamShirtColor(color));
-  userData.teamMaterials.beltMat.color.copy(makeTeamBeltColor(color));
-  userData.teamMaterials.bandanaMat.color.set(color);
+  const old = userData.teamMaterials;
+  if (sharedPlayerMats.has(old.coatMat)) {
+    // Shared per crew colour (b1-ask-05): SWAP to the new colour's set. Writing
+    // the colour would recolour every other pirate of the old crew.
+    const next = teamMaterialSet(color);
+    const swap = new Map<THREE.Material, THREE.Material>([
+      [old.coatMat, next.coatMat], [old.clothMat, next.clothMat], [old.beltMat, next.beltMat], [old.bandanaMat, next.bandanaMat],
+    ]);
+    mesh.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (!m.isMesh || Array.isArray(m.material)) return;
+      const r = swap.get(m.material);
+      if (r) m.material = r;
+    });
+    userData.teamMaterials = next;
+    userData.teamColor = color;
+    return;
+  }
+  old.coatMat.color.set(color);
+  old.clothMat.color.copy(makeTeamShirtColor(color));
+  old.beltMat.color.copy(makeTeamBeltColor(color));
+  old.bandanaMat.color.set(color);
   userData.teamColor = color;
+}
+
+/**
+ * b1-ask-05 / b1.7b-heap: every procedural pirate used to build ~20 fresh
+ * MeshStandardMaterials, and the renderer keeps a cloned uniform set (~4.8 KB of
+ * heap) per material it draws: 35 phone pirates were ~700 materials for a dozen
+ * looks. One material per distinct look now, shared by every pirate and
+ * registered with the AssetLibrary so per-avatar disposal skips it. Nothing
+ * writes these in place: a recolour swaps sets (applyPlayerTeamColor) and a
+ * corpse fade first takes private copies (ownPlayerMaterials).
+ */
+const playerMatCache = new Map<string, THREE.MeshStandardMaterial>();
+const sharedPlayerMats = new WeakSet<THREE.Material>();
+function playerMat(params: THREE.MeshStandardMaterialParameters, tag = ''): THREE.MeshStandardMaterial {
+  const key = tag + JSON.stringify(params, (_k, v: unknown) => (v instanceof THREE.Color ? v.getHex() : v));
+  let m = playerMatCache.get(key);
+  if (!m) {
+    m = new THREE.MeshStandardMaterial(params);
+    playerMatCache.set(key, m);
+    sharedPlayerMats.add(m);
+    assets.adoptShared(m);
+  }
+  return m;
+}
+
+function teamMaterialSet(color: number): PlayerTeamMaterials {
+  return {
+    coatMat: playerMat({ color, roughness: 0.92 }, 'team-coat'),
+    clothMat: playerMat({ color: makeTeamShirtColor(color).getHex(), roughness: 0.96 }, 'team-cloth'),
+    beltMat: playerMat({ color: makeTeamBeltColor(color).getHex(), roughness: 1 }, 'team-belt'),
+    bandanaMat: playerMat({ color, roughness: 0.9 }, 'team-bandana'),
+  };
+}
+
+/** Give `root` private copies of any shared pirate material before a caller
+ *  writes one in place (corpse fade). Idempotent; the copies are the avatar's
+ *  own and go with it at disposal. */
+export function ownPlayerMaterials(root: THREE.Object3D): void {
+  if (root.userData.ownsPlayerMaterials) return;
+  root.userData.ownsPlayerMaterials = true;
+  const copies = new Map<THREE.Material, THREE.Material>();
+  const own = (m: THREE.Material) => {
+    if (!sharedPlayerMats.has(m)) return m;
+    let c = copies.get(m);
+    if (!c) copies.set(m, (c = m.clone()));
+    return c;
+  };
+  root.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    mesh.material = Array.isArray(mesh.material) ? mesh.material.map(own) : own(mesh.material);
+  });
+  const tm = root.userData.teamMaterials as PlayerTeamMaterials | undefined;
+  if (tm) {
+    root.userData.teamMaterials = {
+      coatMat: own(tm.coatMat), clothMat: own(tm.clothMat), beltMat: own(tm.beltMat), bandanaMat: own(tm.bandanaMat),
+    } as PlayerTeamMaterials;
+  }
 }
 
 /** Shared first-person palette so hands, sleeves and cuffs match the avatar. */
@@ -166,28 +243,27 @@ export function makePlayerMesh(
   const group = new THREE.Group();
   const isSkeleton = variant === 'skeleton';
   const isCaptain = role === 'captain';
-  const teamShirtColor = makeTeamShirtColor(color);
-  const teamBeltColor = makeTeamBeltColor(color);
 
-  const boneMat = new THREE.MeshStandardMaterial({
+  const boneMat = playerMat({
     color: 0xe5dfd2,
     roughness: 0.9,
     emissive: 0x8091a7,
     emissiveIntensity: 0.08,
   });
-  const boneDarkMat = new THREE.MeshStandardMaterial({ color: 0xb9b09c, roughness: 0.96 });
-  const socketMat = new THREE.MeshStandardMaterial({
+  const boneDarkMat = playerMat({ color: 0xb9b09c, roughness: 0.96 });
+  const socketMat = playerMat({
     color: 0x24303a,
     roughness: 1,
     emissive: 0x76c7ff,
     emissiveIntensity: 0.18,
   });
-  const pirateSkinMat = new THREE.MeshStandardMaterial({ color: 0xd4a070, roughness: 0.98 });
-  const coatMat = new THREE.MeshStandardMaterial({ color: isSkeleton ? 0xd9d3c4 : color, roughness: 0.92 });
-  const clothMat = new THREE.MeshStandardMaterial({ color: isSkeleton ? 0xcfc8b8 : teamShirtColor, roughness: 0.96 });
+  const pirateSkinMat = playerMat({ color: 0xd4a070, roughness: 0.98 });
+  const team = isSkeleton ? null : teamMaterialSet(color);
+  const coatMat = team ? team.coatMat : playerMat({ color: 0xd9d3c4, roughness: 0.92 });
+  const clothMat = team ? team.clothMat : playerMat({ color: 0xcfc8b8, roughness: 0.96 });
   const skinMat = isSkeleton ? boneMat : pirateSkinMat;
-  const darkMat = new THREE.MeshStandardMaterial({ color: isSkeleton ? 0xb5ac98 : 0x2a2019, roughness: 1 });
-  const beltMat = new THREE.MeshStandardMaterial({ color: isSkeleton ? 0xc9c0ab : teamBeltColor, roughness: 1 });
+  const darkMat = playerMat({ color: isSkeleton ? 0xb5ac98 : 0x2a2019, roughness: 1 });
+  const beltMat = team ? team.beltMat : playerMat({ color: 0xc9c0ab, roughness: 1 });
 
   const torso = new THREE.Mesh(
     new THREE.BoxGeometry(isSkeleton ? 0.39 : 0.52, 0.6, isSkeleton ? 0.2 : 0.29),
@@ -349,7 +425,7 @@ export function makePlayerMesh(
   } else {
     // Living pirate face — brow, eyes, nose, a chin beard and a moustache, so
     // crew/NPCs read as weathered pirates, not blank mannequin heads.
-    const eyeMat = new THREE.MeshStandardMaterial({ color: 0x140f0a, roughness: 0.6 });
+    const eyeMat = playerMat({ color: 0x140f0a, roughness: 0.6 });
     for (const side of [-1, 1] as const) {
       const eye = new THREE.Mesh(new THREE.SphereGeometry(0.032 * FACE, 8, 6), eyeMat);
       eye.position.set(side * 0.085 * FACE, 0.035 * FACE, 0.205 * FACE);
@@ -433,14 +509,14 @@ export function makePlayerMesh(
 
     const brim = new THREE.Mesh(
       new THREE.CylinderGeometry(0.34 * FACE, 0.42 * FACE, 0.05 * FACE, 18),
-      new THREE.MeshStandardMaterial({ color: 0x1d1410, roughness: 0.95 }),
+      playerMat({ color: 0x1d1410, roughness: 0.95 }),
     );
     brim.castShadow = true;
     hat.add(brim);
 
     const crown = new THREE.Mesh(
       new THREE.CylinderGeometry(0.17 * FACE, 0.2 * FACE, 0.22 * FACE, 14),
-      new THREE.MeshStandardMaterial({ color: 0x2b1b15, roughness: 0.92 }),
+      playerMat({ color: 0x2b1b15, roughness: 0.92 }),
     );
     crown.position.y = 0.12 * FACE;
     crown.castShadow = true;
@@ -448,7 +524,7 @@ export function makePlayerMesh(
 
     const feather = new THREE.Mesh(
       new THREE.PlaneGeometry(0.1 * FACE, 0.34 * FACE),
-      new THREE.MeshStandardMaterial({ color: 0xc7e0f0, roughness: 0.8, side: THREE.DoubleSide }),
+      playerMat({ color: 0xc7e0f0, roughness: 0.8, side: THREE.DoubleSide }),
     );
     feather.position.set(-0.13 * FACE, 0.24 * FACE, 0.04 * FACE);
     feather.rotation.set(0.28, 0.32, 0.42);
@@ -458,7 +534,7 @@ export function makePlayerMesh(
 
     const beard = new THREE.Mesh(
       new THREE.ConeGeometry(0.09 * FACE, 0.22 * FACE, 8),
-      new THREE.MeshStandardMaterial({ color: 0x33231c, roughness: 0.96 }),
+      playerMat({ color: 0x33231c, roughness: 0.96 }),
     );
     beard.position.set(0, -0.2 * FACE, 0.04 * FACE);
     beard.name = 'beard';
@@ -468,7 +544,7 @@ export function makePlayerMesh(
 
     const moustache = new THREE.Mesh(
       new THREE.BoxGeometry(0.16 * FACE, 0.03 * FACE, 0.03 * FACE),
-      new THREE.MeshStandardMaterial({ color: 0x2b1d18, roughness: 0.96 }),
+      playerMat({ color: 0x2b1d18, roughness: 0.96 }),
     );
     moustache.position.set(0, -0.04 * FACE, 0.2 * FACE);
     moustache.name = 'moustache';
@@ -480,7 +556,7 @@ export function makePlayerMesh(
   // (the old torus lived entirely INSIDE the hair shell — 0 of its 126 vertices
   // were outside it, so the one head-level team marker was invisible), plus the
   // knotted tail at the back.
-  const bandanaMat = new THREE.MeshStandardMaterial({ color, roughness: 0.9 });
+  const bandanaMat = team ? team.bandanaMat : playerMat({ color, roughness: 0.9 });
   const bandana = new THREE.Mesh(
     new THREE.SphereGeometry(AVATAR_RIG.bandanaR, 18, 6, 0, Math.PI * 2, Math.PI * 0.42, Math.PI * 0.2),
     bandanaMat,
