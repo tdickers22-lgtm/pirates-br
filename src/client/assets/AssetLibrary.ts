@@ -770,6 +770,12 @@ export class AssetLibrary {
     return !!resource && this.sharedResources.has(resource);
   }
 
+  /** Register a resource another module caches and shares (b1-ask-05: one
+   *  material per pirate look), so per-object disposal skips it like ours. */
+  adoptShared(resource: object): void {
+    this.sharedResources.add(resource);
+  }
+
   /** Local-space AABB of the asset (cached). Useful for fitting clones to gameplay colliders. */
   bounds(name: AssetName): THREE.Box3 | null {
     const cached = this.boundsCache.get(name);
