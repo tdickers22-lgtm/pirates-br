@@ -264,6 +264,14 @@ export const CLIENT_VALIDATORS: {
     return { t: num(p.t) ?? 0 };
   },
   player_input: (raw) => sanitizePlayerInput(raw),
+  // b4.1b (D30): a 16-hex worldHash + an integer WORLD_VERSION, nothing else.
+  world_hash: (raw) => {
+    const p = bag(raw);
+    const worldHash = p ? str(p.worldHash) : null;
+    const version = p ? num(p.version) : null;
+    if (worldHash === null || !/^[0-9a-f]{16}$/.test(worldHash) || version === null || !Number.isInteger(version)) return null;
+    return { worldHash, version };
+  },
   shop_buy: (raw) => {
     const p = bag(raw);
     if (!p) return null;
