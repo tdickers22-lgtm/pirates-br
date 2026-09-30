@@ -1045,10 +1045,51 @@ export interface InputAckPayload {
   t: number;
 }
 
+// ── Static world from the seed (b4.1b, D30, performance-05) ───────────────────
+/** One edit to the static wire: `[path, value]` sets (object key or array
+ *  index), `[path]` deletes (an array index is spliced out). Applied in order. */
+export type StaticWorldDelta = [path: (string | number)[], value?: unknown];
+
+/** The statics as they ride the wire (quantized exactly like buildWireSnapshot). */
+export interface StaticWorldWire {
+  islands: Island[];
+  seaRocks: SeaRock[];
+}
+
+/** Rides the 'join' payload (as `world`) for a client that declared this
+ *  build's WORLD_VERSION. The snapshot then carries NO islands/seaRocks: the
+ *  client runs generateStaticWorld(seed, version), wires it with
+ *  staticWorldWire(), applies `deltas` (statics destroyed/moved/changed since
+ *  the match began) and reports hashStaticWorld(world).worldHash. */
+export interface StaticWorldRef {
+  seed: number;
+  version: number;
+  worldHash: string;
+  deltas: StaticWorldDelta[];
+}
+
+export interface WorldHashReportPayload {
+  worldHash: string;
+  version: number;
+}
+
+export interface WorldSyncPayload extends StaticWorldWire {
+  reason: 'mismatch' | 'timeout';
+  seed: number;
+  version: number;
+  worldHash: string;
+}
+
 // ── Network messages ─────────────────────────────────────────
 type MsgType =
   // game-scoped messages (within a match)
   | 'join'
+  /** b4.1b (D30): client -> server {worldHash, version} after regenerating the
+   *  static world from the join's seed; see WorldHashReportPayload. */
+  | 'world_hash'
+  /** b4.1b (D30): server -> client full static world, the fallback when her
+   *  worldHash disagrees or never arrives; see WorldSyncPayload. */
+  | 'world_sync'
   | 'state_snapshot'
   | 'state_hot'
   /** PRED-01: per-client input receipt; see InputAckPayload. */
@@ -1572,6 +1613,7 @@ export type ClientMsgType =
   | 'player_input'
   | 'shop_buy'
   | 'trade_action'
+  | 'world_hash'
   | 'dev_bot_peace'
   | 'dev_grant_gold'
   | 'dev_scuttle';
@@ -1605,6 +1647,7 @@ export interface ClientMsgPayloads {
   play_again: EmptyMsgPayload;
   resume: { token: string; protocolVersion: number | null };
   ping: { t: number };
+  world_hash: WorldHashReportPayload;
   player_input: PlayerInput;
   shop_buy: { line: string };
   trade_action: TradeActionPayload;

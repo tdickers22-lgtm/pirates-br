@@ -326,12 +326,20 @@ function canonicalizeIds(root: Record<string, unknown>): void {
  *  Mirrors Match.setupWorld's draw order exactly (islands, spawns, wildlife,
  *  sea POIs + their loot, sea rocks). */
 export function generateStaticWorld(seed: number, version: number = WORLD_VERSION): StaticWorld {
+  return generateStaticWorldWith(new MapGenerator(seed >>> 0), version);
+}
+
+/** generateStaticWorld on a caller-owned generator (b4.1b): Match keeps drawing
+ *  bot names, hulls and wreck loot from the SAME MapGenerator stream after the
+ *  world, so it must run the world draws on that instance, not a fresh one.
+ *  `gen` must be fresh (no draws taken yet). */
+export function generateStaticWorldWith(gen: MapGenerator, version: number = WORLD_VERSION): StaticWorld {
   if (version !== WORLD_VERSION) {
     throw new Error(`generateStaticWorld: world version ${version} is not this build's ${WORLD_VERSION}`);
   }
-  const s = seed >>> 0;
+  // eslint-disable-next-line dot-notation -- the seed is the generator's own, deliberately private
+  const s = gen['seed'] >>> 0;
   return withDeterministicMath(() => {
-    const gen = new MapGenerator(s);
     const islands = gen.generateIslands();
     const spawns = gen.generateShipSpawns(islands);
     const wildlife = gen.generateWildlife(islands);

@@ -25,6 +25,8 @@ import { Match } from '../src/server/core/Match.ts';
 import { buildHotSnapshot, buildWireSnapshot } from '../src/server/core/snapshot.ts';
 import * as Lobby from '../src/server/core/LobbyServer.ts';
 import { FULL_SNAPSHOT_TICKS, SERVER_TICK_MS, SNAPSHOT_RATE } from '../src/shared/constants/index.ts';
+import * as Snapshot from '../src/server/core/snapshot.ts';
+import * as StaticWorld from '../src/shared/staticWorld.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -114,16 +116,17 @@ const JOIN_CAP = SNAPSHOT_BYTES.joinCompressed;      // compressed join message
 /** @param {{label:string, botCount:number, mode?:string, crews:number, crewSize:number}} cfg */
 async function measure(cfg) {
   const m = new Match({ matchId: `wire-${cfg.label}`, botCount: cfg.botCount, mode: cfg.mode });
+  // b4.1b (D30): every member is a seed-capable client, and the join measured
+  // is the REAL frame the match wrote to her socket, not a re-serialisation.
   let joinMessage = null;
   for (let c = 0; c < cfg.crews; c++) {
-    const members = Array.from({ length: cfg.crewSize }, (_, i) => ({ ws: fakeWs(), name: `H${c}_${i}` }));
+    const members = Array.from({ length: cfg.crewSize }, (_, i) => {
+      const frames = [];
+      return { ws: { readyState: 1, bufferedAmount: 0, send(d) { frames.push(d); } }, frames, name: `H${c}_${i}`, worldVersion: StaticWorld.WORLD_VERSION };
+    });
     const crew = m.createCrew(members);
-    for (const join of crew.joins) {
-      const { playerId, shipId, snapshot } = join.send();
-      if (!joinMessage) {
-        joinMessage = JSON.stringify({ type: 'join', ts: Date.now(), payload: { playerId, shipId, snapshot, matchId: m.id } });
-      }
-    }
+    crew.joins.forEach((join) => join.send());
+    if (!joinMessage) joinMessage = members[0].frames.find((d) => d.startsWith('{"type":"join"')) ?? null;
   }
   // Let the sim run so hulls are moving and the wire is at its real width.
   for (let i = 0; i < 250; i++) m.tick(1 / 62.5);
@@ -231,6 +234,98 @@ expect('closed with 1013 Try Again Later, not a kick', closes[0]?.code === 1013,
   `code=${closes[0]?.code}`);
 jamMatch.stop();
 
+// ------------------------------------------------ static world from the seed
+// b4.1b (D30). A seed-capable client (worldVersion === WORLD_VERSION) is handed
+// {seed, version, worldHash, deltas} instead of the islands; she regenerates the
+// world, applies the deltas and must land on the server's CURRENT static wire
+// byte for byte. Her worldHash report settles it: a match is silence, a
+// mismatch is a 'world_sync' carrying the full current statics.
+console.log('\nStatic world from the seed (b4.1b):');
+{
+  const m = new Match({ matchId: 'seed-join', botCount: 9, mode: 'solo' });
+  const recorder = (name, worldVersion) => {
+    const frames = [];
+    return { frames, member: { ws: { readyState: 1, bufferedAmount: 0, send(d) { frames.push(d); } }, name, worldVersion } };
+  };
+  const frameOf = (frames, type) => frames.map((d) => JSON.parse(d)).find((f) => f.type === type) ?? null;
+  const wireNow = () => StaticWorld.canonicalJson(Snapshot.staticWorldWireOf(m.state.islands, m.state.seaRocks));
+  const rebuild = (world) => {
+    const base = Snapshot.staticWorldWire(StaticWorld.generateStaticWorld(world.seed, world.version));
+    Snapshot.applyStaticWorldDeltas(base, world.deltas);
+    return StaticWorld.canonicalJson(base);
+  };
+
+  const a = recorder('Seedy', StaticWorld.WORLD_VERSION);
+  const aJoin = m.createCrew([a.member]).joins[0];
+  aJoin.send();
+  const join = frameOf(a.frames, 'join');
+  const world = join?.payload?.world;
+  expect('the join names the world: seed + WORLD_VERSION + worldHash + deltas',
+    !!world && Number.isInteger(world.seed) && world.version === StaticWorld.WORLD_VERSION
+      && typeof world.worldHash === 'string' && Array.isArray(world.deltas), JSON.stringify(world)?.slice(0, 200));
+  expect('the join does NOT carry the statics', join?.payload?.snapshot?.islands?.length === 0
+    && join?.payload?.snapshot?.seaRocks?.length === 0, `islands=${join?.payload?.snapshot?.islands?.length}`);
+  const regenerated = world ? StaticWorld.generateStaticWorld(world.seed, world.version) : null;
+  expect('the server\'s worldHash is the regenerated world\'s', !!regenerated
+    && StaticWorld.hashStaticWorld(regenerated).worldHash === world.worldHash, world?.worldHash);
+  expect('the server plays the world it advertises (live islands == regenerated, by id)', !!regenerated
+    && m.state.islands.map((i) => i.id).join() === regenerated.islands.map((i) => i.id).join()
+    && m.state.islands.every((isl, i) => (isl.props?.length ?? 0) === (regenerated.islands[i].props?.length ?? 0)));
+  expect('seed + deltas rebuild the server\'s static wire byte for byte (fresh match)',
+    !!world && rebuild(world) === wireNow(), `${world?.deltas?.length} deltas`);
+
+  // Destroyed + moved statics: the NEXT join must carry them as deltas.
+  const isl = m.state.islands.find((i) => (i.barrels?.length ?? 0) > 1 && (i.chests?.length ?? 0) > 0);
+  isl.barrels.splice(0, 1);
+  isl.chests[0].opened = true;
+  isl.chests[0].position = { ...isl.chests[0].position, x: isl.chests[0].position.x + 3.25 };
+  m.state.seaRocks.pop();
+  const b = recorder('Late', StaticWorld.WORLD_VERSION);
+  m.createCrew([b.member]).joins[0].send();
+  const bWorld = frameOf(b.frames, 'join')?.payload?.world;
+  expect('destroyed/moved statics ride the join as deltas', (bWorld?.deltas?.length ?? 0) > 0, `${bWorld?.deltas?.length}`);
+  expect('seed + deltas rebuild the server\'s static wire byte for byte (after play)',
+    !!bWorld && rebuild(bWorld) === wireNow());
+  const deltaBytes = Buffer.byteLength(JSON.stringify(bWorld?.deltas ?? []));
+  expect('the deltas stay small (< 8 KB raw for 3 touched statics)', deltaBytes < 8 * 1024, `${deltaBytes} B`);
+
+  // Report: match = silence; forced mismatch = world_sync with the full statics.
+  m.handleClientMessage(aJoin.playerId, { type: 'world_hash', ts: Date.now(), payload: { worldHash: world?.worldHash, version: world?.version } });
+  expect('a matching worldHash gets no world_sync', !frameOf(a.frames, 'world_sync'));
+  const bJoinPid = JSON.parse(b.frames.find((d) => d.startsWith('{"type":"join"'))).payload.playerId;
+  m.handleClientMessage(bJoinPid, { type: 'world_hash', ts: Date.now(), payload: { worldHash: '0000000000000000', version: world?.version } });
+  const sync = frameOf(b.frames, 'world_sync');
+  expect('a mismatched worldHash gets a world_sync', !!sync, b.frames.map((d) => d.slice(0, 24)).join(' | '));
+  expect('world_sync carries the full CURRENT statics', !!sync && sync.payload.islands.length === m.state.islands.length
+    && StaticWorld.canonicalJson({ islands: sync.payload.islands, seaRocks: sync.payload.seaRocks }) === wireNow());
+
+  // A client that never learned the seed protocol still gets today's full join.
+  const c = recorder('Legacy', undefined);
+  m.createCrew([c.member]).joins[0].send();
+  const cJoin = frameOf(c.frames, 'join');
+  expect('a legacy client (no worldVersion) still gets the statics in the join',
+    (cJoin?.payload?.snapshot?.islands?.length ?? 0) === m.state.islands.length && !cJoin?.payload?.world);
+  const d = recorder('Stale', StaticWorld.WORLD_VERSION + 1);
+  m.createCrew([d.member]).joins[0].send();
+  expect('a client on another WORLD_VERSION gets the full statics, not a seed it cannot build',
+    (frameOf(d.frames, 'join')?.payload?.snapshot?.islands?.length ?? 0) === m.state.islands.length);
+
+  // Settled is settled: a second report after the answer pulls nothing more.
+  const syncsBefore = b.frames.filter((f) => f.startsWith('{"type":"world_sync"')).length;
+  m.handleClientMessage(bJoinPid, { type: 'world_hash', ts: Date.now(), payload: { worldHash: 'ffffffffffffffff', version: StaticWorld.WORLD_VERSION } });
+  expect('a repeated world_hash is ignored (no on-demand quarter megabyte)',
+    b.frames.filter((f) => f.startsWith('{"type":"world_sync"')).length === syncsBefore);
+  // A seed client that never reports is posted the statics once her deadline passes.
+  const e = recorder('Silent', StaticWorld.WORLD_VERSION);
+  const eJoin = m.createCrew([e.member]).joins[0];
+  eJoin.send();
+  m.clients.get(eJoin.playerId).worldReportDeadline = Date.now() - 1;
+  for (let i = 0; i < FULL_SNAPSHOT_TICKS * 2 && !frameOf(e.frames, 'world_sync'); i++) m.tick(1 / 62.5);
+  expect('a seed client whose report never comes gets world_sync (timeout)',
+    frameOf(e.frames, 'world_sync')?.payload?.reason === 'timeout');
+  m.stop();
+}
+
 const CONFIGS = [
   { label: '1-human', botCount: 9, mode: 'solo', crews: 1, crewSize: 1 },
   { label: '16-solo', botCount: 0, mode: 'solo', crews: 16, crewSize: 1 },
@@ -246,17 +341,11 @@ for (const cfg of CONFIGS) {
     + ` | join ${(r.joinBytes / 1024).toFixed(1)} KB compressed of ${(r.joinRaw / 1024).toFixed(1)} KB raw`);
   expect(`${cfg.label}: per-client egress under 120 KB/s`, r.perSecond < EGRESS_CAP,
     `${(r.perSecond / 1024).toFixed(1)} KB/s`);
-  // The join cap becomes an assertion in WIRE-01 slice c, when the client
-  // regenerates the fixed world from the seed instead of being posted it. Until
-  // then it is printed loudly: deflate alone takes a quarter megabyte to ~69 KB,
-  // which is still over the 60 KB line.
-  if (r.joinBytes >= JOIN_CAP) {
-    console.log(`     ⚠ join is ${(r.joinBytes / 1024).toFixed(1)} KB compressed, over the 60 KB cap`
-      + ' — the static world is still transmitted (WIRE-01 slice c)');
-  } else {
-    expect(`${cfg.label}: join message under 60 KB compressed`, r.joinBytes < JOIN_CAP,
-      `${(r.joinBytes / 1024).toFixed(1)} KB`);
-  }
+  // HARD since b4.1b (D30, performance-05): the join carries seed +
+  // WORLD_VERSION + deltas, the client regenerates the static world, so the
+  // quarter megabyte of islands never rides it again.
+  expect(`${cfg.label}: join message under ${(JOIN_CAP / 1024).toFixed(0)} KB compressed`,
+    r.joinBytes > 0 && r.joinBytes < JOIN_CAP, `${(r.joinBytes / 1024).toFixed(1)} KB (no join frame = 0)`);
 }
 
 // HEADROOM, said out loud. The static-world payload is the one budget in this

@@ -4,7 +4,10 @@ import type {
   InputAckPayload,
   Island,
   Player,
+  SeaRock,
   Ship,
+  StaticWorldDelta,
+  StaticWorldWire,
   WildlifeAnimal,
 } from '../../shared/types/index.js';
 
@@ -347,4 +350,95 @@ export function buildInputAck(player: Player, seq: number, serverTime: number): 
     state: player.state,
     t: roundTo(serverTime, 3),
   };
+}
+
+// ============================================================
+// STATIC WORLD FROM THE SEED (b4.1b, D30, performance-05)
+// ============================================================
+// The join used to post ~237 KB of islands + sea rocks. A seed-capable client
+// now regenerates them (src/shared/staticWorld.ts) and the join carries only
+// the DIFFERENCE between the pristine generated world and the live one, both
+// in wire form. Client and server run the same three functions below, so the
+// rebuilt wire is byte-identical to what a full join would have delivered.
+
+/** The statics exactly as buildWireSnapshot would put them on the wire, as a
+ *  detached plain-JSON tree (undefined keys dropped, no shared references). */
+export function staticWorldWireOf(islands: Island[], seaRocks: SeaRock[]): StaticWorldWire {
+  return JSON.parse(JSON.stringify({
+    islands: islands.map(quantizeIslandForWire),
+    seaRocks: quantizeDeep(seaRocks, 3),
+  })) as StaticWorldWire;
+}
+
+export function staticWorldWire(world: { islands: Island[]; seaRocks: SeaRock[] }): StaticWorldWire {
+  return staticWorldWireOf(world.islands, world.seaRocks);
+}
+
+type Json = unknown;
+const isObj = (v: Json): v is Record<string, Json> => v !== null && typeof v === 'object';
+const idOf = (v: Json): string | null => (isObj(v) && !Array.isArray(v) && typeof v.id === 'string' ? v.id : null);
+
+function diffInto(a: Json, b: Json, path: (string | number)[], out: StaticWorldDelta[]): void {
+  if (a === b) return;
+  if (!isObj(a) || !isObj(b) || Array.isArray(a) !== Array.isArray(b)) { out.push([path, b]); return; }
+  if (Array.isArray(a) && Array.isArray(b)) {
+    let base: Json[] = a;
+    if (a.length !== b.length) {
+      // Id-keyed lists (chests, barrels, npcs, rocks): a destroyed static is one
+      // splice, not a re-post of the whole list. Anything else (inserts, a
+      // reorder, id-less arrays) re-posts the list.
+      const aIds = a.map(idOf);
+      const bIds = b.map(idOf);
+      if (aIds.some((id) => id === null) || bIds.some((id) => id === null)) { out.push([path, b]); return; }
+      const keep = new Set(bIds as string[]);
+      const removed: number[] = [];
+      aIds.forEach((id, i) => { if (!keep.has(id as string)) removed.push(i); });
+      const kept = a.filter((_, i) => !removed.includes(i));
+      if (kept.length !== b.length || kept.some((v, i) => idOf(v) !== bIds[i])) { out.push([path, b]); return; }
+      for (let r = removed.length - 1; r >= 0; r--) out.push([[...path, removed[r]]]);
+      base = kept;
+    }
+    for (let i = 0; i < b.length; i++) diffInto(base[i], b[i], [...path, i], out);
+    return;
+  }
+  const ao = a as Record<string, Json>;
+  const bo = b as Record<string, Json>;
+  for (const key of Object.keys(ao)) {
+    if (!(key in bo)) out.push([[...path, key]]);
+    else diffInto(ao[key], bo[key], [...path, key], out);
+  }
+  for (const key of Object.keys(bo)) if (!(key in ao)) out.push([[...path, key], bo[key]]);
+}
+
+/** Edits that turn `base` (the pristine generated wire) into `current`. */
+export function diffStaticWorld(base: StaticWorldWire, current: StaticWorldWire): StaticWorldDelta[] {
+  const out: StaticWorldDelta[] = [];
+  diffInto(base, current, [], out);
+  return out;
+}
+
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/** Apply diffStaticWorld's edits in place. Throws on a path that does not
+ *  resolve (the caller then asks for a world_sync instead of guessing). */
+export function applyStaticWorldDeltas(target: StaticWorldWire, deltas: StaticWorldDelta[]): StaticWorldWire {
+  for (const delta of deltas) {
+    const path = delta[0];
+    if (!Array.isArray(path) || path.length === 0) throw new Error('static delta: empty path');
+    let node: Json = target;
+    for (let i = 0; i < path.length - 1; i++) {
+      const key = path[i];
+      if (UNSAFE_KEYS.has(String(key)) || !isObj(node)) throw new Error(`static delta: bad path ${path.join('.')}`);
+      node = (node as Record<string | number, Json>)[key];
+    }
+    const last = path[path.length - 1];
+    if (UNSAFE_KEYS.has(String(last)) || !isObj(node)) throw new Error(`static delta: bad path ${path.join('.')}`);
+    if (delta.length < 2) {
+      if (Array.isArray(node)) node.splice(Number(last), 1);
+      else delete (node as Record<string, Json>)[last as string];
+    } else {
+      (node as Record<string | number, Json>)[last] = delta[1];
+    }
+  }
+  return target;
 }

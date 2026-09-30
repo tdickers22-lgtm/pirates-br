@@ -22,7 +22,9 @@ import { PhysicsSystem, applyShipRudderSteering, stormSeaState, FOUNDER_WADE_DEP
 import { FOUNDER, founderPlan, pickRepairTargetHole, takeFounderStages } from '../systems/FloodSystem.js';
 import { holeRepairTime } from '../../shared/flooding/floodModel.js';
 import { BAIL_RETURN_DELAY, bailPoseOf, canScoop, throwLanding, type BailPose } from '../../shared/flooding/bail.js';
-import { buildInputAck, buildHotSnapshot, buildWireSnapshot } from './snapshot.js';
+import { buildInputAck, buildHotSnapshot, buildWireSnapshot, diffStaticWorld, staticWorldWire, staticWorldWireOf } from './snapshot.js';
+import { WORLD_VERSION, generateStaticWorldWith, hashStaticWorld } from '../../shared/staticWorld.js';
+import type { StaticWorldRef, StaticWorldWire, WorldHashReportPayload, WorldSyncPayload } from '../../shared/types/index.js';
 import { WeaponSystem } from '../systems/WeaponSystem.js';
 import type { CannonLoadRecord, HitscanTrace } from '../systems/WeaponSystem.js';
 import { StormSystem, STORM_EYE_RESOLUTION_SECONDS } from '../systems/StormSystem.js';
@@ -166,7 +168,16 @@ interface ConnectedClient {
    *  queued behind the backlog, so kill feeds, hits and countdowns arrived
    *  seconds after the state they describe and the server held the buffer. */
   congestedSince: number | null;
+  /** b4.1b (D30): wall-clock deadline for a seed-joined client's worldHash
+   *  report; past it (or on a mismatch) she is sent a 'world_sync'. null/absent
+   *  = nothing owed (full join, or already settled). One answer per join. */
+  worldReportDeadline?: number | null;
 }
+
+/** b4.1b: how long a seed-joined client may take to regenerate the static world
+ *  and report its hash before the server posts it the full statics anyway. The
+ *  phone budget for generation is 1.5 s (b4.1c); this is the "never" line. */
+export const WORLD_REPORT_TIMEOUT_MS = 12_000;
 
 export interface MatchHumanResult {
   playerId: string;
@@ -609,6 +620,10 @@ export class Match {
    *  The islands themselves are already fixed per-entry seeds; this exists so a
    *  perf A/B can measure two builds against a bit-identical match. */
   private mapGen = new MapGenerator(matchSeedFromEnv());
+  /** b4.1b (D30): what a seed-capable join is told instead of being posted the
+   *  statics, and the pristine wire the join deltas are measured against. */
+  private staticWorldRef!: Omit<StaticWorldRef, 'deltas'>;
+  private pristineStaticWire!: StaticWorldWire;
   private readonly joinRng = makeJoinRng();
   /** WIN-01. A crew is a hull's roster (`player.shipId`), or a shipless
    *  pirate's own id — the same key the feed announces and the win check
@@ -1204,16 +1219,19 @@ export class Match {
   }
 
   private setupWorld(botCrews: number, crewSize: number) {
-    const islandList = this.mapGen.generateIslands();
-    const spawns = this.mapGen.generateShipSpawns(islandList);
-    const wildlife = this.mapGen.generateWildlife(islandList);
-    // Uncharted sea micro-POIs: fixed sites in the biggest dead-water voids.
-    // Their barrels are filed on the nearest island (so every loot path works
-    // unchanged) and the lone mast's shoal is seeded into the rock field before
-    // the drifting rocks are drawn, so nothing ever lands on top of it.
-    const seaPois = this.mapGen.generateSeaPois(islandList);
-    this.mapGen.attachSeaPoiLoot(seaPois, islandList);
-    const seaRocks = this.mapGen.generateSeaRocks(islandList, spawns, seaPois);
+    // b4.1b (D30): the static world is generateStaticWorld's, on this match's
+    // own generator (bot names, hulls and wreck loot keep drawing from the same
+    // stream after it). Same draw order as before: islands, spawns, wildlife,
+    // sea POIs + their loot (filed on the nearest island), sea rocks. The client
+    // rebuilds exactly this from the seed, so the join no longer posts it.
+    const world = generateStaticWorldWith(this.mapGen);
+    const islandList = world.islands;
+    const spawns = world.spawns;
+    const wildlife = world.wildlife;
+    const seaPois = world.seaPois;
+    const seaRocks = world.seaRocks;
+    this.staticWorldRef = { seed: world.seed, version: world.version, worldHash: hashStaticWorld(world).worldHash };
+    this.pristineStaticWire = staticWorldWire(world);
 
     const ships: Ship[] = [];
     const players: Player[] = [];
@@ -1706,7 +1724,7 @@ export class Match {
    * The crew record outlives the hull on purpose: two crewmates swimming from a
    * sunk ship are still one crew, and the win check now counts crews.
    */
-  createCrew(members: { ws: WebSocket; name: string }[]): {
+  createCrew(members: { ws: WebSocket; name: string; worldVersion?: number }[]): {
     crewId: string;
     shipId: string;
     joins: {
@@ -1828,7 +1846,7 @@ export class Match {
   /** Register one ConnectedClient per crew member and build their join sends
    *  around ONE wire snapshot (createCrew and the late-join takeover). */
   private registerCrewClients(
-    roster: { ws: WebSocket; name: string }[],
+    roster: { ws: WebSocket; name: string; worldVersion?: number }[],
     players: Player[],
     crewId: string,
     shipId: string,
@@ -1875,15 +1893,31 @@ export class Match {
     // full snapshot: raw buildSnapshot was ~310KB (vs ~214KB quantized) and its
     // unquantized floats disagreed with the quantized stream that followed. It
     // is built ONCE for the whole crew, after every member is in the state.
-    const snapshot = buildWireSnapshot(this.buildSnapshot(true), true);
-    return joins.map(({ player, client }) => ({
+    // b4.1b (D30): a member on this build's WORLD_VERSION gets the seed + the
+    // deltas instead of the statics (join <= 20 KB compressed); anyone else
+    // (older client, other world version) still gets today's full join.
+    let fullSnapshot: GameState | null = null;
+    let seedJoin: { snapshot: GameState; world: StaticWorldRef } | null = null;
+    return joins.map(({ player, client }, index) => ({
         playerId: player.id,
         shipId,
         send: () => {
+          const bySeed = roster[index].worldVersion === WORLD_VERSION;
+          if (bySeed && !seedJoin) {
+            seedJoin = {
+              snapshot: buildWireSnapshot(this.buildSnapshot(false), false),
+              world: { ...this.staticWorldRef, deltas: this.staticWorldDeltas() },
+            };
+          }
+          if (!bySeed && !fullSnapshot) fullSnapshot = buildWireSnapshot(this.buildSnapshot(true), true);
+          const snapshot = bySeed ? seedJoin!.snapshot : fullSnapshot!;
+          if (bySeed) client.worldReportDeadline = Date.now() + WORLD_REPORT_TIMEOUT_MS;
           this.send(client.ws, {
             type: 'join',
             ts: Date.now(),
-            payload: { playerId: player.id, shipId, snapshot, matchId: this.id },
+            payload: bySeed
+              ? { playerId: player.id, shipId, snapshot, matchId: this.id, world: seedJoin!.world }
+              : { playerId: player.id, shipId, snapshot, matchId: this.id },
           });
           console.log(`[Match ${this.id}] human joined: ${player.name} (${player.id.slice(0, 6)});`
             + ` crew=${crewId.slice(0, 6)} of ${roster.length}; humans=${this.clients.size}`);
@@ -2277,8 +2311,39 @@ export class Match {
     return ordered;
   }
 
+  /** b4.1b: edits from the pristine generated statics to the live ones
+   *  (destroyed/moved/changed chests, barrels, npcs, rocks, ...). */
+  private staticWorldDeltas() {
+    return diffStaticWorld(this.pristineStaticWire, staticWorldWireOf(this.state.islands, this.state.seaRocks));
+  }
+
+  /** b4.1b: the full-statics fallback for a seed-joined client whose world
+   *  disagrees (or whose report never came). Answered once per join. */
+  private sendWorldSync(client: ConnectedClient, reason: WorldSyncPayload['reason']): void {
+    client.worldReportDeadline = null;
+    client.hasWorld = true;
+    const payload: WorldSyncPayload = {
+      reason,
+      ...this.staticWorldRef,
+      ...staticWorldWireOf(this.state.islands, this.state.seaRocks),
+    };
+    console.warn(`[Match ${this.id}] world_sync (${reason}) to ${client.name}`);
+    this.send(client.ws, { type: 'world_sync', ts: Date.now(), payload });
+  }
+
   private handleMessage(client: ConnectedClient, msg: NetMsg) {
     switch (msg.type) {
+      case 'world_hash': {
+        // One answer per seed join: a stray or repeated report is ignored, so a
+        // client cannot pull the quarter-megabyte statics on demand.
+        if (client.worldReportDeadline == null) break;
+        const report = msg.payload as Partial<WorldHashReportPayload> | null;
+        const agrees = report?.version === this.staticWorldRef.version
+          && report?.worldHash === this.staticWorldRef.worldHash;
+        if (agrees) client.worldReportDeadline = null;
+        else this.sendWorldSync(client, 'mismatch');
+        break;
+      }
       case 'player_input': {
         const input = this.sanitizeInput(msg.payload);
         if (input) client.lastInput = this.carryUnreadOneShots(client, input);
@@ -2439,6 +2504,13 @@ export class Match {
 
   private tick() {
     const dt = SERVER_TICK_MS / 1000;
+
+    // b4.1b: a seed join whose worldHash never came is posted the statics. Runs
+    // in every phase (joins land in the lobby wait and the countdown).
+    const wallNow = Date.now();
+    for (const [, client] of this.clients) {
+      if (client.worldReportDeadline != null && wallNow > client.worldReportDeadline) this.sendWorldSync(client, 'timeout');
+    }
 
     // Staged start: sim time itself is frozen so the storm clock, playSeconds and
     // the wave clock all begin at the horn, not at match creation. Only start()
