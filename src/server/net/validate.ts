@@ -197,7 +197,11 @@ export const CLIENT_VALIDATORS: {
     if (name === null) return null;
     // b1.2f: the anonymous device id rides set_name. A malformed one is
     // dropped (the player keeps a name-keyed identity), never a refused frame.
-    return isDeviceId(p.deviceId) ? { name, deviceId: p.deviceId } : { name };
+    // b4.1c (D30): the static-world version this client regenerates from a
+    // seed join; anything but a small non-negative integer is dropped.
+    const wv = num(p.worldVersion);
+    const worldVersion = wv !== null && Number.isInteger(wv) && wv >= 0 && wv < 1e6 ? { worldVersion: wv } : {};
+    return isDeviceId(p.deviceId) ? { name, deviceId: p.deviceId, ...worldVersion } : { name, ...worldVersion };
   },
   create_party: (raw) => (bag(raw) ? {} : null),
   join_party: (raw) => {

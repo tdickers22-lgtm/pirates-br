@@ -413,6 +413,8 @@ interface ClientSession {
   /** b1.2f: the anonymous device id sent with set_name (validated shape).
    *  Lifetime stats are keyed by its sha256; never logged or broadcast. */
   deviceId?: string;
+  /** b4.1c (D30): WORLD_VERSION this client regenerates from a seed join (set_name). */
+  worldVersion?: number;
   /** Set when the socket was closed 1008 for staying over its message budget:
    *  no seat is held for it and no further frame is routed. */
   closedForAbuse?: boolean;
@@ -958,6 +960,7 @@ export class LobbyServer {
     // The stats key rides the seat: without it a resumed player's next match
     // lands on the name-keyed record and splits his lifetime stats.
     session.deviceId = parked.deviceId;
+    session.worldVersion = parked.worldVersion;
     session.state = parked.state;
     session.partyCode = parked.partyCode;
     session.matchId = parked.matchId;
@@ -1030,6 +1033,7 @@ export class LobbyServer {
         : `That name is not allowed. You sail as ${name}.`);
     }
     session.name = name;
+    session.worldVersion = msg.payload.worldVersion;
     // b1.2f (online-07): stats follow the anonymous device, not the name.
     // set_name never creates a record and never writes the file.
     // validate.ts adds `deviceId` only when its shape is valid; re-checked
@@ -1979,7 +1983,7 @@ export class LobbyServer {
     // The client still needs match_start BEFORE the join snapshot — it resets
     // local round state on match_start, which would otherwise wipe
     // localPlayerId and unanchor the camera/input.
-    const pending = prebuilt ?? match.createCrew(crew.map((session) => ({ ws: session.ws, name: session.name })));
+    const pending = prebuilt ?? match.createCrew(crew.map((session) => ({ ws: session.ws, name: session.name, worldVersion: session.worldVersion })));
     const lateJoin = prebuilt ? { stormPhase: prebuilt.stormPhase, sinceHornSec: Math.round(prebuilt.sinceHornSec) } : null;
     crew.forEach((session, index) => {
       const join = pending.joins[index];
