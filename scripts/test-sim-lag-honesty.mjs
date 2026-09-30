@@ -101,7 +101,17 @@ async function main() {
   console.log(`sim-lag honesty — ${describeGl()}`);
   console.log(`  client ${ROOT_URL}${SERVER_PORT ? `  server :${SERVER_PORT}` : ''}  throttle ${THROTTLE}x + ${STALL_MS}ms/frame burn for ${SECONDS}s`);
 
-  const before = await readHealth();
+  // THIS RUN'S MATCH ONLY. /health sums droppedTicks over every live match, and
+  // the lobby holds a departed client's seat for 60 s, so the previous suite's
+  // match (the one a loaded host was making drop ticks) is still live, and
+  // still counting, through most of this window. Wait for it to end first.
+  let before = await readHealth();
+  for (let i = 0; i < 45 && (before?.sims?.length ?? 0) > 0; i++) {
+    if (i === 0) console.log(`  waiting for ${before.sims.length} earlier match(es) to end so only this run's ticks are counted`);
+    await new Promise((r) => setTimeout(r, 2_000));
+    before = await readHealth();
+  }
+  if (before?.sims?.length) console.log(`  ${before.sims.length} earlier match(es) still live after 90 s; their ticks count against this run`);
   if (!before) {
     console.log(`FAIL — no /health at ${HEALTH_URL}; without the server's own numbers this gate cannot tell a lie from a fact`);
     process.exitCode = 1;
@@ -111,6 +121,10 @@ async function main() {
   const browser = await chromium.launch({ headless: true, args: browserArgs(['--mute-audio']) });
   const failures = [];
   let seen = { chipEverShown: false, worstLabel: null, samples: 0, worstFrameMs: 0 };
+  // Read while this run's own match is certainly alive (the page is still
+  // connected): a match whose last client left can leave the server's sum
+  // before a post-close read, and its dropped ticks would vanish with it.
+  let after = null;
   try {
     const page = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: 1 });
     page.on('pageerror', (e) => console.error(`  [pageerror] ${e.message.slice(0, 160)}`));
@@ -183,14 +197,22 @@ async function main() {
       cancelAnimationFrame(w.raf);
       return { chipEverShown: w.chipEverShown, worstLabel: w.worstLabel, samples: w.samples, worstFrameMs: w.worstFrameMs };
     });
+    after = await readHealth();
     await page.close();
   } finally {
     await browser.close();
   }
 
-  const after = await readHealth();
   const worstSim = after?.worstSimLagSec ?? null;
-  const dropped = (after?.droppedTicks ?? 0) - (before?.droppedTicks ?? 0);
+  // /health SUMS droppedTicks over the live matches. A NEGATIVE delta is not a
+  // count of anything: a match that was live at the first read (the previous
+  // suite's, which a loaded host made drop ticks) has ended and left the sum.
+  // Then the only honest figure is an upper bound: every tick any match still
+  // live at the second read (this run's included) has ever dropped. 0 there
+  // proves the window clean; anything else fails as before.
+  const delta = (after?.droppedTicks ?? 0) - (before?.droppedTicks ?? 0);
+  const dropped = delta >= 0 ? delta : (after?.droppedTicks ?? 0);
+  if (delta < 0) console.log(`  server: a match ended during the run (sum ${before?.droppedTicks} -> ${after?.droppedTicks}); grading the live matches' own total`);
   console.log(`  frames in the window ${seen.samples}, longest ${seen.worstFrameMs.toFixed(0)}ms`);
   console.log(`  server: worstSimLagSec ${worstSim === null ? '--' : worstSim.toFixed(3)}s, droppedTicks +${dropped}`);
   console.log(`  chip: ${seen.chipEverShown ? `SHOWN — "${seen.worstLabel}"` : 'never shown'}`);
