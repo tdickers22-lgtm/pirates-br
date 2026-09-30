@@ -141,8 +141,13 @@ html[data-input-scheme="touch"] canvas { touch-action: none; }
 
 /* Utility row (b1.4d), top left inside the safe area, clear of the right
    thumb arc and the helm slider: Satchel (supply wheel toggle), Scope
-   (spyglass toggle), Keg (hold, release to place), Special (tap), Crews
-   (hold: scoreboard, b3.5f). */
+   (spyglass toggle), Keg (hold, release to place), Special (tap). Crews
+   (hold: scoreboard, b3.5f) is the fifth button on an iPad only. On a phone a
+   fifth row button ran to x 328 and sat on the centred compass and storm timer
+   (667x375, 844x390), and a second row under Satchel sat on the gold and ship
+   panels, so a phone puts Crews top right under the player count, 9 px left of
+   the minimap (right 121 = minimap 12 + 100 + 9), where the HUD is empty at
+   every phone size (test-responsive-hud, b3 gate). */
 .tc-satchel, .tc-spyglass, .tc-keg, .tc-special, .tc-crews {
   top: calc(12px + env(safe-area-inset-top)); font-size: 11px;
   left: calc(var(--tc-ux) + env(safe-area-inset-left));
@@ -151,7 +156,7 @@ html[data-input-scheme="touch"] canvas { touch-action: none; }
 .tc-spyglass { --tc-ux: 80px; }
 .tc-keg { --tc-ux: 144px; }
 .tc-special { --tc-ux: 208px; }
-.tc-crews { --tc-ux: 272px; }
+.tc-crews { --tc-ux: 272px; left: auto; right: calc(121px + env(safe-area-inset-right)); top: calc(76px + env(safe-area-inset-top)); }
 
 html[data-input-scheme="touch"] #interact-prompt { touch-action: none; -webkit-user-select: none; user-select: none; }
 html[data-input-scheme="touch"] #interact-prompt.pressed { border-color: #c9a84c; }
@@ -188,7 +193,7 @@ html[data-input-scheme="touch"] #pocket-wheel.visible #pocket-wheel-svg { pointe
   .tc-spyglass { --tc-ux: 84px; }
   .tc-keg { --tc-ux: 152px; }
   .tc-special { --tc-ux: 220px; }
-  .tc-crews { --tc-ux: 288px; }
+  .tc-crews { --tc-ux: 288px; left: calc(var(--tc-ux) + env(safe-area-inset-left)); right: auto; top: calc(12px + env(safe-area-inset-top)); }
 }
 
 /* Settings > Controls (b1.4g). Button size 80-140% rides the CSS scale property
@@ -204,7 +209,13 @@ html[data-input-scheme="touch"] #pocket-wheel.visible #pocket-wheel-svg { pointe
    flipped frame a right: offset lands on the visual left, so it stays top-left
    in both layouts, on the visual left safe-area inset. */
 #touch-controls.tc-lefty .tc-satchel, #touch-controls.tc-lefty .tc-spyglass,
-#touch-controls.tc-lefty .tc-keg, #touch-controls.tc-lefty .tc-special,
-#touch-controls.tc-lefty .tc-crews {
+#touch-controls.tc-lefty .tc-keg, #touch-controls.tc-lefty .tc-special {
   left: auto; right: calc(var(--tc-ux) + env(safe-area-inset-left));
+}
+/* Crews stays where the HUD left room for it in both layouts: in the flipped
+   frame a left: offset lands on the visual right (phone, by the minimap), and
+   on an iPad it rejoins the row like the four above. */
+#touch-controls.tc-lefty .tc-crews { right: auto; left: calc(121px + env(safe-area-inset-right)); }
+@media (min-width: 900px) and (min-height: 700px) {
+  #touch-controls.tc-lefty .tc-crews { left: auto; right: calc(var(--tc-ux) + env(safe-area-inset-left)); }
 }

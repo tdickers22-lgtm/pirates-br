@@ -154,6 +154,7 @@ function gradeHud(tag, m, { touch, w, h }) {
   // A page wider than the glass makes a phone zoom OUT (the layout viewport
   // grows): measured at HEAD, 667x375 laid out at 1024x576 and every widget
   // shrank by a third. Graded first; the rest is meaningless without it.
+  if (process.env.PBR_HUD_DUMP) console.log(`  DUMP ${tag} ${JSON.stringify({ widgets: m.widgets.map((x) => [x.name, ...['x0', 'y0', 'x1', 'y1'].map((k) => Math.round(x.vis[k]))]), touch: m.touch.map((x) => [x.name, ...['x0', 'y0', 'x1', 'y1'].map((k) => Math.round(x.vis[k]))]) })}`);
   expect(`${tag}: layout viewport is the device viewport (no zoom-out)`, m.W === w && m.H === h, `${m.W}x${m.H}`);
   const overlaps = [];
   for (let i = 0; i < m.widgets.length; i++) for (let j = i + 1; j < m.widgets.length; j++) {

@@ -433,15 +433,29 @@ if (TCL) {
   // touch at the phone (56 px) or iPad (60 px) size.
   const tcSrc = (await import('node:fs')).readFileSync(new URL('../src/client/input/TouchControls.ts', import.meta.url), 'utf8');
   expect('Crews has no inline left (styled by the utility row CSS)', !/tc-crews[\s\S]{0,400}style\.left\s*=/.test(tcSrc));
-  expect('leftHanded: Crews follows the utility-row override', /#touch-controls\.tc-lefty \.tc-crews[^{]*\{[^}]*left:\s*auto/.test(css) || /\.tc-special,\s*#touch-controls\.tc-lefty \.tc-crews/.test(css));
+  // b3 gate: Crews is the fifth row button on an iPad only. On a phone it sits
+  // top right under the player count, left of the minimap (a fifth row button
+  // covered the compass + storm timer and a second row covered the gold and
+  // ship panels: test-responsive-hud 667x375 / 844x390). Lefty keeps both.
   const ipadAt = css.indexOf('@media (min-width: 900px) and (min-height: 700px)');
+  const phoneCss = css.slice(0, ipadAt);
+  const ipadCss = css.slice(ipadAt, ipadAt + 1800);
+  expect('phone: Crews sits top right, 121 px from the right edge (left of the minimap), under the top bar',
+    /\.tc-crews\s*\{[^}]*left:\s*auto;[^}]*right:\s*calc\(121px \+ env\(safe-area-inset-right\)\);[^}]*top:\s*calc\(76px/.test(phoneCss));
+  expect('leftHanded phone: Crews keeps the visual top-right spot (mirrored left: offset)',
+    /#touch-controls\.tc-lefty \.tc-crews\s*\{\s*right:\s*auto;\s*left:\s*calc\(121px/.test(css));
+  expect('leftHanded iPad: Crews rejoins the row override',
+    /@media \(min-width: 900px\) and \(min-height: 700px\)\s*\{\s*#touch-controls\.tc-lefty \.tc-crews\s*\{\s*left:\s*auto;\s*right:\s*calc\(var\(--tc-ux\)/.test(css));
   const uxOf = (block, cls) => { const m = block.match(new RegExp(`\\.${cls}\\s*\\{\\s*--tc-ux:\\s*(\\d+)px`)); return m ? Number(m[1]) : null; };
-  const row = ['tc-satchel', 'tc-spyglass', 'tc-keg', 'tc-special', 'tc-crews'];
-  for (const [label, size, block, fallback] of [['phone', 56, css.slice(0, ipadAt), null], ['iPad', 60, css.slice(ipadAt, ipadAt + 1600), css.slice(0, ipadAt)]]) {
+  for (const [label, size, block, fallback, row] of [
+    ['phone', 56, phoneCss, null, ['tc-satchel', 'tc-spyglass', 'tc-keg', 'tc-special']],
+    ['iPad', 60, ipadCss, phoneCss, ['tc-satchel', 'tc-spyglass', 'tc-keg', 'tc-special', 'tc-crews']],
+  ]) {
     const xs = row.map((c) => uxOf(block, c) ?? (fallback ? uxOf(fallback, c) : null));
     const gaps = xs.slice(1).map((x, i) => (x == null || xs[i] == null ? -Infinity : x - xs[i] - size));
-    expect(`${label}: utility row buttons (incl. Crews) keep >= 4 px apart (${xs.join(',')}; gaps ${gaps.join(',')})`, gaps.every((g) => g >= 4));
+    expect(`${label}: utility row buttons keep >= 4 px apart (${row.length} buttons: ${xs.join(',')}; gaps ${gaps.join(',')})`, gaps.every((g) => g >= 4));
   }
+  expect('iPad: Crews rides the row (left from --tc-ux, top 12)', /\.tc-crews\s*\{\s*--tc-ux:\s*288px;\s*left:\s*calc\(var\(--tc-ux\)[^}]*top:\s*calc\(12px/.test(ipadCss));
 }
 if (WG) {
   // A chart model with MapRenderer's rules: focus = world at the canvas centre,
