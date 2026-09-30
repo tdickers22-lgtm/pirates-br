@@ -162,8 +162,8 @@ export function runMatchWorker(init: WorkerInit): void {
       }),
     };
   };
-  const members = (list: { sid: number; name: string }[]) =>
-    list.map((m) => ({ ws: socketFor(m.sid) as unknown as WebSocket, name: m.name }));
+  const members = (list: { sid: number; name: string; worldVersion?: number }[]) =>
+    list.map((m) => ({ ws: socketFor(m.sid) as unknown as WebSocket, name: m.name, worldVersion: m.worldVersion }));
 
   // Test-only stepped clock: the determinism gate preloads the same clock on
   // both sides (globalThis.__pbrClockStep) so the ts fields line up.
@@ -182,7 +182,7 @@ export function runMatchWorker(init: WorkerInit): void {
     }
     if (!m) throw new Error(`no match ${matchId} in this worker`);
     switch (method) {
-      case 'createCrew': return wrapJoins(m.createCrew(members(args[0] as { sid: number; name: string }[])));
+      case 'createCrew': return wrapJoins(m.createCrew(members(args[0] as { sid: number; name: string; worldVersion?: number }[])));
       case 'takeOverBotHull': return wrapJoins(m.takeOverBotHull(members(args[0] as { sid: number; name: string }[])));
       case 'resumeClient': return m.resumeClient(args[0] as string, socketFor(args[1] as number) as unknown as WebSocket);
       case 'interrupt': return m.interrupt();

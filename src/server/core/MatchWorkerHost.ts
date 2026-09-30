@@ -202,8 +202,8 @@ export class MatchProxy implements MatchHandle {
   resumeClient(playerId: string, ws: WebSocket): { playerId: string; shipId: string; snapshot: GameState } | null {
     return this.call('resumeClient', playerId, this.sidOf(ws));
   }
-  createCrew(members: { ws: WebSocket; name: string }[]): ReturnType<Match['createCrew']> {
-    return this.withJoinSends(this.call('createCrew', members.map((m) => ({ sid: this.sidOf(m.ws), name: m.name }))));
+  createCrew(members: { ws: WebSocket; name: string; worldVersion?: number }[]): ReturnType<Match['createCrew']> {
+    return this.withJoinSends(this.call('createCrew', members.map((m) => ({ sid: this.sidOf(m.ws), name: m.name, worldVersion: m.worldVersion }))));
   }
   takeOverBotHull(members: { ws: WebSocket; name: string }[]): ReturnType<Match['takeOverBotHull']> {
     return this.withJoinSends(this.call('takeOverBotHull', members.map((m) => ({ sid: this.sidOf(m.ws), name: m.name }))));
