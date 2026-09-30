@@ -144,7 +144,11 @@ export function buildChestMeshes(ctx: IslandBuildCtx) {
 
       const sparkle = makeDigSparkle(host.getSoftParticleTexture());
       sparkle.position.y = surfaceY - chest.position.y;
-      sparkle.frustumCulled = false;
+      // Frustum-culled like the mound it rides (b3-device-05): with culling off,
+      // every buried chest inside the loot radius cost a draw at every view, the
+      // ones behind the camera included (26-27 draws at each phone view). The
+      // bounds are padded by the mote size in makeDigSparkle, so a mote at the
+      // screen edge is never clipped early.
       mound.add(sparkle);
       // Handed to syncChests so the motes twinkle and turn without a per-frame
       // scene-graph search.
@@ -371,6 +375,10 @@ export function makeDigSparkle(softParticle: THREE.Texture): THREE.Points {
     motes[i * 3 + 2] = Math.sin(a) * (0.35 + 0.5 * ((i * 29) % 6) / 6);
   }
   moteGeo.setAttribute('position', new THREE.BufferAttribute(motes, 3));
+  // Point sprites draw past their vertex positions by half their size, so the
+  // cull sphere is the motes' own sphere grown by one full mote.
+  moteGeo.computeBoundingSphere();
+  moteGeo.boundingSphere!.radius += 0.46;
   const sparkle = new THREE.Points(
     moteGeo,
     new THREE.PointsMaterial({

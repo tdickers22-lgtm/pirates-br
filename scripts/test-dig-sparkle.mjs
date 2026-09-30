@@ -69,6 +69,23 @@ if (!overrides.has(entityRel)) {
 }
 
 // ── 2. EntityMeshes passes the shared sprite ─────────────────────────────
+// b3-device-05: the tell is frustum-culled like the mound it rides. With culling
+// off every buried chest inside the loot radius drew its motes at every view,
+// behind the camera included (26-27 draws at each phone view), and the cull
+// sphere must hold a whole mote past the positions or an edge mote pops early.
+if (sparkle) {
+  const g = sparkle.geometry;
+  const pos = g.getAttribute('position');
+  let far = 0;
+  const c = g.boundingSphere?.center ?? new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) far = Math.max(far, c.distanceTo(new THREE.Vector3().fromBufferAttribute(pos, i)));
+  const size = sparkle.material?.size ?? 0;
+  expect(`cull sphere covers every mote plus one mote size (${g.boundingSphere?.radius?.toFixed(2)} >= ${(far + size).toFixed(2)})`,
+    !!g.boundingSphere && g.boundingSphere.radius >= far + size - 1e-6);
+}
+expect('EntityMeshes never turns frustum culling off on the dig sparkle',
+  !/sparkle\.frustumCulled\s*=\s*false/.test(entitySrc) && sparkle?.frustumCulled !== false);
+
 expect('EntityMeshes builds the sparkle from host.getSoftParticleTexture()',
   /makeDigSparkle\(\s*host\.getSoftParticleTexture\(\)\s*\)/.test(entitySrc));
 
