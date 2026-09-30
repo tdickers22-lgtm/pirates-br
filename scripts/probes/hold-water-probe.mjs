@@ -249,9 +249,32 @@ async function main() {
 
     // b2.3f (holes-07): underwater in the hold. Control first (dry hold, same
     // eye), then the flooded hold at noon; the program count must not move.
+    // STAGE_UNDER returns the water state the LAST rendered frame computed, so
+    // a read is only about the staged eye once frames have rendered after it.
+    // Wall-clock waits were not enough at single-digit SwiftShader fps under
+    // host load (the flooded read came back 'dry' from a pre-flood frame), so
+    // every read waits for real renders. The dry control also waits until the
+    // program count holds still over consecutive reads, so an unrelated lazy
+    // compile (a streamed LOD or story prop) is not billed to the flood.
+    const renders = () => page.evaluate(() => window.__piratesBR.renderer.renderer.info.render.frame);
+    const stageAfterRenders = async (arg, n = 3) => {
+      await page.evaluate(STAGE_UNDER, arg);
+      const f0 = await renders();
+      await page.waitForFunction((f) => window.__piratesBR.renderer.renderer.info.render.frame >= f, f0 + n, { timeout: 60_000, polling: 50 });
+      return page.evaluate(STAGE_UNDER, arg);
+    };
     let dry = null; let under = null;
     for (let k = 0; k < 6; k += 1) { dry = await page.evaluate(STAGE_UNDER, { fill: 0, tod: 854 }); await page.waitForTimeout(150); }
+    for (let k = 0, stable = 0; k < 12 && stable < 2; k += 1) {
+      const prev = dry?.programs;
+      dry = await stageAfterRenders({ fill: 0, tod: 854 });
+      stable = dry?.programs === prev ? stable + 1 : 0;
+    }
     for (let k = 0; k < 8; k += 1) { under = await page.evaluate(STAGE_UNDER, { fill: 0.9, tod: 854 }); await page.waitForTimeout(150); }
+    under = await stageAfterRenders({ fill: 0.9, tod: 854 });
+    if (under?.programs > dry?.programs) {
+      console.log(`  new programs after the flood: ${JSON.stringify(await page.evaluate((n) => window.__piratesBR.renderer.renderer.info.programs.slice(n).map((p) => p.name), dry.programs))}`);
+    }
     await page.screenshot({ path: `${OUT}/under-hold.png`, timeout: 60_000 });
     const underShot = classify(readPng(readFileSync(`${OUT}/under-hold.png`)));
     console.log(`  under-hold: ${JSON.stringify({ dry: dry?.ws, under: under?.ws, muffle: under?.muffle, fog: under?.fogDensity, dryFog: dry?.fogDensity, fogColor: under?.fogColor, programs: [dry?.programs, under?.programs], lum: underShot.meanLum })}`);
