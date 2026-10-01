@@ -230,6 +230,11 @@ export const LOGIC = [
   // C1, analytic normals, no folds, walk taper at 200 z, transom rake kept,
   // girth-smoothness ratchet (< 5 deg bar is b4.2b2). ~0.8 s.
   quick(tsx('test-hull-spline-parity.mjs')),
+  // b4.2d / ships-01, ships-11, vm:ships:4: the D26 ship LOD table under node
+  // (canvas stub): policy bands + 10% hysteresis, spline shell per tier on the
+  // surface within 1 cm, LOD0/LOD1/LOD2/far tris + draws, low 60k and phone
+  // 45k own-hull caps, LOD0 draw ratchet. ~1.5 s.
+  quick(tsx('test-ship-lod-budget.mjs')),
   // PHYS-02 / physics-02: grounding sampled the KEEL LINE, so a hull laid
   // beam-on to a cliff sailed her whole broadside into the rock and the server
   // called it clear water. 30,240 placements round all 14 islands; ~4 s, so
