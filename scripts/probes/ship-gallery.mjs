@@ -180,8 +180,13 @@ try {
     const g = window.__piratesBR; g.setDayNightOverride?.(854); g.setWeatherOverride?.(0); g.setBotPeace?.(true);
     const sr = g.shipRenderer; const orig = sr.update.bind(sr);
     window.__audit = { type: null };
-    sr.update = (ships, ...rest) => {
-      const a = window.__audit; a.calls = (a.calls ?? 0) + 1; if (!a.type) return orig(ships, ...rest);
+    sr.update = (ships, players, t, dt, ...rest) => {
+      const a = window.__audit; a.calls = (a.calls ?? 0) + 1; if (!a.type) return orig(ships, players, t, dt, ...rest);
+      // Paired shots (b4.2e): while a.freeze is set the audit hull keeps one pose and one wave clock, so the
+      // ID pass masks the hull the beauty frame drew (it used to bob between the two screenshots and the
+      // stern view counted water as hull: sloop 185.9 on 2.4k px).
+      if (a.freeze) { if (a.frozenT == null) a.frozenT = t; t = a.frozenT; dt = 1e-6; if (a.frozenFake) return orig(ships.filter((s) => s.id !== a.frozenOwn).concat([a.frozenFake]), players, t, dt, ...rest); }
+      else { a.frozenT = null; a.frozenFake = null; }
       const me = g.state.players.find((p) => p.id === g.localPlayerId);
       const own = ships.find((s) => s.id === me?.shipId) ?? ships[0];
       if (!a.spot) {
@@ -194,7 +199,8 @@ try {
       }
       const fake = { ...own, position: { ...own.position, x: a.spot.x, z: a.spot.z }, id: 'audit-' + a.type, type: a.type, sailHeight: 1, sailAngle: 0,
         holes: a.holes, anchored: true, velocity: { x: 0, y: 0, z: 0 }, hull: 9999, maxHull: 9999, waterLevel: 0 };
-      return orig(ships.filter((s) => s.id !== own.id).concat([fake]), ...rest);
+      if (a.freeze) { a.frozenFake = fake; a.frozenOwn = own.id; }
+      return orig(ships.filter((s) => s.id !== own.id).concat([fake]), players, t, dt, ...rest);
     };
   });
   const H = { sloop: 2.2, brigantine: 2.8, galleon: 3.5 }, L = { sloop: 12, brigantine: 16, galleon: 22 }, W = { sloop: 5, brigantine: 7, galleon: 10 };
@@ -299,10 +305,14 @@ try {
       }, [id, sunSide * w * 0.5]);
       await page.evaluate(() => window.__piratesBR.settleLod?.(2)).catch(() => {});
       const file = `${type}-${name}-${QUALITY}`;
-      const beautyBuf = await page.screenshot({ path: `${OUT}/${file}.png`, timeout: 120_000 });
-      let idBuf;
-      try { await idSwap(id, true); idBuf = await page.screenshot({ path: `${OUT}/${file}.id.png`, timeout: 120_000 }); }
-      finally { await idSwap(id, false); }
+      // Freeze the audit hull's pose for both shots, wait two frames so the frozen pose is the drawn one.
+      await page.evaluate(() => new Promise((res) => { window.__audit.freeze = true; requestAnimationFrame(() => requestAnimationFrame(() => res(true))); }));
+      let beautyBuf, idBuf;
+      try {
+        beautyBuf = await page.screenshot({ path: `${OUT}/${file}.png`, timeout: 120_000 });
+        try { await idSwap(id, true); idBuf = await page.screenshot({ path: `${OUT}/${file}.id.png`, timeout: 120_000 }); }
+        finally { await idSwap(id, false); }
+      } finally { await page.evaluate(() => { window.__audit.freeze = false; }); }
       const m = metrics(readPng(beautyBuf), readPng(idBuf), { bandPx });
       const v = { type, view: name, file: `${file}.png`, ...m };
       report.views.push(v);

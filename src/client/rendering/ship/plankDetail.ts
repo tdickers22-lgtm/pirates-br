@@ -81,6 +81,20 @@ export const OWN_EDGE_Y = 0.19;
 export const OWN_EDGE_HALF = 0.022;
 /** Default env lift (fraction of albedo added as bounce light). */
 export const PLANK_ENV_LIFT = 0.36;
+
+/**
+ * The same env lift for outboard timber that is NOT on the plank shader (wales,
+ * boot-top, the stern castle): radiance += albedo * lift, through the emissive
+ * map so it rides three's own emissivemap chunk (no onBeforeCompile, so it
+ * composes with the strakes' hull-hole discard). Without it the stern castle
+ * read as a black slab at noon (gallery galleon stern hullLuma 37.2 < 45).
+ * Hold timber stays unlifted: the hold is lit by its lanterns.
+ */
+export function applyTimberEnvLift(mat: THREE.MeshStandardMaterial, lift = PLANK_ENV_LIFT): void {
+  mat.emissive.setRGB(1, 1, 1);
+  mat.emissiveMap = mat.map;
+  mat.emissiveIntensity = lift;
+}
 /** Deck boards are fixed-width, laid in X. */
 const DECK_BOARD_WIDTH = 0.22;
 

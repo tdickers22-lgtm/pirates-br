@@ -253,6 +253,36 @@ for (const surface of ['hull', 'deck']) {
     scene.traverse((o) => { if (o.isMesh && o.material && o.material.name === 'ship-hull-shell') shell = o; });
     expect('the detail hull shell carries the strakeUv attribute', Boolean(shell && shell.geometry.attributes.strakeUv),
       'the shader would read (0,0,0): one plank over the whole hull');
+    // b4.2e (stern): outboard timber that is NOT on the plank shader (wales, boot-top, the stern castle)
+    // carries the same env lift through its emissive map, or the stern reads as a black slab at noon
+    // (gallery galleon stern hullLuma 37.2). Hold timber (ship-dark-timber) stays unlifted: the hold is lit by lanterns.
+    const byName = new Map();
+    scene.traverse((o) => { if (o.isMesh && o.material && !Array.isArray(o.material) && !byName.has(o.material.name)) byName.set(o.material.name, o.material); });
+    const lifted = (m) => Boolean(m && m.emissiveMap && m.emissiveMap === m.map && m.emissive.r === 1 && m.emissive.g === 1 && m.emissive.b === 1
+      && Math.abs(m.emissiveIntensity - pd.PLANK_ENV_LIFT) < 1e-6);
+    const strake = byName.get('ship-hull-strake');
+    expect('ship-hull-strake: present and lifted by PLANK_ENV_LIFT through its own map', lifted(strake),
+      strake ? `emissiveMap ${Boolean(strake.emissiveMap)} emissive ${strake.emissive?.getHexString?.()} intensity ${strake.emissiveIntensity}` : 'no mesh with this material');
+    // The stern castle (above the deck, aft of -0.37 L) is drawn by a lifted material, not by darkMat.
+    const prof = getHullProfile('galleon');
+    let castleLifted = 0, castleDark = 0;
+    const v = new THREE.Vector3();
+    scene.traverse((o) => {
+      if (!o.isMesh || !o.geometry?.attributes?.position || Array.isArray(o.material)) return;
+      const kind = lifted(o.material) ? 'lift' : o.material.name === 'ship-dark-timber' ? 'dark' : null;
+      if (!kind) return;
+      o.updateWorldMatrix(true, false);
+      const pos = o.geometry.attributes.position;
+      for (let i = 0; i < pos.count; i++) {
+        v.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld);
+        // The transom panel and the castle's after face: aft of -0.47 L, from 0.35 H (above the rudder head) to the castle top.
+        if (v.z < -prof.L * 0.47 && v.y > prof.H * 0.35 && v.y < prof.H * 1.3) kind === 'lift' ? castleLifted++ : castleDark++;
+      }
+    });
+    expect('the transom panel and stern castle are drawn lifted, not on ship-dark-timber', castleLifted > 0 && castleLifted > castleDark,
+      `lifted ${castleLifted} vs dark ${castleDark} vertices`);
+    const dark = byName.get('ship-dark-timber');
+    expect('ship-dark-timber (hold, deck furniture) is not lifted', Boolean(dark) && !dark.emissiveMap);
     sr.clear();
   }
 }

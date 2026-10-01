@@ -38,7 +38,7 @@ const UPGRADE_PENNANT_COLORS: Record<ShipUpgradeType, number> = {
 
 import { finishCanvasTexture, foamTexture, sailTexture, sprayTexture, supplyLidTexture, woodCanvas, woodTexture } from './ship/textures.js';
 import type { SupplyKind } from './ship/textures.js';
-import { applyPlankDetail, makePlankUniforms, addStrakeSpace, type PlankUniforms } from './ship/plankDetail.js';
+import { applyPlankDetail, makePlankUniforms, addStrakeSpace, applyTimberEnvLift, type PlankUniforms } from './ship/plankDetail.js';
 import { releaseShipGeometry } from './ship/geometry.js';
 import { selectShipLod, shipLodKey, SHIP_LOD_BANDS, SHIP_LOD_HYSTERESIS, type ShipLodLevel } from './ship/lod.js';
 import { buildRudder, buildSternCastle } from './ship/stern.js';
@@ -1117,6 +1117,7 @@ export class ShipRenderer {
     // every waterline breach and the main wale crossed cannon holes (ships-07).
     const strakeMat = darkMat.clone();
     strakeMat.name = 'ship-hull-strake';
+    applyTimberEnvLift(strakeMat);
     applyHullHoleDiscard(strakeMat, hullHoleUniform, holeSlots);
     for (const side of [1, -1] as const) {
       const sheerStrake = new THREE.Mesh(
@@ -1270,10 +1271,12 @@ export class ShipRenderer {
     group.add(figurehead);
 
     // Transom panel nests within the lofted stern (the loft's own raked cap
-    // carries the shape below) instead of the old full-beam slab.
+    // carries the shape below) instead of the old full-beam slab. On the
+    // lifted strake material (b4.2e): on darkMat it was the black slab under
+    // the stern windows at noon (gallery galleon stern).
     const sternTransom = new THREE.Mesh(
       new THREE.BoxGeometry(W * 0.64, H * 0.52, 0.14),
-      darkMat,
+      strakeMat,
     );
     sternTransom.position.set(0, H * 0.66, -L * 0.505);
     sternTransom.castShadow = true;
@@ -1584,7 +1587,13 @@ export class ShipRenderer {
     }
 
     // ── Stern castle (ship/stern.ts) ──
-    buildSternCastle(group, profile, sternStation, darkMat, brassHardwareMat);
+    // On the strake material, not darkMat (b4.2e): the castle is outboard
+    // planking and needs the env lift that keeps the transom off black at noon,
+    // while darkMat also builds the hold, which is lit by its lanterns. Sharing
+    // the strakes' merge bucket costs no draw (a material of its own broke the
+    // LOD0 draw ratchet by one), and a breach at the stern now cuts the castle
+    // wall it passes through, as it should.
+    buildSternCastle(group, profile, sternStation, strakeMat, brassHardwareMat);
 
     // ── Quarterdeck: a genuinely RAISED helm dais at the stern (config-driven so
     //    the geometry matches the server's raised foot height exactly). The wheel
