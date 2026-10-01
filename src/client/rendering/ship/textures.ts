@@ -23,7 +23,26 @@ export const WOOD_PALETTES: Record<WoodVariant, { bases: string[]; separator: st
   deck: { bases: ['#93714A', '#8A6942', '#9C7A50', '#856340'], separator: '#57391D', grain: '#A8865C', knot: '#5E3F20' },
 };
 
-export function woodCanvas(w: number, h: number, variant: WoodVariant = 'hull'): HTMLCanvasElement {
+/** mulberry32: the canvas textures are drawn from a seed, never the global RNG,
+ *  so every client and every reload paints the same planks, canvas and foam
+ *  (vm:ships:3). */
+export function textureRng(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const VARIANT_SEED: Record<WoodVariant, number> = { hull: 0x51a7, deck: 0xdec4, dark: 0xda2c };
+
+export function woodCanvas(
+  w: number, h: number, variant: WoodVariant = 'hull', seed = VARIANT_SEED[variant] ^ (w * 131 + h),
+): HTMLCanvasElement {
+  const rnd = textureRng(seed);
   const canvas = document.createElement('canvas');
   canvas.width = w; canvas.height = h;
   const ctx = canvas.getContext('2d')!;
@@ -43,23 +62,23 @@ export function woodCanvas(w: number, h: number, variant: WoodVariant = 'hull'):
     ctx.strokeStyle = palette.grain;
     ctx.lineWidth = 1;
     for (let i = 0; i < 12; i++) {
-      const x = Math.random() * w;
-      ctx.globalAlpha = 0.35 + Math.random() * 0.55;
+      const x = rnd() * w;
+      ctx.globalAlpha = 0.35 + rnd() * 0.55;
       ctx.beginPath();
       ctx.moveTo(x, row * plankH + 3);
-      ctx.lineTo(x + (Math.random() - 0.5) * 30, (row + 1) * plankH - 1);
+      ctx.lineTo(x + (rnd() - 0.5) * 30, (row + 1) * plankH - 1);
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
     // Butt joints between plank sections
     ctx.fillStyle = palette.separator;
     for (let seam = 0; seam < 2; seam++) {
-      const sx = Math.random() * w;
+      const sx = rnd() * w;
       ctx.fillRect(sx, row * plankH + 2, 1.5, plankH - 2);
     }
     // Knots
-    if (Math.random() < 0.3) {
-      const kx = Math.random() * w, ky = row * plankH + plankH * 0.5;
+    if (rnd() < 0.3) {
+      const kx = rnd() * w, ky = row * plankH + plankH * 0.5;
       ctx.fillStyle = palette.knot;
       ctx.beginPath();
       ctx.ellipse(kx, ky, 4, 2.5, 0, 0, Math.PI * 2);
@@ -73,7 +92,8 @@ export function woodTexture(w: number, h: number, variant: WoodVariant = 'hull')
   return finishCanvasTexture(woodCanvas(w, h, variant));
 }
 
-export function sailTexture(teamColor?: number): THREE.CanvasTexture {
+export function sailTexture(teamColor?: number, seed = 0x5a11 ^ ((teamColor ?? 0) >>> 0)): THREE.CanvasTexture {
+  const rnd = textureRng(seed);
   const canvas = document.createElement('canvas');
   canvas.width = 256; canvas.height = 256;
   const ctx = canvas.getContext('2d')!;
@@ -83,7 +103,7 @@ export function sailTexture(teamColor?: number): THREE.CanvasTexture {
   ctx.fillStyle = '#D8C890';
   for (let i = 0; i < 6; i++) {
     ctx.beginPath();
-    ctx.arc(Math.random() * 256, Math.random() * 256, 15 + Math.random() * 28, 0, Math.PI * 2);
+    ctx.arc(rnd() * 256, rnd() * 256, 15 + rnd() * 28, 0, Math.PI * 2);
     ctx.fill();
   }
   // Horizontal stitch lines
@@ -91,8 +111,8 @@ export function sailTexture(teamColor?: number): THREE.CanvasTexture {
   ctx.lineWidth = 1.5;
   for (let y = 28; y < 256; y += 28) {
     ctx.beginPath();
-    ctx.moveTo(0, y + (Math.random() - 0.5) * 4);
-    ctx.lineTo(256, y + (Math.random() - 0.5) * 4);
+    ctx.moveTo(0, y + (rnd() - 0.5) * 4);
+    ctx.lineTo(256, y + (rnd() - 0.5) * 4);
     ctx.stroke();
   }
   // Team emblem: painted band across the lower third — team readability without
@@ -190,18 +210,19 @@ export function supplyLidTexture(kind: SupplyKind): THREE.CanvasTexture {
 }
 
 /** Streaky foam for the wake ribbon — additive, so black regions vanish. */
-export function foamTexture(): THREE.CanvasTexture {
+export function foamTexture(seed = 0xf0a3): THREE.CanvasTexture {
+  const rnd = textureRng(seed);
   const canvas = document.createElement('canvas');
   canvas.width = 128; canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
   ctx.fillStyle = '#000000';
   ctx.fillRect(0, 0, 128, 128);
   for (let i = 0; i < 90; i++) {
-    const x = Math.random() * 128;
-    const y = Math.random() * 128;
-    const r = 2 + Math.random() * 9;
+    const x = rnd() * 128;
+    const y = rnd() * 128;
+    const r = 2 + rnd() * 9;
     const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-    const a = 0.25 + Math.random() * 0.55;
+    const a = 0.25 + rnd() * 0.55;
     g.addColorStop(0, `rgba(235, 248, 255, ${a})`);
     g.addColorStop(1, 'rgba(235, 248, 255, 0)');
     ctx.fillStyle = g;
