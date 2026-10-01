@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { registerBudgetLight } from '../LightBudget.js';
 import { getShipHoldHalfWidth } from '../../../shared/interactions.js';
-import { hullSurfacePointAt, stationSurfaceAt } from '../../../shared/hull.js';
+import { hullSurfacePointAt } from '../../../shared/hull.js';
 import type { HullProfile } from '../../../shared/hull.js';
 import { acquireSharedGeometry, makeLoftedSlabGeometry, makeSheerRunGeometry } from './geometry.js';
 
@@ -94,24 +94,13 @@ export function holdCeilingHalfAt(profile: HullProfile, z: number, y: number): n
   return drawnShellHalfAt(profile, z, y) - HOLD_CEILING_OFFSET;
 }
 
-/** The DRAWN shell's half-width at (z, y): each station's surface point at y
- *  (shared stationSurfaceAt) carries its own RAKED z, and x is interpolated
- *  over those. hullSurfacePointAt interpolates over the base z instead, which
- *  near the sheer at the hold ends reads up to 5 cm narrower than the planking
- *  the renderer lofts (measured 0.172 m vs 0.12 on the galleon). */
+/** The DRAWN shell's half-width at (z, y). Since b4.2d the drawn shell IS the
+ *  shared spline (makeSplineHullGeometry samples sampleHullSurface), so this is
+ *  hullSurfacePointAt. The old per-station raked polyline read the spline
+ *  stern quarter up to 9 cm narrow and the bow shoulder 4 cm wide, putting the
+ *  planking 0.11-0.21 m inboard instead of 0.12. */
 function drawnShellHalfAt(profile: HullProfile, z: number, y: number): number {
-  const sts = profile.stations;
-  let prev = stationSurfaceAt(sts[0], y);
-  if (z <= prev.z) return prev.x;
-  for (let i = 1; i < sts.length; i++) {
-    const cur = stationSurfaceAt(sts[i], y);
-    if (z <= cur.z) {
-      const t = (z - prev.z) / Math.max(1e-4, cur.z - prev.z);
-      return prev.x + (cur.x - prev.x) * t;
-    }
-    prev = cur;
-  }
-  return prev.x;
+  return hullSurfacePointAt(profile, z, y).x;
 }
 
 /**
