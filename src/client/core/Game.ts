@@ -87,7 +87,7 @@ import { makePlayerRig } from '../rendering/factories/PlayerRigFactory.js';
 import { buildMermaidMesh, hudAnchorLocal, makeNameplateSprite, makeProjectileMesh } from '../rendering/factories/MiscMeshFactory.js';
 import type { PocketPreviewKind } from '../rendering/factories/WeaponMeshFactory.js';
 import { glyph, installGlyphs, keys } from '../ui/InputGlyphs.js';
-import { framePacer } from './framePacer.js';
+import { framePacer, detectPacerForm } from './framePacer.js';
 import { deckCameraRoll, headBobOffset, landingDipOffset, spyglassSway } from './cameraMotion.js';
 
 /** b3.3d: a breach staggers crew within this distance (m) of the ball's strike. */
@@ -1234,6 +1234,10 @@ export class Game {
     this.setLoading(56, 'Stirring the deep...');
     await this.yieldForLoadingPaint();
 
+    // D26: on phones every other hull starts at LOD2 and the own hull's guns
+    // are built at the phone facet count (45k own-hull cap). Before init: the
+    // first hull built reads it.
+    this.shipRenderer.setLodPhone(detectPacerForm() === 'phone');
     this.shipRenderer.init(this.renderer.scene, this.renderer.getQuality());
     this.spoilsRenderer.init(this.renderer.scene);
     this.seaEvents.init(this.renderer.scene, {
