@@ -57,12 +57,17 @@ const verts = (set) => [...set].reduce((a, m) => a + (m.geometry.attributes.posi
 let tt = 30;
 function frame(sr, ship, cam, local) {
   for (let i = 0; i < 3; i++) { tt += 0.02; sr.update([ship], [], tt, 1 / 60, 0, cam, local); }
-  return drawn(sr.shipMeshes.get(ship.id).detailRoot);
+  // The whole ship root: the LOD1 sibling and the hole-vis groups hang there.
+  return drawn(sr.shipMeshes.get(ship.id).root);
 }
 
-// b4.2d (D26 ship LOD): the detail model now ends at 90 m (+10% hysteresis),
-// and on the low tier every hull but your own starts at LOD2 (no hold at
-// all), so the sealed-hold cull is graded at 80 m on high and balanced.
+// b4.2d (D26 ship LOD): the detail model now ends at 30 m (+10% hysteresis);
+// 30-90 m is LOD1 (spline shell + baked parts, no hold, no see-through cut)
+// and on the low tier every hull but your own starts at LOD2. So at 80 m a
+// hull that is not yours draws NO hold in any state (a stronger cull than the
+// 60 m sealed-hold rule, which now only matters for your own hull from a
+// free camera), its breaches show through their hole-vis groups on the ship
+// root, and your own hull is the detail model with its whole hold.
 for (const quality of ['high', 'balanced']) {
   for (const type of ['sloop', 'brigantine', 'galleon']) {
     const scene = new THREE.Scene();
@@ -71,13 +76,13 @@ for (const quality of ['high', 'balanced']) {
     openFirstDrawBudgetForSettle();
     const ship = fixtureShip(type, `holdcull-${quality}-${type}`);
     const near = new THREE.Vector3(18, 6, 18);
-    const far = new THREE.Vector3(0, 12, 80); // past the 60 m hold cull, inside the D26 detail band (90 m)
+    const far = new THREE.Vector3(0, 12, 80); // past the 60 m hold cull, in the D26 LOD1 band (30-90 m)
 
     const nearSet = frame(sr, ship, near);
     const farSet = frame(sr, ship, far);
     const mesh = sr.shipMeshes.get(ship.id);
-    expect(`${quality} ${type}: the far hull is the DETAIL model (the cull is inside the detail band)`,
-      mesh.detailRoot.visible && !mesh.proxyRoot.visible);
+    expect(`${quality} ${type}: the far hull at 80 m is LOD1 (the detail model and its hold are not drawn)`,
+      !mesh.detailRoot.visible && mesh.lod1Root.visible && !mesh.proxyRoot.visible);
     const saved = verts(nearSet) - verts(farSet);
     const hidden = [...nearSet].filter((m) => !farSet.has(m));
     const minSave = type === 'galleon' ? 10000 : type === 'brigantine' ? 7000 : 4000;
@@ -87,23 +92,29 @@ for (const quality of ['high', 'balanced']) {
     const holdSet = new Set(mesh.holdInterior ?? []);
     const holdMeshes = new Set();
     for (const o of holdSet) o.traverse((c) => { if (c.isMesh) holdMeshes.add(c); });
-    const stray = hidden.filter((m) => !holdMeshes.has(m));
-    expect(`${quality} ${type}: nothing but hold-only meshes is culled`, stray.length === 0,
-      stray.map((m) => `${m.name || '?'}:${m.material?.name || '?'}`).join(', '));
-    const deckMats = new Set();
-    for (const m of nearSet) if (!holdMeshes.has(m)) deckMats.add(m.material);
-    const sharedCulled = hidden.filter((m) => deckMats.has(m.material));
-    expect(`${quality} ${type}: no culled mesh shares a material with deck/hull (no split draw, no lost deck timber)`,
-      sharedCulled.length === 0, sharedCulled.map((m) => m.material?.name).join(', '));
+    const holdDrawn = (set) => [...holdMeshes].filter((m) => set.has(m));
+    expect(`${quality} ${type}: no hold mesh is drawn at 80 m`, holdMeshes.size > 0 && holdDrawn(farSet).length === 0,
+      `${holdDrawn(farSet).length} of ${holdMeshes.size}`);
+    expect(`${quality} ${type}: the LOD1 shell has no breach discard (no see-through cut with no hold behind it)`,
+      (() => {
+        const shell = [...farSet].find((m) => m.material?.name === 'lod1-hull-shell');
+        return !!shell && shell.material.onBeforeCompile === THREE.Material.prototype.onBeforeCompile
+          && [...farSet].every((m) => !mesh.detailRoot.getObjectById(m.id));
+      })());
     let lights = 0;
     for (const o of holdSet) o.traverse((c) => { if (c.isLight) lights += 1; });
     expect(`${quality} ${type}: the cull never toggles a light (a light-count change relinks every material)`, lights === 0);
 
-    // Open breach at range: the hold shows through it.
+    // Open breach at range: LOD1 draws no hold; the breach reads through its
+    // hole-vis group, which hangs on the ship root and so survives the swap.
     ship.holes = [{ id: 1, x: SHIP_STATS[type].width * 0.5, y: 0.3, z: 0, patched: false }];
     ship.nextHoleId = 2;
     const breachSet = frame(sr, ship, far);
-    expect(`${quality} ${type}: an open breach at 80 m draws the whole hold`, hidden.every((m) => breachSet.has(m)));
+    const vis = mesh.holeVis.get(1);
+    let visDrawn = 0;
+    if (vis) vis.group.traverse((o) => { if (o.isMesh && breachSet.has(o)) visDrawn += 1; });
+    expect(`${quality} ${type}: an open breach at 80 m draws its hole-vis on LOD1, not the hold`,
+      visDrawn > 0 && holdDrawn(breachSet).length === 0, `hole-vis meshes drawn ${visDrawn}, hold meshes ${holdDrawn(breachSet).length}`);
     ship.holes = [{ id: 1, x: SHIP_STATS[type].width * 0.5, y: 0.3, z: 0, patched: true }];
     const patchedSet = frame(sr, ship, far);
     expect(`${quality} ${type}: once patched, the sealed hull culls it again`, hidden.every((m) => !patchedSet.has(m)));
@@ -115,7 +126,7 @@ for (const quality of ['high', 'balanced']) {
     ship.crewIds = [];
     ship.sinking = true;
     const sinkSet = frame(sr, ship, far);
-    expect(`${quality} ${type}: a foundering hull draws its hold`, hidden.every((m) => sinkSet.has(m)));
+    expect(`${quality} ${type}: a foundering hull at 80 m stays LOD1 (no hold)`, holdDrawn(sinkSet).length === 0 && mesh.lod1Root.visible);
     ship.sinking = false;
     const backSet = frame(sr, ship, near);
     expect(`${quality} ${type}: back inside 60 m the hold is drawn again`, hidden.every((m) => backSet.has(m)));
