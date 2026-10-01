@@ -14,6 +14,7 @@ import type { InputManager } from '../input/InputManager.js';
 import type { Renderer } from '../rendering/Renderer.js';
 import type { UiRefs } from './UiRefs.js';
 import { BROKER_NAME } from './DisplayNames.js';
+import { presampledChartFor } from '../world/chartHeights.js';
 
 /** A rasterized island land-shape, halo baked in, ready to stamp on a chart. */
 type ChartBitmap = {
@@ -1357,10 +1358,12 @@ export class MapRenderer {
   private getIslandChartBitmap(island: Island): ChartBitmap {
     const cached = this.islandChartCache.get(island.id);
     if (cached) return cached;
-    const extent = getIslandMaxRadius(island) * 1.04;
-    const grid = THREE.MathUtils.clamp(Math.round(extent / 1.4), 48, 150);
-    const heights = new Float32Array(grid * grid);
-    this.sampleChartRows(island, grid, extent, heights, 0, grid, null);
+    // b4.1c: the static-world worker pre-samples these heights (chartHeights.ts).
+    const pre = presampledChartFor(island);
+    const extent = pre?.extent ?? getIslandMaxRadius(island) * 1.04;
+    const grid = pre?.grid ?? THREE.MathUtils.clamp(Math.round(extent / 1.4), 48, 150);
+    const heights = pre?.heights ?? new Float32Array(grid * grid);
+    if (!pre) this.sampleChartRows(island, grid, extent, heights, 0, grid, null);
     const entry = this.composeChartBitmap(
       grid,
       extent,
