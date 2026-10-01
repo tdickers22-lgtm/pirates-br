@@ -196,9 +196,19 @@ export function hullSurfacePointAt(profile: HullProfile, z: number, y: number): 
 //    profile curve instead of a flat cap.
 //
 // u runs stern (0) → stem (1) on centripetal knots shared by every girth line
-// (C1 in u for any v); v runs sheer (0) → keel (1) on per-station knots that
-// blend chord length with turning angle, so uniform v samples spend their
-// vertices where the section bends (the bilge), not on the flat topsides.
+// (C1 in u for any v). GEOMETRY and SAMPLING are split (b4.2b3):
+//  • the surface G(u, t) lofts rows whose girth parameter t is ARC LENGTH
+//    inside each slot interval, with slot k on the same t on every row. Every
+//    row then means the same thing by "t", so the length-wise spline blends
+//    like with like. (Turning-weighted rows put one t on different places of
+//    different sections; blending those wrinkled the bow: 244-278 deg of
+//    normal path turning sheer -> keel at u 0.92 for a net 60 deg.)
+//  • v (what callers pass) is mapped to t per row so uniform v spends its
+//    vertices where THE SURFACE NORMAL turns (bilge, tumblehome, the garboard
+//    into the keel in the bow), measured on G itself at the row's u, then
+//    blended between rows with a smoothstep in u (weights >= 0, so v -> t
+//    stays monotone; zero u-slope at the knots, so the surface stays C1).
+//    The normal of G(u, t(u, v)) is G's normal: sampling never bends the hull.
 // Pure numbers, no three.js, deterministic: the server reads this too.
 
 /** Spline-only rows, same fields as LOFT_STATIONS (dh etc. as fractions). */
@@ -213,13 +223,10 @@ const SPLINE_FLARE_ROW: LoftStationDef = {
 const STEM_HALF_SIDING_F = 0.010;
 const STEM_LEAD_SHEER_F = 0.014;
 const STEM_LEAD_KEEL_F = 0.004;
-/** Girth spacing: 0 = arc length, 1 = turning angle only. */
-const GIRTH_TURN_WEIGHT = 0.9;
-/** Shared girth knots (b4.2b2): each slot interval gets v in proportion to the
- *  WORST station's need there (this blend of turning and arc), not the mean, so
- *  the tumblehome (24 deg in 0.07 of the galleon's girth at station 3) is not
- *  starved by the bow and stern rows that barely turn there. */
-const GIRTH_KNOT_TURN_SHARE = 0.95;
+/** Girth SAMPLING (v -> t): 0 = arc length, 1 = surface-normal turning only. */
+const GIRTH_TURN_WEIGHT = 0.96;
+/** Dense samples per slot interval when a v -> t map is measured on G. */
+const GIRTH_SAMPLE_DENSE = 64;
 
 type Vec3 = { x: number; y: number; z: number };
 
@@ -245,7 +252,12 @@ interface SplineRow extends HullSplineStation {
   vk: number[]; sk: number[]; sm: number[];
   /** Section turning (rad) and arc share of each slot interval, for the shared knots. */
   intervalTurn: number[]; intervalArc: number[];
+  /** Geometry girth knots: slot k sits on t = tKnots[k] on every row. */
+  tKnots: number[];
 }
+
+/** A v -> t sampling map measured on G at one u: PCHIP knots (mv -> mt), slopes. */
+interface SampleMap { u: number; mv: number[]; mt: number[]; mm: number[]; slotV: number[] }
 
 export interface HullSurfaceSample {
   x: number; y: number; z: number;
@@ -287,13 +299,13 @@ function pchipEval(g: number[], f: number[], m: number[], x: number): [number, n
 const GIRTH_DENSE = 24;
 
 /**
- * The girth reparameterisation v → s. The section curve is a PCHIP in s
- * (chord-length knots through the 7 slots); v is the cumulative blend of arc
- * length and TURNING measured on that curve, so uniform v puts its vertices
- * where the section bends (wale, bilge, garboard) instead of on the straight
- * topsides. The map is itself a PCHIP through ~150 (v, s) pairs that include
- * the 7 slots exactly, so the surface still passes through every slot and
- * stays C1 in v (ds/dv > 0).
+ * The girth GEOMETRY parameter t → s. The section curve is a PCHIP in s
+ * (chord-length knots through the 7 slots); t is the cumulative ARC LENGTH
+ * measured on that curve (b4.2b3: it was a turning blend, which made one t a
+ * different place on different sections and wrinkled the bow loft). The map is
+ * itself a PCHIP through ~150 (t, s) pairs that include the 7 slots exactly, so
+ * the surface still passes through every slot and stays C1 (ds/dt > 0). Where
+ * uniform samples land is the sampling map's job (buildSampleMap).
  */
 function measureGirth(row: { slots: Vec3[]; g0: number[]; mx: number[]; my: number[]; mz: number[] }): { sk: number[]; vk: number[]; slotAt: number[]; intervalTurn: number[]; intervalArc: number[] } {
   const xs = row.slots.map((p) => p.x), ys = row.slots.map((p) => p.y), zs = row.slots.map((p) => p.z);
@@ -319,14 +331,15 @@ function measureGirth(row: { slots: Vec3[]; g0: number[]; mx: number[]; my: numb
     turn.push(turn[j - 1] + Math.acos(clamp(prevT[0] * t[0] + prevT[1] * t[1] + prevT[2] * t[2], -1, 1)));
     prevT = t;
   }
-  const A = arc[arc.length - 1] || 1, T = turn[turn.length - 1];
+  const A = arc[arc.length - 1] || 1;
   const intervalTurn: number[] = [], intervalArc: number[] = [];
   for (let k = 0; k < slotAt.length - 1; k++) {
     intervalTurn.push(turn[slotAt[k + 1]] - turn[slotAt[k]]);
     intervalArc.push((arc[slotAt[k + 1]] - arc[slotAt[k]]) / A);
   }
-  const beta = T > 1e-6 ? GIRTH_TURN_WEIGHT : 0;
-  const vk = sk.map((_, j) => ((1 - beta) * arc[j] / A + (beta > 0 ? beta * turn[j] / T : 0)) * (1 - 1e-6) + 1e-6 * j / (sk.length - 1));
+  // GEOMETRY parameter: arc length (b4.2b3); the turning lives in the v -> t
+  // sampling map (buildSampleMap), measured on the lofted surface.
+  const vk = sk.map((_, j) => (arc[j] / A) * (1 - 1e-6) + 1e-6 * j / (sk.length - 1));
   vk[vk.length - 1] = 1;
   return { sk, vk, slotAt, intervalTurn, intervalArc };
 }
@@ -378,11 +391,12 @@ function makeRow(kind: HullSplineStation['kind'], loftIndex: number, slots: Vec3
     : measureGirth({ slots, ...base });
   return {
     kind, loftIndex, u: 0, slots, faired, ...base, vk: m.vk, sk: m.sk, sm: [], girthKnots: m.slotAt.map((j) => m.vk[j]),
-    intervalTurn: m.intervalTurn, intervalArc: m.intervalArc,
+    intervalTurn: m.intervalTurn, intervalArc: m.intervalArc, tKnots: [],
   };
 }
 
 const SPLINE_CACHE = new WeakMap<HullProfile, SplineRow[]>();
+const SAMPLE_MAP_CACHE = new WeakMap<SplineRow[], SampleMap[]>();
 
 function getSplineRows(profile: HullProfile): SplineRow[] {
   let rows = SPLINE_CACHE.get(profile);
@@ -405,16 +419,12 @@ function getSplineRows(profile: HullProfile): SplineRow[] {
     y: p.y,
     z: p.z + L * (STEM_LEAD_SHEER_F + (STEM_LEAD_KEEL_F - STEM_LEAD_SHEER_F) * (k / (n - 1))),
   })), headRow));
-  // Shared girth knots: slot k sits on the same v on every station.
-  // Minimax: interval k's share of v is the max over stations of its need.
+  // Shared geometry knots: slot k sits on the same t on every station, each
+  // interval sized by the longest arc share any station has there.
   const measured = rows.filter((r) => r.kind !== 'stem');
-  const meanTurn = measured.reduce((a, r) => a + r.intervalTurn.reduce((x, t) => x + t, 0), 0) / measured.length;
   const need = new Array<number>(n - 1).fill(0);
   for (const r of measured) {
-    for (let k = 0; k < n - 1; k++) {
-      const w = GIRTH_KNOT_TURN_SHARE * r.intervalTurn[k] + (1 - GIRTH_KNOT_TURN_SHARE) * r.intervalArc[k] * meanTurn;
-      if (w > need[k]) need[k] = w;
-    }
+    for (let k = 0; k < n - 1; k++) if (r.intervalArc[k] > need[k]) need[k] = r.intervalArc[k];
   }
   const needSum = need.reduce((a, x) => a + x, 0);
   const V = [0];
@@ -424,10 +434,10 @@ function getSplineRows(profile: HullProfile): SplineRow[] {
     if (r.kind === 'stem') continue;
     const slotAt = r.girthKnots.map((g) => r.vk.indexOf(g));
     const mapped = girthMapOnKnots({ sk: r.sk, vk: r.vk, slotAt }, V);
-    r.vk = mapped.vk; r.sm = mapped.sm; r.girthKnots = mapped.girthKnots;
+    r.vk = mapped.vk; r.sm = mapped.sm; r.girthKnots = mapped.girthKnots; r.tKnots = V.slice();
   }
   const stemRow = rows[rows.length - 1];
-  stemRow.vk = headRow.vk; stemRow.sk = headRow.sk; stemRow.sm = headRow.sm; stemRow.girthKnots = headRow.girthKnots.slice();
+  stemRow.vk = headRow.vk; stemRow.sk = headRow.sk; stemRow.sm = headRow.sm; stemRow.tKnots = V.slice();
   // Centripetal knots along the length, one sequence for every girth line.
   const t = [0];
   for (let i = 0; i < rows.length - 1; i++) {
@@ -439,8 +449,44 @@ function getSplineRows(profile: HullProfile): SplineRow[] {
     t.push(t[i] + acc / n);
   }
   rows.forEach((r, i) => { r.u = i === rows!.length - 1 ? 1 : t[i] / t[t.length - 1]; });
+  // One sampling map per station. (Extra maps between stations were tried:
+  // with 1-3 per interval the head -> stem maps differ so much that the iso-v
+  // lines slide along the girth and fold, 6-9 deg faces; the station maps are
+  // the smooth choice.)
+  const maps = rows.map((r) => buildSampleMap(rows!, r.u, r.tKnots));
+  rows.forEach((r, i) => { r.girthKnots = maps[i].slotV; });
+  SAMPLE_MAP_CACHE.set(rows, maps);
   SPLINE_CACHE.set(profile, rows);
   return rows;
+}
+
+/** The v -> t sampling map at u, measured on G: v is the blend
+ *  of arc length and SURFACE-NORMAL path turning down the girth (the normal of
+ *  G turns where the section bends AND where the lines twist into the keel at
+ *  the forefoot, which the section's own tangent never sees). The slots' t
+ *  are map knots, so girthKnots[k] = v of slot k exactly. */
+function buildSampleMap(rows: SplineRow[], u: number, V: number[]): SampleMap {
+  const ts: number[] = [];
+  const slotAt: number[] = [];
+  for (let k = 0; k < V.length - 1; k++) {
+    slotAt.push(ts.length);
+    for (let j = 0; j < GIRTH_SAMPLE_DENSE; j++) ts.push(V[k] + (V[k + 1] - V[k]) * (j / GIRTH_SAMPLE_DENSE));
+  }
+  slotAt.push(ts.length);
+  ts.push(1);
+  const arc = [0], turn = [0];
+  let prev = surfaceAt(rows, u, ts[0]);
+  for (let j = 1; j < ts.length; j++) {
+    const s = surfaceAt(rows, u, ts[j]);
+    arc.push(arc[j - 1] + Math.hypot(s.x - prev.x, s.y - prev.y, s.z - prev.z));
+    turn.push(turn[j - 1] + Math.acos(clamp(s.nx * prev.nx + s.ny * prev.ny + s.nz * prev.nz, -1, 1)));
+    prev = s;
+  }
+  const A = arc[arc.length - 1] || 1, T = turn[turn.length - 1];
+  const beta = T > 1e-6 ? GIRTH_TURN_WEIGHT : 0;
+  const mv = ts.map((_, j) => ((1 - beta) * arc[j] / A + (beta > 0 ? beta * turn[j] / T : 0)) * (1 - 1e-6) + 1e-6 * j / (ts.length - 1));
+  mv[mv.length - 1] = 1;
+  return { u, mv, mt: ts, mm: pchipSlopes(mv, ts), slotV: slotAt.map((j) => mv[j]) };
 }
 
 /** Point + d/dv on one station's girth curve: [x, y, z, dx, dy, dz]. */
@@ -487,13 +533,28 @@ function crTangents(q: number[][], uu: number[], c: number, monotone: boolean, o
  * keel. Mirror x/nx for port. Use hullSplineUAtZ to ask "where is z".
  *
  * Consumers (b4.2c onward): the renderer shell at tier resolution (LOD0 72 x
- * 22), the waterline outline and contact chain (server), hull sockets for the
+ * 40, < 5 deg between girth faces over the whole shell, bow included), the
+ * waterline outline and contact chain (server), hull sockets for the
  * Blender kit (b4.3c). Nothing reads it yet: graded by
  * scripts/test-hull-spline-parity.mjs.
  */
 export function sampleHullSurface(profile: HullProfile, u: number, v: number): HullSurfaceSample {
   const rows = getSplineRows(profile);
+  const maps = SAMPLE_MAP_CACHE.get(rows)!;
   const uc = clamp(u, 0, 1), vc = clamp(v, 0, 1);
+  let i = 0;
+  while (i < maps.length - 2 && uc > maps[i + 1].u) i++;
+  const a = maps[i], b = maps[i + 1];
+  const tau = clamp((uc - a.u) / (b.u - a.u), 0, 1);
+  const w = tau * tau * (3 - 2 * tau);
+  const ta = pchipEval(a.mv, a.mt, a.mm, vc)[0], tb = pchipEval(b.mv, b.mt, b.mm, vc)[0];
+  return surfaceAt(rows, uc, w <= 0 ? ta : w >= 1 ? tb : ta + (tb - ta) * w);
+}
+
+/** G(u, t): the lofted surface on its geometry parameter t (arc length inside
+ *  each slot interval, slot k at tKnots[k]). */
+function surfaceAt(rows: SplineRow[], u: number, t: number): HullSurfaceSample {
+  const uc = clamp(u, 0, 1), vc = clamp(t, 0, 1);
   const last = rows.length - 1;
   let i = 0;
   while (i < last - 1 && uc > rows[i + 1].u) i++;
@@ -508,10 +569,10 @@ export function sampleHullSurface(profile: HullProfile, u: number, v: number): H
   if (i === 0) { for (let c = 0; c < 6; c++) q[0][c] = 2 * q[1][c] - q[2][c]; uu[0] = 2 * uu[1] - uu[2]; }
   if (i + 2 > last) { for (let c = 0; c < 6; c++) q[3][c] = 2 * q[2][c] - q[1][c]; uu[3] = 2 * uu[2] - uu[1]; }
   const h = uu[2] - uu[1];
-  const t = clamp((uc - uu[1]) / h, 0, 1);
-  const t2 = t * t, t3 = t2 * t;
-  const h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
-  const d00 = (6 * t2 - 6 * t) / h, d10 = 3 * t2 - 4 * t + 1, d01 = (-6 * t2 + 6 * t) / h, d11 = 3 * t2 - 2 * t;
+  const tt = clamp((uc - uu[1]) / h, 0, 1);
+  const t2 = tt * tt, t3 = t2 * tt;
+  const h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + tt, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
+  const d00 = (6 * t2 - 6 * tt) / h, d10 = 3 * t2 - 4 * tt + 1, d01 = (-6 * t2 + 6 * tt) / h, d11 = 3 * t2 - 2 * tt;
   const p = [0, 0, 0, 0, 0, 0], du = [0, 0, 0];
   const tan = [0, 0, 0, 0];
   for (let c = 0; c < 3; c++) {

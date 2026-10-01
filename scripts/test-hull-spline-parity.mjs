@@ -21,9 +21,11 @@
 //                 SPEC CHANGE: the bar is < 5 deg on 72 x 40 (LOD0 >= 40 girth
 //                 samples per side, ~11k shell tris, inside the D26 LOD0 band),
 //                 because the section turns 113-128 deg sheer -> keel and 21
-//                 faces cannot average under 5.4-6.1 deg with any sampler. Held
-//                 aft of station 7; the bow (stem head re-lofted in b4.2b2, no
-//                 more inboard normals or 50 deg creases) holds a ratchet;
+//                 faces cannot average under 5.4-6.1 deg with any sampler.
+//                 b4.2b3: held over the WHOLE shell, the bow included (arc-
+//                 length geometry rows + per-station v -> t maps measured on
+//                 the surface normal; was 14.9-15.8 deg at the forefoot); the
+//                 along-length faces hold a ratchet;
 //  5. walk taper: the spline sheer stays outboard of getShipDeckWalkHalfWidth
 //                 at 200 z samples (the deck clamp never strands a pirate past
 //                 a drawn line);
@@ -224,13 +226,15 @@ for (const type of TYPES) {
   // on 72 x 22. RED at 3995a9e2 (mean shared knots): 4.57/4.52/6.22 deg.
   expect(`${type}: aft of station 7, adjacent girth faces on 72x40 < 5 deg (spline ${aft40.girth.toFixed(2)} at ${aft40.girthAt}; 72x22 ${aft.girth.toFixed(2)} vs linear ${linearAft.girth.toFixed(1)})`,
     aft40.girth < 5 && aft.girth * 3 <= linearAft.girth, `spline ${aft40.girth} at ${aft40.girthAt}, 72x22 ${aft.girth}, linear ${linearAft.girth}`);
-  // BOW RATCHET (forward of station 7, flare + stem head + stem line): the
-  // re-lofted forefoot took the along-length crease 48-52 -> 24 deg and the
-  // girth 15-16 deg holds; the < 5 deg bow bar needs a stem-pole topology
-  // (open, lane report). Never worse than measured at b4.2b2.
-  const BOW = { sloop: [15.5, 24.5], brigantine: [16.0, 24.6], galleon: [16.3, 24.7] }[type];
-  expect(`${type}: whole shell on 72x40 within the bow ratchet (girth ${whole40.girth.toFixed(2)} <= ${BOW[0]}, along ${whole40.along.toFixed(2)} <= ${BOW[1]} deg)`,
-    whole40.girth <= BOW[0] && whole40.along <= BOW[1], `girth ${whole40.girth} at ${whole40.girthAt}, along ${whole40.along} at ${whole40.alongAt}`);
+  // b4.2b3 BOW BAR: the WHOLE shell (flare row, stem head, stem line, the
+  // forefoot) < 5 deg between adjacent girth faces on 72 x 40. RED at e6026f41:
+  // 14.93/15.52/15.83 deg at u 0.930 v 0.949 (turning-weighted rows blended
+  // unlike girth positions: 244-278 deg of normal path turning for a net 60).
+  // Along-length faces: ratchet at the b4.2b3 measurement (24.0-24.2 before);
+  // the renderer may densify u forward of station 7 (b4.2c).
+  const ALONG = { sloop: 20.0, brigantine: 20.3, galleon: 20.5 }[type];
+  expect(`${type}: whole shell (bow included) adjacent girth faces on 72x40 < 5 deg (${whole40.girth.toFixed(2)} at ${whole40.girthAt}), along-length <= ${ALONG} deg ratchet (${whole40.along.toFixed(2)} at ${whole40.alongAt})`,
+    whole40.girth < 5 && whole40.along <= ALONG, `girth ${whole40.girth} at ${whole40.girthAt}, along ${whole40.along} at ${whole40.alongAt}`);
 
   // 5. walk taper at 200 z samples on the spline SHEER (v = 0).
   let tight = Infinity, tightZ = 0;
@@ -284,4 +288,4 @@ const src = readFileSync(new URL('../src/shared/hull.ts', import.meta.url), 'utf
 expect('src/shared/hull.ts has no Math.random and no three.js import', !/Math\.random/.test(src) && !/from 'three'/.test(src));
 
 if (failures) { console.error(`\n${failures} assertion(s) FAILED`); process.exit(1); }
-console.log('\nPASS: one C1 spline hull through every station, no folds, walk taper kept, < 5 deg girth faces aft of station 7 on 72x40, bow ratchet held.');
+console.log('\nPASS: one C1 spline hull through every station, no folds, walk taper kept, < 5 deg girth faces over the whole shell on 72x40 (bow included), along-length ratchet held.');
