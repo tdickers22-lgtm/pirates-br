@@ -40,7 +40,7 @@ import { finishCanvasTexture, foamTexture, sailTexture, sprayTexture, supplyLidT
 import type { SupplyKind } from './ship/textures.js';
 import { applyPlankDetail, makePlankUniforms, type PlankUniforms } from './ship/plankDetail.js';
 import { releaseShipGeometry } from './ship/geometry.js';
-import { buildSternCastle } from './ship/stern.js';
+import { buildRudder, buildSternCastle } from './ship/stern.js';
 import { buildWaterlineFoam, seatWaterlineFoam } from './ship/foam.js';
 import { updateSailCloth } from './ship/sails.js';
 import { buildRigging, updateRigging, type RopeRun, type Rigging } from './ship/rigging.js';
@@ -1091,19 +1091,9 @@ export class ShipRenderer {
     const keel = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.28, L * 0.68), darkMat);
     keel.position.set(0, -profile.draft + 0.05, -L * 0.02);
     group.add(keel);
-    // The blade hangs off a STOCK it can turn on. It used to be merged into the
-    // dark-timber bucket and never moved at all, while the wheel in front of the
-    // captain span off yaw rate (ships-12). Pivot at the stern post, blade
-    // translated aft of it, so rotation.y is the rudder angle on the wire.
-    const rudderPivot = new THREE.Group();
-    rudderPivot.name = 'rudder-stock';
-    rudderPivot.position.set(0, -profile.draft * 0.42 + H * 0.06, -L * 0.44);
-    const rudder = new THREE.Mesh(
-      new THREE.BoxGeometry(0.09, profile.draft * 0.85 + H * 0.2, L * 0.045).translate(0, 0, -L * 0.015),
-      darkMat,
-    );
-    rudder.rotation.x = 0.1;
-    rudderPivot.add(rudder);
+    // The blade hangs off a STOCK it can turn on (ships-12): rotation.y is the
+    // rudder angle on the wire. Seated on the shared sternpost (ship/stern.ts).
+    const rudderPivot = buildRudder(profile, darkMat);
     group.add(rudderPivot);
 
     // ── Stairwell hole (shared by the weather deck above and the interior ceiling below) ────────
