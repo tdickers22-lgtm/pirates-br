@@ -32,7 +32,13 @@
 //  6. no folds  : z is strictly increasing in u along every iso-v line, x >= 0;
 //  7. stern     : the transom rake is kept (>= today's ~20 deg) and the counter
 //                 overhangs the sternpost;
-//  8. no consumer switched: getHullProfile still has the 9 loft stations.
+//  8. the station table: getHullProfile still has the 9 loft stations (the
+//     spline reads them; the spline-only rows never enter the profile);
+//  9. every consumer on the spline (b4.2c): the server's waterline outline
+//     (one point per spline row, at y = 0) and contact chain (the widest point
+//     of each spline row) lie on the surface within 1 cm; hullSurfacePointAt
+//     (z, y) round-trips sampleHullSurface within 1 cm and its section normal
+//     within 1 deg; stationSurfaceAt walks the spline row of its station.
 import { readFileSync } from 'node:fs';
 import * as hull from '../src/shared/hull.ts';
 import { SHIP_STATS } from '../src/shared/constants/index.ts';
@@ -117,7 +123,7 @@ for (const type of TYPES) {
   console.log(`— ${type} (W ${profile.W} H ${profile.H} L ${profile.L}, ${spl.length} spline stations) —`);
 
   // 8. no consumer switched: the profile is still the 9-station loft.
-  expect(`${type}: getHullProfile keeps its 9 loft stations (no consumer switched)`, profile.stations.length === 9,
+  expect(`${type}: getHullProfile keeps its 9 loft stations`, profile.stations.length === 9,
     `got ${profile.stations.length}`);
 
   // 1. parity: every spline station slot lies on the surface at its knot; the
@@ -282,6 +288,66 @@ for (const type of TYPES) {
   // determinism: the same call twice is the same bits.
   const a = sampleHullSurface(profile, 0.4321, 0.3579), b = sampleHullSurface(profile, 0.4321, 0.3579);
   expect(`${type}: deterministic`, JSON.stringify(a) === JSON.stringify(b));
+
+  // 9. every consumer on the spline (b4.2c), within 1 cm.
+  const CM = 0.01;
+  const { L, W } = profile;
+  const outline = hull.getHullWaterlineOutline(type), chain = hull.getHullContactChain(type);
+  const ROW_N = 1200;
+  let olWorst = 0, olAt = 'n/a', chWorst = 0, chAt = 'n/a';
+  spl.forEach((s, i) => {
+    let lo = 0, hi = 1;
+    for (let it = 0; it < 60; it++) { const m = (lo + hi) / 2; if (sampleHullSurface(profile, s.u, m).y > 0) lo = m; else hi = m; }
+    const wl = sampleHullSurface(profile, s.u, (lo + hi) / 2);
+    // contact: the row's widest point fixes z (a plateau may take any z of its
+    // widest band); the radius is the widest the z-section is over every height.
+    const pts = [];
+    for (let j = 0; j <= ROW_N; j++) pts.push(sampleHullSurface(profile, s.u, j / ROW_N));
+    const rowMax = Math.max(...pts.map((p) => p.x));
+    const band = pts.filter((p) => p.x >= rowMax - CM);
+    const zLo = Math.min(...band.map((p) => p.z)) - CM, zHi = Math.max(...band.map((p) => p.z)) + CM;
+    const cz = chain[i] ? chain[i].zF * L : 0;
+    let maxX = 0;
+    for (let k = 0; k <= 400; k++) maxX = Math.max(maxX, hull.hullSurfacePointAt(profile, cz, -profile.draft * 1.05 + (profile.H * 1.2 + profile.draft) * (k / 400)).x);
+    const o = outline[i], c = chain[i];
+    const dO = o ? Math.hypot(o.zF * L - wl.z, o.halfF * W - wl.x) : Infinity;
+    const dC = c ? Math.max(Math.abs(c.halfF * W - maxX), c.zF * L < zLo ? zLo - c.zF * L : c.zF * L > zHi ? c.zF * L - zHi : 0) : Infinity;
+    if (dO > olWorst) { olWorst = dO; olAt = `${s.kind} #${i} u ${s.u.toFixed(3)}`; }
+    if (dC > chWorst) { chWorst = dC; chAt = `${s.kind} #${i} u ${s.u.toFixed(3)}`; }
+  });
+  expect(`${type}: waterline outline = the spline at y = 0 on all ${spl.length} rows (${outline.length} points, worst ${(olWorst * 100).toFixed(2)} cm at ${olAt})`,
+    outline.length === spl.length && olWorst <= CM && Object.isFrozen(outline), `outline ${outline.length} rows ${spl.length}`);
+  expect(`${type}: contact chain = one capsule per spline row at its widest z, radius = widest z-section (${chain.length} points, worst ${(chWorst * 100).toFixed(2)} cm at ${chAt})`,
+    chain.length === spl.length && chWorst <= CM && Object.isFrozen(chain), `chain ${chain.length} rows ${spl.length}`);
+  let rtWorst = 0, rtAt = '', rtN = 0, rtNAt = '';
+  for (let iu = 1; iu < 40; iu++) {
+    for (let iv = 1; iv < 24; iv++) {
+      const u = iu / 40, v = iv / 24;
+      const p = sampleHullSurface(profile, u, v);
+      const r = hull.hullSurfacePointAt(profile, p.z, p.y);
+      const d = Math.abs(r.x - p.x);
+      if (d > rtWorst) { rtWorst = d; rtAt = `u ${u.toFixed(3)} v ${v.toFixed(3)}`; }
+      const l = Math.hypot(p.nx, p.ny) || 1;
+      const a = Math.acos(Math.max(-1, Math.min(1, (r.nx * p.nx + r.ny * p.ny) / l))) * DEG;
+      if (a > rtN) { rtN = a; rtNAt = `u ${u.toFixed(3)} v ${v.toFixed(3)}`; }
+    }
+  }
+  expect(`${type}: hullSurfacePointAt(z, y) is the spline (39x23 round trips: x worst ${(rtWorst * 100).toFixed(3)} cm at ${rtAt}, section normal ${rtN.toFixed(3)} deg at ${rtNAt})`,
+    rtWorst <= CM && rtN <= 1);
+  let stWorst = 0, stAt = '';
+  profile.stations.forEach((st, i) => {
+    const row = spl.find((s) => s.kind === 'loft' && s.loftIndex === i);
+    for (let k = 0; k <= 30; k++) {
+      const y = st.keelY + (st.sheerY - st.keelY) * (k / 30);
+      const s = hull.stationSurfaceAt(st, y);
+      let lo = 0, hi = 1;
+      for (let it = 0; it < 60; it++) { const m = (lo + hi) / 2; if (sampleHullSurface(profile, row.u, m).y > y) lo = m; else hi = m; }
+      const c = sampleHullSurface(profile, row.u, (lo + hi) / 2);
+      const best = Math.hypot(c.x - s.x, c.y - y, c.z - s.z);
+      if (best > stWorst) { stWorst = best; stAt = `station ${i} y ${y.toFixed(2)}`; }
+    }
+  });
+  expect(`${type}: stationSurfaceAt walks the spline row of its station (worst ${(stWorst * 100).toFixed(3)} cm at ${stAt})`, stWorst <= CM);
   }
 
 const src = readFileSync(new URL('../src/shared/hull.ts', import.meta.url), 'utf8');

@@ -23,7 +23,7 @@
 import { MapGenerator } from '../src/server/world/MapGenerator.ts';
 import { PhysicsSystem } from '../src/server/systems/PhysicsSystem.ts';
 import { SHIP_STATS } from '../src/shared/constants/index.ts';
-import { getHullProfile, hullSurfacePointAt } from '../src/shared/hull.ts';
+import { getHullProfile, sampleHullSurface } from '../src/shared/hull.ts';
 import { getIslandDistRatio, getIslandSurfaceY } from '../src/shared/utils/index.ts';
 
 let failures = 0;
@@ -44,16 +44,20 @@ const YAW_OFFSETS = [0, Math.PI / 4];
  *  the planking; anything more is the hull inside the island. */
 const CLEARANCE = 0.5;
 
-/** The drawn waterline silhouette: loft half-widths at y = 0, port + starboard,
- *  in hull-local (x abeam, z forward). */
+/** The drawn waterline silhouette: the spline hull at y = 0 (b4.2c), 41 points
+ *  stern edge -> stem line, port + starboard, in hull-local (x abeam, z
+ *  forward). Every point is ON the hull (the old z-uniform walk asked past the
+ *  raked ends, where no planking stands at the waterline). */
 function waterlineOutline(type) {
   const profile = getHullProfile(type);
   const points = [];
-  for (let i = 0; i <= 20; i++) {
-    const z = (-0.5 + i / 20) * profile.L;
-    const half = hullSurfacePointAt(profile, z, 0).x;
-    points.push({ x: half, z });
-    if (half > 0.02) points.push({ x: -half, z });
+  for (let i = 0; i <= 40; i++) {
+    const u = i / 40;
+    let lo = 0, hi = 1;
+    for (let it = 0; it < 50; it++) { const m = (lo + hi) / 2; if (sampleHullSurface(profile, u, m).y > 0) lo = m; else hi = m; }
+    const s = sampleHullSurface(profile, u, (lo + hi) / 2);
+    points.push({ x: s.x, z: s.z });
+    if (s.x > 0.02) points.push({ x: -s.x, z: s.z });
   }
   return points;
 }

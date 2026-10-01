@@ -80,6 +80,9 @@ export const LOFT_STATIONS = [
 ];
 
 const HULL_PROFILE_CACHE = new Map<ShipType, HullProfile>();
+/** Loft station -> the profile and index it was built for, so stationSurfaceAt
+ *  (which only receives the station) can read that station's spline row. */
+const STATION_OWNER = new WeakMap<HullProfileStation, { profile: HullProfile; index: number }>();
 
 type LoftStationDef = (typeof LOFT_STATIONS)[number];
 
@@ -127,6 +130,7 @@ export function getHullProfile(type: ShipType): HullProfile {
   const draft = H * draftF;
   const stations: HullProfileStation[] = LOFT_STATIONS.map((def) => buildLoftStation(def, W, H, L, draft, bulge));
   profile = { W, H, L, draft, stations };
+  stations.forEach((st, index) => STATION_OWNER.set(st, { profile: profile!, index }));
   HULL_PROFILE_CACHE.set(type, profile);
   return profile;
 }
@@ -137,40 +141,48 @@ export function hullUvV(profile: HullProfile, y: number): number {
   return clamp((y + profile.draft) / (profile.H * 1.08 + profile.draft), 0, 1);
 }
 
-/** Interpolates one station's side polyline at height y. Returns surface x, the
- *  outward 2D section normal (starboard sense) and the raked z at that height. */
+/** One station's side at height y, ON THE SPLINE (b4.2c, ships-01): the point
+ *  of the station's spline row (the PCHIP girth curve through its 7 slots that
+ *  the shell is lofted through) at that height. Returns surface x, the raked z
+ *  there and the outward 2D section normal (starboard sense: the surface normal
+ *  projected on the x-y plane). A station that did not come from getHullProfile
+ *  falls back to its slot polyline. */
 export function stationSurfaceAt(st: HullProfileStation, y: number): { x: number; z: number; nx: number; ny: number } {
+  const owner = STATION_OWNER.get(st);
+  if (!owner) return polylineSurfaceAt(st, y);
+  const rows = getSplineRows(owner.profile);
+  const row = rows.find((r) => r.kind === 'loft' && r.loftIndex === owner.index)!;
+  const s = surfaceAt(rows, row.u, rowTAtY(row, y));
+  const len = Math.hypot(s.nx, s.ny) || 1;
+  return { x: s.x, z: s.z, nx: s.nx / len, ny: s.ny / len };
+}
+
+/** The pre-spline polyline section (linear between slots), for stations built
+ *  outside getHullProfile only. */
+function polylineSurfaceAt(st: HullProfileStation, y: number): { x: number; z: number; nx: number; ny: number } {
   const slots = st.slots;
   let j = 0;
   const yc = clamp(y, slots[slots.length - 1].y, slots[0].y);
   while (j < slots.length - 2 && yc < slots[j + 1].y) j++;
   const a = slots[j], b = slots[j + 1];
   const t = clamp((a.y - yc) / Math.max(0.0001, a.y - b.y), 0, 1);
-  const x = a.x + (b.x - a.x) * t;
-  const z = a.z + (b.z - a.z) * t;
-  // Outward normal of segment a→b (downward), rotated +90°: (Δy, Δx_down)
   let nx = a.y - b.y;
   let ny = b.x - a.x;
   const len = Math.hypot(nx, ny) || 1;
-  nx /= len; ny /= len;
-  return { x, z, nx, ny };
+  return { x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t, nx: nx / len, ny: ny / len };
 }
 
-/** Surface point + outward section normal anywhere on the loft (starboard side;
- *  mirror x/nx for port). Used to anchor gunports, rivets and hole decals. */
+/** Surface point + outward section normal anywhere on the hull at local (z, y),
+ *  ON THE SPLINE (b4.2c): the point of sampleHullSurface's surface with that z
+ *  and that y (a 2D Newton solve on the surface, clamped to the shell: above
+ *  the sheer reads the sheer, below the keel the keel, past the transom or the
+ *  stem line their edge). Starboard side; mirror x/nx for port. (nx, ny) is the
+ *  normal of the z-section, i.e. the surface normal projected on x-y. Used to
+ *  anchor gunports, rivets and hole decals, and by the flood volume table. */
 export function hullSurfacePointAt(profile: HullProfile, z: number, y: number): { x: number; nx: number; ny: number } {
-  const sts = profile.stations;
-  const zc = clamp(z, sts[0].baseZ, sts[sts.length - 1].baseZ);
-  let i = 0;
-  while (i < sts.length - 2 && zc > sts[i + 1].baseZ) i++;
-  const a = sts[i], b = sts[i + 1];
-  const t = clamp((zc - a.baseZ) / Math.max(0.0001, b.baseZ - a.baseZ), 0, 1);
-  const sa = stationSurfaceAt(a, y);
-  const sb = stationSurfaceAt(b, y);
-  let nx = sa.nx + (sb.nx - sa.nx) * t;
-  let ny = sa.ny + (sb.ny - sa.ny) * t;
-  const len = Math.hypot(nx, ny) || 1;
-  return { x: sa.x + (sb.x - sa.x) * t, nx: nx / len, ny: ny / len };
+  const s = solveHullZY(getSplineRows(profile), z, y);
+  const len = Math.hypot(s.nx, s.ny) || 1;
+  return { x: s.x, nx: s.nx / len, ny: s.ny / len };
 }
 
 // ─── THE SPLINE LOFT (b4.2b, ships-01 / ships-08) ─────────────────────────────
@@ -248,6 +260,8 @@ interface SplineRow extends HullSplineStation {
   /** Chord-length base knots s of the slots, and PCHIP slopes d(x,y,z)/ds. */
   g0: number[];
   mx: number[]; my: number[]; mz: number[];
+  /** Slot x / y / z channels (the slots never move after makeRow faired them). */
+  cx: number[]; cy: number[]; cz: number[];
   /** The v → s map (buildGirthMap). */
   vk: number[]; sk: number[]; sm: number[];
   /** Section turning (rad) and arc share of each slot interval, for the shared knots. */
@@ -390,7 +404,8 @@ function makeRow(kind: HullSplineStation['kind'], loftIndex: number, slots: Vec3
     ? { sk: baseFrom.sk, vk: baseFrom.vk, slotAt: [] as number[], intervalTurn: baseFrom.intervalTurn, intervalArc: baseFrom.intervalArc }
     : measureGirth({ slots, ...base });
   return {
-    kind, loftIndex, u: 0, slots, faired, ...base, vk: m.vk, sk: m.sk, sm: [], girthKnots: m.slotAt.map((j) => m.vk[j]),
+    kind, loftIndex, u: 0, slots, faired, ...base,
+    cx: slots.map((p) => p.x), cy: slots.map((p) => p.y), cz: slots.map((p) => p.z), vk: m.vk, sk: m.sk, sm: [], girthKnots: m.slotAt.map((j) => m.vk[j]),
     intervalTurn: m.intervalTurn, intervalArc: m.intervalArc, tKnots: [],
   };
 }
@@ -492,9 +507,9 @@ function buildSampleMap(rows: SplineRow[], u: number, V: number[]): SampleMap {
 /** Point + d/dv on one station's girth curve: [x, y, z, dx, dy, dz]. */
 function rowAt(r: SplineRow, v: number, out: number[]): void {
   const [sv, ds] = pchipEval(r.vk, r.sk, r.sm, v);
-  const x = pchipEval(r.g0, r.slots.map((p) => p.x), r.mx, sv);
-  const y = pchipEval(r.g0, r.slots.map((p) => p.y), r.my, sv);
-  const z = pchipEval(r.g0, r.slots.map((p) => p.z), r.mz, sv);
+  const x = pchipEval(r.g0, r.cx, r.mx, sv);
+  const y = pchipEval(r.g0, r.cy, r.my, sv);
+  const z = pchipEval(r.g0, r.cz, r.mz, sv);
   out[0] = x[0]; out[1] = y[0]; out[2] = z[0];
   out[3] = x[1] * ds; out[4] = y[1] * ds; out[5] = z[1] * ds;
 }
@@ -612,6 +627,68 @@ export function hullSplineUAtZ(profile: HullProfile, z: number, v: number): numb
   return (lo + hi) * 0.5;
 }
 
+/** Geometry girth t on one spline row where the row's height is y (y falls
+ *  monotonically sheer -> keel: PCHIP keeps the slots' order). Clamped to the
+ *  row's sheer and keel. */
+function rowTAtY(r: SplineRow, y: number): number {
+  const out = [0, 0, 0, 0, 0, 0];
+  rowAt(r, 0, out);
+  if (y >= out[1]) return 0;
+  rowAt(r, 1, out);
+  if (y <= out[1]) return 1;
+  let lo = 0, hi = 1;
+  for (let it = 0; it < 48; it++) {
+    const mid = (lo + hi) * 0.5;
+    rowAt(r, mid, out);
+    if (out[1] > y) lo = mid; else hi = mid;
+  }
+  return (lo + hi) * 0.5;
+}
+
+/** The surface point G(u, t) with local z and y: damped 2D Newton on (u, t),
+ *  finite-difference Jacobian, box-clamped (a pinned coordinate leaves the
+ *  other to solve its own equation). The start is a fixed function of (z, y),
+ *  so server and client get the same bits. */
+function solveHullZY(rows: SplineRow[], z: number, y: number): HullSurfaceSample {
+  // Start: t from the midship row's height, u from the knot z on that girth line.
+  const mid = rows[Math.floor(rows.length / 2)];
+  let t = rowTAtY(mid, y);
+  const out = [0, 0, 0, 0, 0, 0];
+  let u = 0;
+  let prevZ = 0;
+  for (let i = 0; i < rows.length; i++) {
+    rowAt(rows[i], t, out);
+    if (i === 0 && z <= out[2]) { u = 0; break; }
+    if (i > 0 && z <= out[2]) { u = rows[i - 1].u + (rows[i].u - rows[i - 1].u) * clamp((z - prevZ) / Math.max(1e-9, out[2] - prevZ), 0, 1); break; }
+    prevZ = out[2];
+    u = 1;
+  }
+  const H = 1e-6;
+  let s = surfaceAt(rows, u, t);
+  for (let it = 0; it < 40; it++) {
+    const ez = s.z - z, ey = s.y - y;
+    if (Math.abs(ez) < 1e-9 && Math.abs(ey) < 1e-9) break;
+    const hu = u + H <= 1 ? H : -H, ht = t + H <= 1 ? H : -H;
+    const su = surfaceAt(rows, u + hu, t), st = surfaceAt(rows, u, t + ht);
+    const zu = (su.z - s.z) / hu, yu = (su.y - s.y) / hu;
+    const zt = (st.z - s.z) / ht, yt = (st.y - s.y) / ht;
+    const det = zu * yt - zt * yu;
+    let du = Math.abs(det) > 1e-12 ? -(ez * yt - zt * ey) / det : -ez / (zu || 1);
+    let dt = Math.abs(det) > 1e-12 ? -(zu * ey - ez * yu) / det : -ey / (yt || -1);
+    const big = Math.max(Math.abs(du), Math.abs(dt));
+    if (big > 0.25) { du *= 0.25 / big; dt *= 0.25 / big; }
+    let un = u + du, tn = t + dt;
+    const uOut = un < 0 || un > 1, tOut = tn < 0 || tn > 1;
+    if (uOut && !tOut) { un = clamp(un, 0, 1); tn = clamp(t - (ey + yu * (un - u)) / (yt || -1), 0, 1); }
+    else if (tOut && !uOut) { tn = clamp(tn, 0, 1); un = clamp(u - (ez + zt * (tn - t)) / (zu || 1), 0, 1); }
+    else { un = clamp(un, 0, 1); tn = clamp(tn, 0, 1); }
+    if (Math.abs(un - u) < 1e-13 && Math.abs(tn - t) < 1e-13) break;
+    u = un; t = tn;
+    s = surfaceAt(rows, u, t);
+  }
+  return s;
+}
+
 // ─── DERIVED FOOTPRINTS (LOFT-01 phase 2) ────────────────────────────────────
 
 const WATERLINE_OUTLINE_CACHE = new Map<ShipType, ReadonlyArray<{ zF: number; halfF: number }>>();
@@ -635,12 +712,32 @@ export function getHullWaterlineOutline(type: ShipType): ReadonlyArray<{ zF: num
   let outline = WATERLINE_OUTLINE_CACHE.get(type);
   if (outline) return outline;
   const profile = getHullProfile(type);
-  outline = Object.freeze(profile.stations.map((st) => ({
-    zF: st.baseZ / profile.L,
-    halfF: hullSurfacePointAt(profile, st.baseZ, 0).x / profile.W,
-  })));
+  const rows = getSplineRows(profile);
+  const out = [0, 0, 0, 0, 0, 0];
+  outline = Object.freeze(rows.map((r) => {
+    rowAt(r, rowTAtY(r, 0), out);
+    return { zF: out[2] / profile.L, halfF: Math.max(0, out[0]) / profile.W };
+  }));
   WATERLINE_OUTLINE_CACHE.set(type, outline);
   return outline;
+}
+
+/** Widest half-breadth of the hull's z-section (max x over every height at
+ *  local z): a scan in y on the spline, then golden section on the best bracket. */
+function sectionHalfBreadth(rows: SplineRow[], z: number): number {
+  let yLo = Infinity, yHi = -Infinity;
+  for (const r of rows) { yLo = Math.min(yLo, r.slots[r.slots.length - 1].y); yHi = Math.max(yHi, r.slots[0].y); }
+  const N = 48;
+  const xAt = (y: number) => solveHullZY(rows, z, y).x;
+  let bestJ = 0, bestX = -Infinity;
+  for (let j = 0; j <= N; j++) { const x = xAt(yLo + (yHi - yLo) * (j / N)); if (x > bestX) { bestX = x; bestJ = j; } }
+  let lo = yLo + (yHi - yLo) * Math.max(0, bestJ - 1) / N, hi = yLo + (yHi - yLo) * Math.min(N, bestJ + 1) / N;
+  const g = (Math.sqrt(5) - 1) / 2;
+  for (let it = 0; it < 32; it++) {
+    const c = hi - g * (hi - lo), d = lo + g * (hi - lo);
+    if (xAt(c) >= xAt(d)) hi = d; else lo = c;
+  }
+  return Math.max(bestX, xAt((lo + hi) * 0.5));
 }
 
 const CONTACT_CHAIN_CACHE = new Map<ShipType, ReadonlyArray<{ zF: number; halfF: number }>>();
@@ -666,10 +763,26 @@ export function getHullContactChain(type: ShipType): ReadonlyArray<{ zF: number;
   let chain = CONTACT_CHAIN_CACHE.get(type);
   if (chain) return chain;
   const profile = getHullProfile(type);
-  chain = Object.freeze(profile.stations.map((st) => {
-    let widest = 0;
-    for (const slot of st.slots) if (slot.x > widest) widest = slot.x;
-    return { zF: st.baseZ / profile.L, halfF: widest / profile.W };
+  const rows = getSplineRows(profile);
+  const out = [0, 0, 0, 0, 0, 0];
+  chain = Object.freeze(rows.map((r) => {
+    // The row's widest point says WHERE along the length this capsule sits;
+    // its radius is the widest the hull is at that z over every height (the
+    // z-section, not the row: near the raked transom a z-section cuts the
+    // counter forward of the row and is 0.4 m wider on a galleon).
+    const N = 192;
+    let bestX = -Infinity, bestZ = 0, bestAbs = -Infinity;
+    for (let j = 0; j <= N; j++) {
+      rowAt(r, j / N, out);
+      // A plateau (the stem head's sheer, upper strake and wale share one
+      // half-breadth; the stem line is sided constant) takes its point
+      // farthest from midships, the end that strikes.
+      if (out[0] > bestX + 1e-6 || (out[0] >= bestX - 1e-6 && Math.abs(out[2]) > bestAbs)) {
+        if (out[0] > bestX) bestX = out[0];
+        bestZ = out[2]; bestAbs = Math.abs(out[2]);
+      }
+    }
+    return { zF: bestZ / profile.L, halfF: sectionHalfBreadth(rows, bestZ) / profile.W };
   }));
   CONTACT_CHAIN_CACHE.set(type, chain);
   return chain;
