@@ -766,3 +766,54 @@ export function makeSheerRunGeometry(
   geo.computeVertexNormals();
   return geo;
 }
+
+/**
+ * b4.2d LOD1 (30-90 m, D26 <= 35% of LOD0 tris, <= 12 draws): every static
+ * part `accept` names, baked at its pose under `root` into ONE geometry whose
+ * vertex colour is its material's tone (position + normal + color, no uv).
+ * Parts whose world-scaled bounding radius is under `minRadius` are dropped:
+ * at 30 m a 10 cm cleat is under two pixels and only costs triangles. Shared
+ * and refcounted through the same cache as mergeStaticMeshes, so hulls of a
+ * class hold one copy (the key must carry everything the shape depends on).
+ */
+export function bakeVertexColorMerge(
+  root: THREE.Object3D,
+  accept: (mesh: THREE.Mesh) => THREE.Color | null,
+  minRadius: number,
+  cacheKey: string,
+): THREE.BufferGeometry | null {
+  const sharedKey = `${cacheKey}|vertex-colour`;
+  const hit = SHARED_MERGES.get(sharedKey);
+  if (hit) { hit.refs += 1; return hit.geo; }
+  root.updateMatrixWorld(true);
+  const rootInverse = new THREE.Matrix4().copy(root.matrixWorld).invert();
+  const relative = new THREE.Matrix4();
+  const scale = new THREE.Vector3();
+  const geos: THREE.BufferGeometry[] = [];
+  root.traverseVisible((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (!mesh.isMesh || (mesh as THREE.InstancedMesh).isInstancedMesh || Array.isArray(mesh.material)) return;
+    if (!mesh.geometry.attributes.position) return;
+    const tone = accept(mesh);
+    if (!tone) return;
+    relative.multiplyMatrices(rootInverse, mesh.matrixWorld);
+    if (!mesh.geometry.boundingSphere) mesh.geometry.computeBoundingSphere();
+    scale.setFromMatrixScale(relative);
+    const r = (mesh.geometry.boundingSphere?.radius ?? 0) * Math.max(scale.x, scale.y, scale.z);
+    if (r < minRadius) return;
+    const g = normalizeForMerge(mesh.geometry, relative);
+    g.deleteAttribute('uv');
+    const n = g.attributes.position.count;
+    const col = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) { col[i * 3] = tone.r; col[i * 3 + 1] = tone.g; col[i * 3 + 2] = tone.b; }
+    g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    geos.push(g);
+  });
+  if (geos.length === 0) return null;
+  const merged = mergeGeometries(geos, false);
+  for (const g of geos) g.dispose();
+  if (!merged) return null;
+  (merged.userData as { shipSharedKey?: string }).shipSharedKey = sharedKey;
+  SHARED_MERGES.set(sharedKey, { geo: merged, refs: 1, bytes: geometryBytes(merged) });
+  return merged;
+}

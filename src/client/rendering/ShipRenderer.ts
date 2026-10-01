@@ -46,7 +46,7 @@ import { buildWaterlineFoam, seatWaterlineFoam } from './ship/foam.js';
 import { buildRig, updateSailCloth } from './ship/sails.js';
 import { updateRigging, type Rigging } from './ship/rigging.js';
 import { buildWakeSurface, writeWakeSurface, setArmsVisible, makeWakeFrame, ARM_FACTOR_FLOOR, type WakeSurface, type WakeFrame } from './ship/wake.js';
-import { makeLoftedSlabGeometry, makeSheerRunGeometry, sheerHalfWidthAt, sheerZRange, makeHullStrakeGeometry, makeSplineHullGeometry, makeStairRampGeometry, makeWaterlineFoamTexture, mergeStaticMeshes, NO_MERGE_EXCLUDE } from './ship/geometry.js';
+import { makeLoftedSlabGeometry, makeSheerRunGeometry, sheerHalfWidthAt, sheerZRange, makeHullStrakeGeometry, makeSplineHullGeometry, makeStairRampGeometry, makeWaterlineFoamTexture, mergeStaticMeshes, bakeVertexColorMerge, NO_MERGE_EXCLUDE } from './ship/geometry.js';
 import { applyFlagWave, FLAG_DROP, FLAG_FLY, flagPhaseFromId, flagTexture, makeBarrel, makeCylinderBetween, makeFigurehead, makeHatchGrating, makeLanternFixture, makeRopeCoil } from './ship/dressing.js';
 import type { FlagUniforms, ShipFlag } from './ship/dressing.js';
 import {
@@ -303,11 +303,27 @@ const BREACH_INBOARD_DIST_SQ = 45 * 45;
  *  skips it (and its shadow-pass copy). Own ship always draws it. */
 const HOLD_INTERIOR_DIST_SQ = 60 * 60;
 
+/** LOD1 drops parts smaller than this (world bounding radius, m): under two
+ *  pixels at 30 m, and the bulk of the detail hull's triangle count. */
+const LOD1_MIN_PART_RADIUS = 0.3;
+/** Vertex tone of a textured material in the LOD1 bake (its map is dropped). */
+const LOD1_TEXTURED_TONE: Record<string, number> = {
+  'ship-dark-timber': 0x3a2412,
+  'ship-deck-planking': 0x8a6a48,
+  'ship-hull-strake': 0x2c1b10,
+  'ship-rope': 0xa48a5c,
+  default: 0x5a3c24,
+};
+
 interface ShipMeshGroup {
   root: THREE.Group;
   detailRoot: THREE.Group;
   proxyRoot: THREE.Group;
   proxySails: THREE.Mesh[];
+  /** b4.2d LOD1 (30-90 m): spline shell 36 x 12 + the detail parts baked into
+   *  one vertex-coloured draw, one instanced sail draw, flag (<= 12 draws). */
+  lod1Root: THREE.Group;
+  lod1Sails: THREE.InstancedMesh;
   /** b4.2d LOD2 (90-250 m): spline shell 18 x 8, timber, one instanced sail draw, flag. */
   lod2Root: THREE.Group;
   lod2Sails: THREE.InstancedMesh;
@@ -745,6 +761,135 @@ export class ShipRenderer {
     return { group, sails };
   }
 
+  /** One vertex-coloured material for every hull's baked LOD1 parts. */
+  private lod1Mat: THREE.MeshStandardMaterial | null = null;
+
+  /** b4.2d LOD1 (30-90 m, D26 <= 35% of LOD0 tris, <= 12 draws). `detail` is
+   *  the hull group BEFORE its static merge, so small parts can still be told
+   *  apart and dropped; `accept` names what is baked and with which tone. */
+  private buildShipLod1(
+    ship: Ship,
+    stats: typeof SHIP_STATS[keyof typeof SHIP_STATS],
+    detail: THREE.Group,
+    accept: (mesh: THREE.Mesh) => THREE.Color | null,
+    key: string,
+  ) {
+    const W = stats.width, L = stats.length, H = stats.height;
+    const group = new THREE.Group();
+    group.name = 'ship-lod1-root';
+    const profile = getHullProfile(ship.type);
+    // No breach discard on this shell: a hole at 30-90 m is drawn by its
+    // hole-vis group on the ship root; a see-through cut here would show a
+    // hull with no hold behind it.
+    const hullMat = new THREE.MeshStandardMaterial({ map: this.getTeamHullTexture(ship.teamColor), roughness: 0.84, metalness: 0.02, side: THREE.DoubleSide });
+    hullMat.name = 'lod1-hull-shell';
+    const shell = new THREE.Mesh(makeSplineHullGeometry(profile, 1), hullMat);
+    shell.castShadow = true;
+    shell.receiveShadow = true;
+    group.add(shell);
+    const baked = bakeVertexColorMerge(detail, accept, LOD1_MIN_PART_RADIUS, key);
+    if (baked) {
+      if (!this.lod1Mat) {
+        this.lod1Mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0.05 });
+        this.lod1Mat.name = 'lod1-baked';
+      }
+      const parts = new THREE.Mesh(baked, this.lod1Mat);
+      parts.name = 'lod1-baked';
+      parts.castShadow = true;
+      parts.receiveShadow = true;
+      group.add(parts);
+    }
+    const mastCount = stats.mastCount;
+    const mastSpacing = L * 0.42 / Math.max(mastCount - 1, 1);
+    const mastStartZ = L * 0.28;
+    const mastH = getMastHeight({ height: H, mastCount });
+    // A bellied sail (forward bulge to 9% of the beam), not LOD2's flat card.
+    const sw = W * 0.92, sh = H * 0.9;
+    const sailGeo = new THREE.PlaneGeometry(sw, sh, 6, 4);
+    const sp = sailGeo.attributes.position;
+    for (let i = 0; i < sp.count; i++) {
+      const x = sp.getX(i) / (sw * 0.5), y = sp.getY(i) / (sh * 0.5);
+      sp.setZ(i, W * 0.09 * (1 - x * x) * (1 - 0.6 * y * y));
+    }
+    sailGeo.computeVertexNormals();
+    const sailMat = new THREE.MeshStandardMaterial({ color: 0xeadfbf, roughness: 0.8, side: THREE.DoubleSide, map: this.getTeamSailTexture(ship.teamColor) });
+    sailMat.name = 'lod1-sail-canvas';
+    const sails = new THREE.InstancedMesh(sailGeo, sailMat, mastCount);
+    sails.name = 'lod1-sails';
+    sails.userData.lod2 = { mastStartZ, mastSpacing, y: H + mastH * 0.58, mastCount };
+    group.add(sails);
+    group.add(this.makeLodFlag(ship, H, mastStartZ));
+    return { group, sails };
+  }
+
+  /** Breaches are ENTITIES: diff the wire list against the decals already
+   *  built, keyed by ShipHole.id (detail hull and, b4.2d, LOD1: the groups hang
+   *  on the ship root, so they read at 30-90 m too). Returns the open count. */
+  private syncHoleVis(mesh: ShipMeshGroup, ship: Ship, t: number, breachNear: boolean): number {
+    const dbg = this.breachDebug;
+    const holes = dbg && dbg.shipId === ship.id ? [...(ship.holes ?? []), ...dbg.holes] : ship.holes ?? [];
+    let holeSlot = 0;
+    for (const hole of holes) {
+      let vis = mesh.holeVis.get(hole.id);
+      if (vis && vis.size !== (hole.size ?? 1)) {
+        // Enlarged (b2.2b): a bigger tear, a new outline and patch size.
+        this.disposeHoleVis(mesh, vis);
+        mesh.holeVis.delete(hole.id);
+        vis = undefined;
+      }
+      if (!vis) {
+        vis = this.buildHoleVis(mesh, hole);
+        mesh.holeVis.set(hole.id, vis);
+      } else if (
+        Math.abs(hole.x - vis.src.x) + Math.abs(hole.y - vis.src.y) + Math.abs(hole.z - vis.src.z) > 1e-3
+      ) {
+        // Fire burn-down or a recycled slot at the cap: same id, new wound.
+        this.reseatHoleVis(mesh, hole, vis);
+      }
+      if (hole.patched !== vis.patched) {
+        vis.patched = !!hole.patched;
+        if (vis.patched) {
+          // Carpentry shows: planks go on, the wound stops reading as open.
+          if (!vis.patch) this.addPlankPatch(mesh, vis, hole.id);
+        } else if (vis.patch) {
+          // The cap recycled this slot — the plank was blown back off.
+          this.dropPlankPatch(mesh, vis);
+        }
+      }
+      const open = !vis.patched;
+      vis.group.visible = open;
+      vis.marker.visible = open && !ship.sinking;
+      vis.inboard.visible = open && vis.hasSeat && breachNear;
+      vis.backdrop.visible = open && breachNear;
+      if (open && holeSlot < mesh.hullHoleUniform.value.length) {
+        mesh.hullHoleEnds.value[holeSlot].set(vis.inner.x, vis.inner.y, vis.inner.z, 0);
+        // One shader slot per OPEN breach at its size radius (b2.2b), torn
+        // along the strake by its own seeded outline (b2.3d).
+        mesh.hullHoleUniform.value[holeSlot].set(vis.point.x, vis.point.y, vis.point.z, vis.R);
+        mesh.hullHoleUniform.shape.value[holeSlot].set(vis.tangent.x, vis.tangent.y, vis.tangent.z, vis.seed);
+        holeSlot += 1;
+      }
+    }
+    if (mesh.holeVis.size !== holes.length) {
+      const live = new Set(holes.map((h) => h.id));
+      for (const [id, vis] of mesh.holeVis) {
+        if (live.has(id)) continue;
+        this.disposeHoleVis(mesh, vis);
+        mesh.holeVis.delete(id);
+      }
+    }
+    const markerPulse = 1 + 0.09 * Math.sin(t * 3.4 + 1.2);
+    for (const vis of mesh.holeVis.values()) {
+      if (vis.marker.visible) vis.marker.scale.setScalar(markerPulse * vis.markerScale);
+    }
+    const openBreaches = holeSlot;
+    for (; holeSlot < mesh.hullHoleUniform.value.length; holeSlot++) {
+      mesh.hullHoleUniform.value[holeSlot].set(0, 0, 0, 0);
+      mesh.hullHoleEnds.value[holeSlot].set(0, 0, 0, 0);
+    }
+    return openBreaches;
+  }
+
   private readonly lodMat = new THREE.Matrix4();
   private readonly lodQuat = new THREE.Quaternion();
   private readonly lodEuler = new THREE.Euler(0, 0, 0, 'YXZ');
@@ -752,11 +897,10 @@ export class ShipRenderer {
   private readonly lodScale = new THREE.Vector3();
 
   /** Trim and hoist the LOD2 sails (one instance per mast). */
-  private updateLod2Sails(mesh: ShipMeshGroup, ship: Ship, dt: number) {
+  private updateLod2Sails(mesh: ShipMeshGroup, ship: Ship, dt: number, sails = mesh.lod2Sails) {
     const k = 1 - Math.exp(-8 * dt);
     mesh.lod2SailAngle = THREE.MathUtils.lerp(mesh.lod2SailAngle, ship.sailAngle, k);
     mesh.lod2SailScale = THREE.MathUtils.lerp(mesh.lod2SailScale, Math.max(0.18, ship.sailHeight), k);
-    const sails = mesh.lod2Sails;
     sails.visible = ship.sailHeight > 0.06;
     const info = sails.userData.lod2 as { mastStartZ: number; mastSpacing: number; y: number; mastCount: number };
     this.lodEuler.set(0.055, mesh.lod2SailAngle, 0, 'YXZ');
@@ -1749,6 +1893,10 @@ export class ShipRenderer {
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     });
+    // Phones (D26 own-hull cap 45k): the guns at about half the facets
+    // (barrels 8 sides, not 14; trucks, bands and knobs likewise).
+    const ph = this.lodPhone;
+    const cannonSeg = ph ? 8 : 14;
     const barrelLen = 1.5;
     const barrelR = 0.18;
     for (let side = 0; side < 2; side++) {
@@ -1767,7 +1915,7 @@ export class ShipRenderer {
 
         // Main barrel — taper from breech (back) to muzzle (front)
         const barrel = new THREE.Mesh(
-          new THREE.CylinderGeometry(barrelR * 0.95, barrelR * 1.2, barrelLen, 14),
+          new THREE.CylinderGeometry(barrelR * 0.95, barrelR * 1.2, barrelLen, cannonSeg),
           ironMat,
         );
         barrel.rotation.z = Math.PI * 0.5;
@@ -1778,7 +1926,7 @@ export class ShipRenderer {
         // Brass reinforcing bands at three positions along the barrel
         for (const offset of [0.05, 0.55, 0.95] as const) {
           const band = new THREE.Mesh(
-            new THREE.CylinderGeometry(barrelR * 1.2, barrelR * 1.25, 0.08, 14),
+            new THREE.CylinderGeometry(barrelR * 1.2, barrelR * 1.25, 0.08, cannonSeg),
             brassMat,
           );
           band.rotation.z = Math.PI * 0.5;
@@ -1788,7 +1936,7 @@ export class ShipRenderer {
 
         // Brass muzzle bell — flared at the front so the gun reads clearly
         const muzzle = new THREE.Mesh(
-          new THREE.CylinderGeometry(barrelR * 1.45, barrelR * 1.0, 0.18, 14),
+          new THREE.CylinderGeometry(barrelR * 1.45, barrelR * 1.0, 0.18, cannonSeg),
           brassMat,
         );
         muzzle.rotation.z = Math.PI * 0.5;
@@ -1798,7 +1946,7 @@ export class ShipRenderer {
 
         // Dark muzzle bore (interior)
         const bore = new THREE.Mesh(
-          new THREE.CylinderGeometry(barrelR * 0.65, barrelR * 0.65, 0.06, 12),
+          new THREE.CylinderGeometry(barrelR * 0.65, barrelR * 0.65, 0.06, ph ? 8 : 12),
           boreMat,
         );
         bore.rotation.z = Math.PI * 0.5;
@@ -1810,7 +1958,7 @@ export class ShipRenderer {
         chargeGroup.visible = false;
         for (const offset of [0.26, 0.7, 1.05] as const) {
           const chargeBand = new THREE.Mesh(
-            new THREE.CylinderGeometry(barrelR * 1.34, barrelR * 1.38, 0.035, 14),
+            new THREE.CylinderGeometry(barrelR * 1.34, barrelR * 1.38, 0.035, cannonSeg),
             chargedMetalMat,
           );
           chargeBand.rotation.z = Math.PI * 0.5;
@@ -1818,7 +1966,7 @@ export class ShipRenderer {
           chargeGroup.add(chargeBand);
         }
         const muzzleGlow = new THREE.Mesh(
-          new THREE.SphereGeometry(barrelR * 0.72, 10, 8),
+          new THREE.SphereGeometry(barrelR * 0.72, ph ? 6 : 10, ph ? 5 : 8),
           chargedGlowMat,
         );
         muzzleGlow.position.x = barrelLen - 0.1 + 0.2;
@@ -1829,7 +1977,7 @@ export class ShipRenderer {
 
         // Cascabel (round knob at the back of the breech)
         const cascabel = new THREE.Mesh(
-          new THREE.SphereGeometry(barrelR * 0.6, 10, 8),
+          new THREE.SphereGeometry(barrelR * 0.6, ph ? 6 : 10, ph ? 5 : 8),
           ironMat,
         );
         cascabel.position.x = -0.18;
@@ -1837,7 +1985,7 @@ export class ShipRenderer {
 
         // Touch hole on top of the breech
         const touchHole = new THREE.Mesh(
-          new THREE.CylinderGeometry(0.04, 0.04, 0.08, 8),
+          new THREE.CylinderGeometry(0.04, 0.04, 0.08, ph ? 6 : 8),
           ironMat,
         );
         touchHole.position.set(0.06, barrelR * 1.0, 0);
@@ -1846,7 +1994,7 @@ export class ShipRenderer {
         // Trunnion caps (the bumps that let the barrel pivot)
         for (const sz of [-1, 1] as const) {
           const trunnion = new THREE.Mesh(
-            new THREE.CylinderGeometry(barrelR * 0.45, barrelR * 0.45, 0.16, 10),
+            new THREE.CylinderGeometry(barrelR * 0.45, barrelR * 0.45, 0.16, ph ? 6 : 10),
             ironMat,
           );
           trunnion.rotation.x = Math.PI * 0.5;
@@ -1875,7 +2023,7 @@ export class ShipRenderer {
         for (const wz of [-0.27, 0.27] as const) {
           for (const wx of [-0.18, 0.42] as const) {
             const wheel = new THREE.Mesh(
-              new THREE.CylinderGeometry(0.18, 0.18, 0.08, 12),
+              new THREE.CylinderGeometry(0.18, 0.18, 0.08, ph ? 8 : 12),
               wheelMat,
             );
             wheel.rotation.x = Math.PI * 0.5;
@@ -1884,7 +2032,7 @@ export class ShipRenderer {
             cg.add(wheel);
             // Iron rim
             const rim = new THREE.Mesh(
-              new THREE.TorusGeometry(0.18, 0.022, 6, 16),
+              new THREE.TorusGeometry(0.18, 0.022, ph ? 4 : 6, ph ? 8 : 16),
               ironBandMat,
             );
             rim.rotation.x = Math.PI * 0.5;
@@ -1895,7 +2043,7 @@ export class ShipRenderer {
 
         // Lashing rope on the back of the carriage (visual flair)
         const lashing = new THREE.Mesh(
-          new THREE.TorusGeometry(0.1, 0.025, 6, 12),
+          new THREE.TorusGeometry(0.1, 0.025, ph ? 4 : 6, ph ? 8 : 12),
           lashingMat,
         );
         lashing.rotation.y = Math.PI * 0.5;
@@ -1934,9 +2082,9 @@ export class ShipRenderer {
         // that still swing with the pitch pivot, carriage into a few under root.
         // perf-15: a gun is a gun. Every carriage of a class merges to the
         // same local geometry, so the whole broadside shares one set of buffers.
-        mergeStaticMeshes(chargeGroup, NO_MERGE_EXCLUDE, `cannon-charge-${ship.type}`);
-        mergeStaticMeshes(pitchPivot, new Set<THREE.Object3D>([chargeGroup]), `cannon-pitch-${ship.type}`);
-        mergeStaticMeshes(cg, new Set<THREE.Object3D>([yawPivot]), `cannon-root-${ship.type}`);
+        mergeStaticMeshes(chargeGroup, NO_MERGE_EXCLUDE, `cannon-charge-${ship.type}${ph ? '-phone' : ''}`);
+        mergeStaticMeshes(pitchPivot, new Set<THREE.Object3D>([chargeGroup]), `cannon-pitch-${ship.type}${ph ? '-phone' : ''}`);
+        mergeStaticMeshes(cg, new Set<THREE.Object3D>([yawPivot]), `cannon-root-${ship.type}${ph ? '-phone' : ''}`);
 
         cg.position.set(sideX, H + 0.18, cz);
         cg.rotation.y = side === 0 ? 0 : Math.PI;
@@ -2333,7 +2481,24 @@ export class ShipRenderer {
     // The quality is in the key too (b4.2d): the low tier builds its shell on
     // the LOD1 grid, and a merge cached by a high build would hand a low hull
     // the 72 x 48 shell (galleon low own hull 63k instead of 54k).
-    mergeStaticMeshes(group, mergeExclude, `detail-${ship.type}-${this.quality}${hwLanterns.length ? '-hwlantern' : ''}`);
+    // b4.2d LOD1: baked from the same parts BEFORE the detail merge, so the
+    // silhouette at 30-90 m is the detail hull's own. Dynamic parts (sails,
+    // yards, flags, upgrades, barrels) stay out as they do of the merge;
+    // cannons go in at rest; the hold, the LOD0 shell and anything
+    // see-through never do.
+    const lod1Skip = new Set<THREE.Object3D>([...mergeExclude, hull, interior, waterlineFoam, holdWater.mesh, holdWater.shaft]);
+    for (const c of cannonGroups) lod1Skip.delete(c.root);
+    const lod1Accept = (m: THREE.Mesh): THREE.Color | null => {
+      for (let o: THREE.Object3D | null = m; o && o !== group; o = o.parent) if (lod1Skip.has(o)) return null;
+      const mat = m.material as THREE.MeshStandardMaterial;
+      if (!mat.color || mat.transparent || mat.blending !== THREE.NormalBlending) return null;
+      const tone = mat.color.clone();
+      if (mat.map && tone.r > 0.9 && tone.g > 0.9 && tone.b > 0.9) tone.set(LOD1_TEXTURED_TONE[mat.name] ?? LOD1_TEXTURED_TONE.default);
+      return tone;
+    };
+    const lodKeySuffix = `${this.quality}${this.lodPhone ? '-phone' : ''}${hwLanterns.length ? '-hwlantern' : ''}`;
+    const lod1 = this.buildShipLod1(ship, stats, group, lod1Accept, `${shipLodKey(ship.type, 1)}-${lodKeySuffix}`);
+    mergeStaticMeshes(group, mergeExclude, `detail-${ship.type}-${lodKeySuffix}`);
 
     // ── Wake foam ─────────────────────────────────────────────
     // Scene-level (NOT parented to the ship): the old wake quad inherited hull
@@ -2352,6 +2517,8 @@ export class ShipRenderer {
     const proxyRoot = this.buildShipFar(ship, stats);
     proxyRoot.visible = false;
     group.add(proxyRoot);
+    lod1.group.visible = false;
+    group.add(lod1.group);
     const lod2 = this.buildShipLod2(ship, stats);
     lod2.group.visible = false;
     group.add(lod2.group);
@@ -2365,6 +2532,8 @@ export class ShipRenderer {
       detailRoot,
       proxyRoot,
       proxySails,
+      lod1Root: lod1.group,
+      lod1Sails: lod1.sails,
       lod2Root: lod2.group,
       lod2Sails: lod2.sails,
       lod2SailAngle: ship.sailAngle,
@@ -3224,6 +3393,7 @@ void main() {
         mesh.root.visible = false;
         mesh.detailRoot.visible = false;
         mesh.proxyRoot.visible = false;
+        mesh.lod1Root.visible = false;
         mesh.lod2Root.visible = false;
         mesh.wake.group.visible = false;
         continue;
@@ -3235,8 +3405,9 @@ void main() {
       activeUpgrades.clear();
       for (let u = 0; u < ship.upgrades.length; u++) activeUpgrades.add(ship.upgrades[u].type);
       this.updateUpgradeVisuals(mesh, activeUpgrades);
-      // b4.2d: the detail hull covers LOD0 + LOD1 (< 90 m, + 10% hysteresis);
-      // its merged LOD1 variant waits for the b4.3 kit atlas.
+      // b4.2d: the detail hull is LOD0 (< 30 m, + 10% hysteresis); LOD1
+      // (30-90 m) is its baked variant. detailDistance is the outer edge of
+      // LOD1, where the wake arms have faded to nothing.
       const detailDistance = SHIP_LOD_BANDS[1] * (1 + SHIP_LOD_HYSTERESIS);
       const distSq = cameraPosition
         ? (ship.position.x - cameraPosition.x) ** 2 + (ship.position.z - cameraPosition.z) ** 2
@@ -3245,7 +3416,7 @@ void main() {
       mesh.lodLevel = selectShipLod(mesh.lodLevel, Math.sqrt(distSq), {
         quality: this.quality, phone: this.lodPhone, ownHull: !cameraPosition || localCrewShip,
       });
-      let detailNear = mesh.lodLevel <= 1;
+      let detailNear = mesh.lodLevel === 0;
       // A hull's detail root is ~78 geometries and it flips on one frame when
       // the camera crosses detailDistance — the same shape of stall the island
       // reveal was built to flatten, and two ships crossing together were
@@ -3259,7 +3430,8 @@ void main() {
       // frame for the allowance must keep its proxy and its proxy sails, or it
       // sails for two frames with no canvas on it.
       detailNear = mesh.detailRoot.visible;
-      mesh.lod2Root.visible = !detailNear && mesh.lodLevel <= 2;
+      mesh.lod1Root.visible = !detailNear && mesh.lodLevel <= 1;
+      mesh.lod2Root.visible = !detailNear && mesh.lodLevel === 2;
       mesh.proxyRoot.visible = !detailNear && mesh.lodLevel === 3;
       // b3.4e: the queue-window fallback gives way once the library has the
       // hardware; after that only the near/far sibling swap runs.
@@ -3404,6 +3576,7 @@ void main() {
         sail.rotation.y = THREE.MathUtils.lerp(sail.rotation.y, ship.sailAngle, 1 - Math.exp(-8 * dt)); // 1:1 with the simulated brace
         sail.scale.y = THREE.MathUtils.lerp(sail.scale.y, Math.max(0.18, ship.sailHeight), 1 - Math.exp(-8 * dt));
       }
+      if (mesh.lod1Root.visible) this.updateLod2Sails(mesh, ship, dt, mesh.lod1Sails);
       if (mesh.lod2Root.visible) this.updateLod2Sails(mesh, ship, dt);
       if (!detailNear) {
         // No client-only heel here either: the server's own attitude spring
@@ -3412,9 +3585,17 @@ void main() {
         const attitudeAlpha = 1 - Math.exp(-(ship.sinking ? 6 : 3) * dt);
         mesh.root.rotation.x = THREE.MathUtils.lerp(mesh.root.rotation.x, basePitch, attitudeAlpha);
         mesh.root.rotation.z = THREE.MathUtils.lerp(mesh.root.rotation.z, baseRoll, attitudeAlpha);
-        // armFade 0: beyond the detail range the near path has already ramped
-        // the wedge to nothing, so this is a continuation, not a cut.
-        this.updateWake(mesh, ship, stats, waveT, dt, false, storm01, 0);
+        // LOD1 keeps the near wake (the arms fade to nothing at the outer
+        // edge of LOD1, as they did at the old detail edge); beyond it
+        // armFade 0 is a continuation, not a cut.
+        const lod1Wake = mesh.lodLevel <= 1;
+        if (lod1Wake) {
+          // LOD1 keeps the breaches readable (hole-vis on the root, no inboard).
+          this.holeMarkerMat.opacity = 0.28 + 0.24 * (0.5 + 0.5 * Math.sin(t * 3.4));
+          this.syncHoleVis(mesh, ship, t, false);
+        }
+        this.updateWake(mesh, ship, stats, waveT, dt, lod1Wake, storm01,
+          lod1Wake ? THREE.MathUtils.clamp((1 - distSq / (detailDistance * detailDistance)) * 4, 0, 1) : 0);
         continue;
       }
       // ── THE WHEEL SHOWS THE RUDDER, NOT THE SPIN ────────────────────────
@@ -3646,69 +3827,7 @@ void main() {
       // shot landed; a patched flip swaps it for crossed planks at the SAME
       // point; a vanished id disposes. No count heuristics, so a re-punched
       // spot can never end up with a plank floating over an open hole.
-      {
-        const dbg = this.breachDebug;
-        const holes = dbg && dbg.shipId === ship.id ? [...(ship.holes ?? []), ...dbg.holes] : ship.holes ?? [];
-        let holeSlot = 0;
-        for (const hole of holes) {
-          let vis = mesh.holeVis.get(hole.id);
-          if (vis && vis.size !== (hole.size ?? 1)) {
-            // Enlarged (b2.2b): a bigger tear, a new outline and patch size.
-            this.disposeHoleVis(mesh, vis);
-            mesh.holeVis.delete(hole.id);
-            vis = undefined;
-          }
-          if (!vis) {
-            vis = this.buildHoleVis(mesh, hole);
-            mesh.holeVis.set(hole.id, vis);
-          } else if (
-            Math.abs(hole.x - vis.src.x) + Math.abs(hole.y - vis.src.y) + Math.abs(hole.z - vis.src.z) > 1e-3
-          ) {
-            // Fire burn-down or a recycled slot at the cap: same id, new wound.
-            this.reseatHoleVis(mesh, hole, vis);
-          }
-          if (hole.patched !== vis.patched) {
-            vis.patched = !!hole.patched;
-            if (vis.patched) {
-              // Carpentry shows: planks go on, the wound stops reading as open.
-              if (!vis.patch) this.addPlankPatch(mesh, vis, hole.id);
-            } else if (vis.patch) {
-              // The cap recycled this slot — the plank was blown back off.
-              this.dropPlankPatch(mesh, vis);
-            }
-          }
-          const open = !vis.patched;
-          vis.group.visible = open;
-          vis.marker.visible = open && !ship.sinking;
-          vis.inboard.visible = open && vis.hasSeat && breachNear;
-          vis.backdrop.visible = open && breachNear;
-          if (open && holeSlot < mesh.hullHoleUniform.value.length) {
-            mesh.hullHoleEnds.value[holeSlot].set(vis.inner.x, vis.inner.y, vis.inner.z, 0);
-            // One shader slot per OPEN breach at its size radius (b2.2b), torn
-            // along the strake by its own seeded outline (b2.3d).
-            mesh.hullHoleUniform.value[holeSlot].set(vis.point.x, vis.point.y, vis.point.z, vis.R);
-            mesh.hullHoleUniform.shape.value[holeSlot].set(vis.tangent.x, vis.tangent.y, vis.tangent.z, vis.seed);
-            holeSlot += 1;
-          }
-        }
-        if (mesh.holeVis.size !== holes.length) {
-          const live = new Set(holes.map((h) => h.id));
-          for (const [id, vis] of mesh.holeVis) {
-            if (live.has(id)) continue;
-            this.disposeHoleVis(mesh, vis);
-            mesh.holeVis.delete(id);
-          }
-        }
-        const markerPulse = 1 + 0.09 * Math.sin(t * 3.4 + 1.2);
-        for (const vis of mesh.holeVis.values()) {
-          if (vis.marker.visible) vis.marker.scale.setScalar(markerPulse * vis.markerScale);
-        }
-        openBreaches = holeSlot;
-        for (; holeSlot < mesh.hullHoleUniform.value.length; holeSlot++) {
-          mesh.hullHoleUniform.value[holeSlot].set(0, 0, 0, 0);
-          mesh.hullHoleEnds.value[holeSlot].set(0, 0, 0, 0);
-        }
-      }
+      openBreaches = this.syncHoleVis(mesh, ship, t, breachNear);
 
       // Hold cargo: the crew's banked gold, standing up in the hold as crates and
       // coin. One tier variant visible at a time (cumulative geometry), so the

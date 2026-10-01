@@ -139,6 +139,10 @@ const sr = new ShipRenderer();
 sr.init(scene, 'high');
 const srLow = new ShipRenderer();
 srLow.init(new THREE.Scene(), 'low');
+// Phones: the client boot calls setLodPhone(true) before init (Game.ts).
+const srPhone = new ShipRenderer();
+srPhone.setLodPhone(true);
+srPhone.init(new THREE.Scene(), 'low');
 const measured = {};
 for (const type of CLASSES) {
   console.log(`\n[${type}] level roots`);
@@ -152,6 +156,13 @@ for (const type of CLASSES) {
   console.log(`    LOD0 ${c0.tris} tris / ${c0.draws} draws`);
   expect(`${type} LOD0 tris <= ${LOD0_TRI_CEIL[type]}`, c0.tris <= LOD0_TRI_CEIL[type], `${c0.tris}`);
   expect(`${type} LOD0 draws <= ratchet ${LOD0_DRAW_RATCHET[type]} (D26 target 30)`, c0.draws <= LOD0_DRAW_RATCHET[type], `${c0.draws}`);
+  const l1 = byName('ship-lod1-root');
+  expect(`${type} has an LOD1 root (ship-lod1-root)`, !!l1);
+  if (l1) {
+    const c1 = census(l1);
+    console.log(`    LOD1 ${c1.tris} tris / ${c1.draws} draws (${(100 * c1.tris / c0.tris).toFixed(1)}% of LOD0)`);
+    expect(`${type} LOD1 <= 35% of LOD0 tris and <= 12 draws`, c1.tris <= c0.tris * 0.35 && c1.draws <= 12, `${c1.tris} tris (${(100 * c1.tris / c0.tris).toFixed(1)}%) / ${c1.draws} draws`);
+  }
   expect(`${type} has an LOD2 root (ship-lod2-root)`, !!l2);
   if (l2) {
     const c2 = census(l2);
@@ -165,10 +176,12 @@ for (const type of CLASSES) {
   const lowDetail = lowRoot.children.find((c) => c.name === 'ship-detail-root');
   const cl = census(lowDetail);
   expect(`${type} low-tier own hull <= ${LOW_OWN_CAP} tris`, cl.tris <= LOW_OWN_CAP, `${cl.tris}`);
-  // Phones run the low build (its shell is already the LOD1 grid). The low
-  // build is graded with a high build of the same class already cached: the
-  // shared static merge must not leak the 72 x 48 shell across tiers.
-  expect(`${type} phone own hull (low build, LOD1 shell) <= ${PHONE_OWN_CAP} tris`, cl.tris <= PHONE_OWN_CAP, `${cl.tris}`);
+  // Phones run the low build (its shell is already the LOD1 grid) with the
+  // phone hardware cut. Built after a high and a low build of the same class
+  // are cached: the shared static merge must not leak across tiers.
+  const phoneRoot = srPhone.buildShip(fixtureShip(type, `lod-phone-${type}`));
+  const cp = census(phoneRoot.children.find((c) => c.name === 'ship-detail-root'));
+  expect(`${type} phone own hull (low build, LOD1 shell) <= ${PHONE_OWN_CAP} tris`, cp.tris <= PHONE_OWN_CAP, `${cp.tris}`);
 }
 console.log(`\nmeasured LOD0: ${JSON.stringify(measured)}`);
 console.log(`\n${checks} checks, ${failures} failed`);
