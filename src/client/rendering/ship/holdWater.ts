@@ -49,6 +49,8 @@ export const HOLD_WATER_LEVELS = 6;
 export const HOLD_WATER_INSET = 0.06;
 /** Share of the hull length the hold runs (matches hullVolume's HOLD_LENGTH_F). */
 const HOLD_LENGTH_F = 0.9;
+/** Dense samples per clip cell edge when lowering nodes under a concave skin. */
+const CLIP_CELL_SAMPLES = 12;
 /** A hull steeper than this (cos pitch x cos roll) has no meaningful level. */
 const MIN_UPRIGHT = 0.2;
 /** Largest extra slope (m/m) the dynamic slosh adds on top of the level. */
@@ -87,12 +89,43 @@ export function buildHoldWaterClip(type: ShipType): HoldWaterClip {
     const z = -halfL + (2 * halfL * s) / (HOLD_WATER_STATIONS - 1);
     for (let l = 0; l < HOLD_WATER_LEVELS; l += 1) {
       const y = vt.soleY + ((vt.deckY - vt.soleY) * l) / (HOLD_WATER_LEVELS - 1);
-      // The skin is convex between samples in y, so the chord of two samples
-      // lies inside it; the inset covers the curvature between stations.
-      const hw = Math.max(0, hullSurfacePointAt(profile, z, y).x - HOLD_WATER_INSET);
-      halfWidth[s * HOLD_WATER_LEVELS + l] = hw;
-      if (hw > maxHalfWidth) maxHalfWidth = hw;
+      halfWidth[s * HOLD_WATER_LEVELS + l] = hullSurfacePointAt(profile, z, y).x - HOLD_WATER_INSET;
     }
+  }
+  // The spline skin is not convex between nodes (the stern quarter tucks in
+  // under the counter), so the bilinear chord of four nodes can poke outside
+  // it. Sample every cell densely and lower its four corners by the worst
+  // excess: the interpolant drops by exactly that amount everywhere in the
+  // cell (bilinear weights sum to 1), and lowering a corner only ever lowers
+  // the neighbouring cells, so one pass leaves every sample inside the
+  // lining; the inset still covers the curvature between dense samples.
+  const dz = (2 * halfL) / (HOLD_WATER_STATIONS - 1);
+  const dy = (vt.deckY - vt.soleY) / (HOLD_WATER_LEVELS - 1);
+  const lining = (z: number, y: number): number => hullSurfacePointAt(profile, z, y).x - HOLD_WATER_INSET;
+  for (let s = 0; s < HOLD_WATER_STATIONS - 1; s += 1) {
+    for (let l = 0; l < HOLD_WATER_LEVELS - 1; l += 1) {
+      const i00 = s * HOLD_WATER_LEVELS + l; const i01 = i00 + 1;
+      const i10 = i00 + HOLD_WATER_LEVELS; const i11 = i10 + 1;
+      let excess = 0;
+      for (let a = 0; a <= CLIP_CELL_SAMPLES; a += 1) {
+        const us = a / CLIP_CELL_SAMPLES;
+        for (let b = 0; b <= CLIP_CELL_SAMPLES; b += 1) {
+          const ul = b / CLIP_CELL_SAMPLES;
+          const lo = halfWidth[i00] + (halfWidth[i01] - halfWidth[i00]) * ul;
+          const hi = halfWidth[i10] + (halfWidth[i11] - halfWidth[i10]) * ul;
+          const e = lo + (hi - lo) * us - lining(-halfL + (s + us) * dz, vt.soleY + (l + ul) * dy);
+          if (e > excess) excess = e;
+        }
+      }
+      if (excess > 0) {
+        halfWidth[i00] -= excess; halfWidth[i01] -= excess;
+        halfWidth[i10] -= excess; halfWidth[i11] -= excess;
+      }
+    }
+  }
+  for (let i = 0; i < halfWidth.length; i += 1) {
+    if (!(halfWidth[i] > 0)) halfWidth[i] = 0;
+    if (halfWidth[i] > maxHalfWidth) maxHalfWidth = halfWidth[i];
   }
   const clip: HoldWaterClip = { type, soleY: vt.soleY, deckY: vt.deckY, halfL, halfWidth, maxHalfWidth };
   CLIPS.set(type, clip);
