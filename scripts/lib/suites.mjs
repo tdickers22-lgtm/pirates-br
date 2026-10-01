@@ -225,6 +225,11 @@ export const LOGIC = [
   // pins every derived number against the pre-move renderer capture, the sheer
   // vs walk-taper standing contract, and "only one LOFT_STATIONS in src/".
   quick(tsx('test-hull-loft.mjs')),
+  // b4.2b / ships-01, ships-08: the C1 spline loft sampleHullSurface (centripetal
+  // Catmull-Rom x PCHIP, counter + flare + stem rows) through every station,
+  // C1, analytic normals, no folds, walk taper at 200 z, transom rake kept,
+  // girth-smoothness ratchet (< 5 deg bar is b4.2b2). ~0.8 s.
+  quick(tsx('test-hull-spline-parity.mjs')),
   // PHYS-02 / physics-02: grounding sampled the KEEL LINE, so a hull laid
   // beam-on to a cliff sailed her whole broadside into the rock and the server
   // called it clear water. 30,240 placements round all 14 islands; ~4 s, so
