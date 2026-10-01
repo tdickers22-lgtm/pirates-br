@@ -60,7 +60,10 @@ function frame(sr, ship, cam, local) {
   return drawn(sr.shipMeshes.get(ship.id).detailRoot);
 }
 
-for (const quality of ['high', 'low']) {
+// b4.2d (D26 ship LOD): the detail model now ends at 90 m (+10% hysteresis),
+// and on the low tier every hull but your own starts at LOD2 (no hold at
+// all), so the sealed-hold cull is graded at 80 m on high and balanced.
+for (const quality of ['high', 'balanced']) {
   for (const type of ['sloop', 'brigantine', 'galleon']) {
     const scene = new THREE.Scene();
     const sr = new ShipRenderer();
@@ -68,7 +71,7 @@ for (const quality of ['high', 'low']) {
     openFirstDrawBudgetForSettle();
     const ship = fixtureShip(type, `holdcull-${quality}-${type}`);
     const near = new THREE.Vector3(18, 6, 18);
-    const far = new THREE.Vector3(0, 12, 140); // inside the low detail range (170 m) too
+    const far = new THREE.Vector3(0, 12, 80); // past the 60 m hold cull, inside the D26 detail band (90 m)
 
     const nearSet = frame(sr, ship, near);
     const farSet = frame(sr, ship, far);
@@ -78,8 +81,8 @@ for (const quality of ['high', 'low']) {
     const saved = verts(nearSet) - verts(farSet);
     const hidden = [...nearSet].filter((m) => !farSet.has(m));
     const minSave = type === 'galleon' ? 10000 : type === 'brigantine' ? 7000 : 4000;
-    console.log(`  ${quality} ${type}: near ${verts(nearSet)} verts, sealed at 140 m ${verts(farSet)} (-${saved}, ${hidden.length} meshes)`);
-    expect(`${quality} ${type}: a sealed hull at 140 m skips its hold (>= ${minSave} verts)`, saved >= minSave, `saved ${saved}`);
+    console.log(`  ${quality} ${type}: near ${verts(nearSet)} verts, sealed at 80 m ${verts(farSet)} (-${saved}, ${hidden.length} meshes)`);
+    expect(`${quality} ${type}: a sealed hull at 80 m skips its hold (>= ${minSave} verts)`, saved >= minSave, `saved ${saved}`);
 
     const holdSet = new Set(mesh.holdInterior ?? []);
     const holdMeshes = new Set();
@@ -100,7 +103,7 @@ for (const quality of ['high', 'low']) {
     ship.holes = [{ id: 1, x: SHIP_STATS[type].width * 0.5, y: 0.3, z: 0, patched: false }];
     ship.nextHoleId = 2;
     const breachSet = frame(sr, ship, far);
-    expect(`${quality} ${type}: an open breach at 140 m draws the whole hold`, hidden.every((m) => breachSet.has(m)));
+    expect(`${quality} ${type}: an open breach at 80 m draws the whole hold`, hidden.every((m) => breachSet.has(m)));
     ship.holes = [{ id: 1, x: SHIP_STATS[type].width * 0.5, y: 0.3, z: 0, patched: true }];
     const patchedSet = frame(sr, ship, far);
     expect(`${quality} ${type}: once patched, the sealed hull culls it again`, hidden.every((m) => !patchedSet.has(m)));
