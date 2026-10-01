@@ -14,6 +14,7 @@
 import { generateStaticWorld, hashStaticWorld } from '../../shared/staticWorld.js';
 import { applyStaticWorldDeltas, staticWorldWire } from '../../server/core/snapshot.js';
 import type { Island, SeaRock, StaticWorldDelta } from '../../shared/types/index.js';
+import { sampleChartHeights, type ChartHeights } from './chartHeights.js';
 
 export interface StaticWorldJob {
   id: number;
@@ -23,7 +24,7 @@ export interface StaticWorldJob {
 }
 
 export type StaticWorldResult =
-  | { id: number; ok: true; worldHash: string; islands: Island[]; seaRocks: SeaRock[]; genMs: number; totalMs: number }
+  | { id: number; ok: true; worldHash: string; islands: Island[]; seaRocks: SeaRock[]; charts: ChartHeights[]; genMs: number; chartMs: number; totalMs: number }
   | { id: number; ok: false; error: string; totalMs: number };
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
@@ -37,9 +38,14 @@ scope.onmessage = (e: MessageEvent<StaticWorldJob>) => {
     const genMs = performance.now() - t0;
     const { worldHash } = hashStaticWorld(world);
     const wire = applyStaticWorldDeltas(staticWorldWire(world), job.deltas ?? []);
-    result = { id: job.id, ok: true, worldHash, islands: wire.islands, seaRocks: wire.seaRocks, genMs, totalMs: performance.now() - t0 };
+    // The map's island chart heights (chartHeights.ts): sampled here, on the
+    // post-delta islands, so the main thread never runs the fbm grid.
+    const c0 = performance.now();
+    const charts = wire.islands.map(sampleChartHeights);
+    const chartMs = performance.now() - c0;
+    result = { id: job.id, ok: true, worldHash, islands: wire.islands, seaRocks: wire.seaRocks, charts, genMs, chartMs, totalMs: performance.now() - t0 };
   } catch (err) {
     result = { id: job.id, ok: false, error: String((err as Error)?.message ?? err).slice(0, 200), totalMs: performance.now() - t0 };
   }
-  scope.postMessage(result);
+  scope.postMessage(result, result.ok ? result.charts.map((c) => c.heights.buffer) : []);
 };

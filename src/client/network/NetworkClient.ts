@@ -12,6 +12,7 @@ import type {
 } from '../../shared/types/index.js';
 import { WORLD_VERSION } from '../../shared/staticWorld.js';
 import type { StaticWorldResult } from '../world/staticWorld.worker.js';
+import { setPresampledCharts, presampledChartStats } from '../world/chartHeights.js';
 import { PROTOCOL_VERSION } from '../../shared/types/index.js';
 import { nextWaitMs, CONNECT_STEPS_MS, type ConnectProgress } from './connectPolicy.js';
 import { VersionGate, type VersionPhase } from './versionGate.js';
@@ -565,9 +566,11 @@ export class NetworkClient {
    *  'sync' (the server's world_sync supplied the statics); genMs is the
    *  worker's MapGenerator time, readyMs join receipt -> world installed. */
   worldGen: {
-    via: 'worker' | 'sync'; seed: number; version: number; genMs: number | null; workerMs: number | null;
+    via: 'worker' | 'sync'; seed: number; version: number; genMs: number | null; chartMs?: number | null; workerMs: number | null;
     readyMs: number; readyAt: number; hashAgreed: boolean; reason?: string;
   } | null = null;
+  /** Probe hook: island chart heights the worker pre-sampled / MapRenderer used. */
+  get presampledCharts(): { installed: number; hits: number } { return presampledChartStats(); }
   /** Wall time the last match_horn ARRIVED (before any seed-join buffering). */
   hornReceivedAt: number | null = null;
   /** While the static world is being regenerated, the join is held and every
@@ -576,7 +579,7 @@ export class NetworkClient {
   private worldGate: {
     id: number; startedAt: number; playerId: string; shipId: string; snapshot: GameState;
     ref: StaticWorldRef; buffered: Array<[NetMsg, number]>; reported: boolean;
-    genMs: number | null; workerMs: number | null;
+    genMs: number | null; chartMs?: number | null; workerMs: number | null;
   } | null = null;
   private worldWorker: Worker | null = null;
   private worldJobSeq = 0;
@@ -584,7 +587,7 @@ export class NetworkClient {
   private beginSeedJoin(playerId: string, shipId: string, snapshot: GameState, ref: StaticWorldRef): void {
     const id = ++this.worldJobSeq;
     this.hornReceivedAt = null;
-    this.worldGate = { id, startedAt: Date.now(), playerId, shipId, snapshot, ref, buffered: [], reported: false, genMs: null, workerMs: null };
+    this.worldGate = { id, startedAt: Date.now(), playerId, shipId, snapshot, ref, buffered: [], reported: false, genMs: null, chartMs: null, workerMs: null };
     const worker = this.staticWorldWorker();
     if (!worker) { this.reportWorldHash(NetworkClient.NO_WORLD_HASH); return; }
     worker.postMessage({ id, seed: ref.seed, version: ref.version, deltas: ref.deltas });
@@ -632,6 +635,8 @@ export class NetworkClient {
       console.warn(`[Net] static world hash ${r.worldHash} != server ${g.ref.worldHash}; waiting for world_sync`);
       return;
     }
+    setPresampledCharts(r.charts);
+    g.chartMs = r.chartMs;
     this.releaseWorldGate(r.islands, r.seaRocks, 'worker', true);
   }
 
@@ -649,7 +654,7 @@ export class NetworkClient {
     this.worldGate = null;
     const now = Date.now();
     this.worldGen = {
-      via, seed: g.ref.seed, version: g.ref.version, genMs: g.genMs, workerMs: g.workerMs,
+      via, seed: g.ref.seed, version: g.ref.version, genMs: g.genMs, chartMs: g.chartMs, workerMs: g.workerMs,
       readyMs: now - g.startedAt, readyAt: now, hashAgreed, ...(reason ? { reason } : {}),
     };
     const snapshot: GameState = { ...g.snapshot, islands, seaRocks };

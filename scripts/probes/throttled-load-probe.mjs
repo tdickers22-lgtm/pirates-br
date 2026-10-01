@@ -95,6 +95,12 @@ if (MUTATE && !ROWS.includes(MUTATION_ROW[MUTATE])) {
 // gate: it proves both rows CAN pass on this rig (a gate that cannot pass is as
 // broken as one that cannot fail), so a RED under the throttle is the product.
 const CALIBRATE = process.argv.includes('--calibrate');
+// --profile (diagnosis, not graded): a CDP CPU profile over row B's 20 s
+// window, written to test-results/throttled-load-B.cpuprofile and summarised:
+// every busy run of samples (no '(idle)' between them) longer than the
+// long-task floor, its time outside the timedRender wrapper, and the
+// functions that own that time (inclusive, render subtree excluded).
+const PROFILE = process.argv.includes('--profile');
 const THROTTLE = Object.freeze({ downMbit: 9, upMbit: 9, rttMs: 70, cpuRate: 4 });
 const BUDGET = Object.freeze({ playClickableMs: 3500, longTasksAfterHorn: 3, longTaskMs: 50, stepFrameCpuP95Ms: 12, worldGenMs: 1500 });
 const PLAY_WINDOW_MS = 20_000;
@@ -221,6 +227,34 @@ function heaviestDistFiles() {
   return { files: pick, wire: total };
 }
 
+function summariseProfile(profile) {
+  writeFileSync('test-results/throttled-load-B.cpuprofile', JSON.stringify(profile));
+  const byId = new Map(profile.nodes.map((n) => [n.id, n]));
+  const parent = new Map();
+  for (const n of profile.nodes) for (const c of n.children ?? []) parent.set(c, n.id);
+  const label = (n) => { const f = n.callFrame; return `${f.functionName || '(anon)'} ${f.url.split('/').pop()}:${f.lineNumber + 1}:${f.columnNumber + 1}`; };
+  const stackOf = (id) => { const s = []; for (let x = id; x != null; x = parent.get(x)) s.push(byId.get(x)); return s; };
+  const runs = [];
+  let cur = null;
+  profile.samples.forEach((id, i) => {
+    const dt = (profile.timeDeltas[i + 1] ?? profile.timeDeltas[i]) / 1000;
+    const leaf = byId.get(id);
+    if (leaf.callFrame.functionName === '(idle)') { if (cur) runs.push(cur); cur = null; return; }
+    cur ??= { ms: 0, renderMs: 0, at: profile.timeDeltas.slice(0, i + 1).reduce((a, x) => a + x, 0) / 1000, fns: new Map() };
+    cur.ms += dt;
+    const st = stackOf(id);
+    if (st.some((n) => n.callFrame.functionName === 'timedRender')) { cur.renderMs += dt; return; }
+    for (const k of new Set(st.map(label))) cur.fns.set(k, (cur.fns.get(k) ?? 0) + dt);
+  });
+  if (cur) runs.push(cur);
+  const long = runs.filter((r) => r.ms - r.renderMs > BUDGET.longTaskMs);
+  console.log(`  P  profile: ${runs.length} busy runs, ${long.length} with > ${BUDGET.longTaskMs} ms outside render (test-results/throttled-load-B.cpuprofile)`);
+  for (const r of long) {
+    console.log(`     at +${Math.round(r.at)} ms: ${Math.round(r.ms)} ms busy, ${Math.round(r.ms - r.renderMs)} outside render`);
+    for (const [k, ms] of [...r.fns].sort((x, y) => y[1] - x[1]).slice(0, 14)) console.log(`       ${String(Math.round(ms)).padStart(5)} ms  ${k}`);
+  }
+}
+
 const server = spawn(process.execPath, ['--import', 'tsx', 'src/server/index.ts'], {
   env: { ...process.env, PORT: String(PORT), PIRATES_BR_STATS_PATH: `/tmp/pbr-4g-probe-stats-${process.pid}.json`, PIRATES_BR_MAP_SEED: '20260801' },
   stdio: ['ignore', 'pipe', 'pipe'],
@@ -318,7 +352,7 @@ try {
     const errors = [];
     page.on('pageerror', (e) => errors.push(`${String(e).slice(0, 200)} @ ${String(e?.stack ?? '').split('\n').slice(1, 3).join(' <- ').slice(0, 200)}`));
     page.on('crash', () => { errors.push('RENDERER CRASHED'); console.error('  ! the phone page crashed (renderer process gone)'); });
-    await throttle(page);
+    const cdpB = await throttle(page);
     await page.goto(`${BASE}/?server=${PORT}&debug`, { waitUntil: 'domcontentloaded', timeout: 60_000 });
     // Polled with page.evaluate, not waitForFunction: the page's CSP has no
     // 'unsafe-eval', and Playwright's in-page poller compiles the predicate
@@ -341,14 +375,25 @@ try {
     });
     out.worldGen = wg;
     const g = wg.gen;
-    console.log(`  B0 seed join: ${g ? `via ${g.via}, generation ${g.genMs == null ? '-' : g.genMs.toFixed(0)} ms (worker total ${g.workerMs == null ? '-' : g.workerMs.toFixed(0)} ms), join -> world installed ${g.readyMs} ms, ${g.hashAgreed ? 'hash agreed' : `NO hash agreement (${g.reason ?? '?'})`}, ${wg.hornAt == null ? 'no horn seen' : `${wg.hornAt - g.readyAt} ms before the horn`}` : 'NONE (full legacy join)'}`);
+    console.log(`  B0 seed join: ${g ? `via ${g.via}, generation ${g.genMs == null ? '-' : g.genMs.toFixed(0)} ms + chart heights ${g.chartMs == null ? '-' : g.chartMs.toFixed(0)} ms (worker total ${g.workerMs == null ? '-' : g.workerMs.toFixed(0)} ms), join -> world installed ${g.readyMs} ms, ${g.hashAgreed ? 'hash agreed' : `NO hash agreement (${g.reason ?? '?'})`}, ${wg.hornAt == null ? 'no horn seen' : `${wg.hornAt - g.readyAt} ms before the horn`}` : 'NONE (full legacy join)'}`);
     expect('the join is a seed join regenerated in the worker with the server\'s worldHash', !!g && g.via === 'worker' && g.hashAgreed === true, JSON.stringify(g));
     expect(`client static-world generation <= ${BUDGET.worldGenMs} ms at 4x CPU (${g?.genMs == null ? 'none' : g.genMs.toFixed(0)})`, !!g && g.genMs != null && g.genMs <= BUDGET.worldGenMs);
     expect('the static world is installed before the horn', !!g && wg.hornAt != null && g.readyAt <= wg.hornAt, `readyAt ${g?.readyAt} hornAt ${wg.hornAt}`);
+    // OD1 row B attribution (--profile, 2026-10-01): three of five graded long
+    // tasks were MapRenderer sampling island chart heights on the main thread
+    // (99-216 ms each). The worker now samples them; every island must arrive
+    // with its heights and the map must have used them by the end of row B.
+    const islandCount = await page.evaluate(() => window.__piratesBR?.state?.islands?.length ?? 0);
+    expect(`the worker pre-sampled every island's chart heights (${g?.chartMs == null ? 'none' : `${g.chartMs.toFixed(0)} ms`}, ${islandCount} islands)`, !!g && g.chartMs != null && islandCount > 0);
     await page.evaluate(() => window.__piratesBR.setBotPeace?.(true));
     // Let the horn-time island reveal land before the window opens: the gate is
     // about steady play, and the reveal has its own budget (first-draw).
     await page.waitForTimeout(8_000);
+    if (PROFILE) {
+      await cdpB.send('Profiler.enable');
+      await cdpB.send('Profiler.setSamplingInterval', { interval: 1000 });
+      await cdpB.send('Profiler.start');
+    }
     const b = await page.evaluate(async ({ windowMs, longMs, busy }) => {
       // GL submission is timed separately: on SwiftShader the rasteriser and
       // the synchronous program links run inside WebGLRenderer.render() on
@@ -393,6 +438,10 @@ try {
       return { raw: tasks.map(([, d]) => Math.round(d)), residual, frames, renders: spans.length };
     }, { windowMs: PLAY_WINDOW_MS, longMs: BUDGET.longTaskMs, busy: MUTATE === 'busy' });
     b.tasks = b.residual.filter((ms) => ms > BUDGET.longTaskMs);
+    const charts = await page.evaluate(() => window.__piratesBR?.network?.presampledCharts ?? null);
+    out.charts = charts;
+    expect(`the map drew from the worker's chart heights, not the main thread (installed ${charts?.installed}, used ${charts?.hits})`, !!charts && charts.installed > 0 && charts.hits > 0);
+    if (PROFILE) summariseProfile((await cdpB.send('Profiler.stop')).profile);
     // stepFrameCpu, one frame at a time, at the phone pacer's 30 fps dt, in
     // short evaluates (the first run lost the page inside one long evaluate
     // that did the window and 90 bench frames together, with no way to tell
