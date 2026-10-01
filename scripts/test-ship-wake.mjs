@@ -286,5 +286,54 @@ console.log('\nTWELVE WAKES, EVERY FRAME, FOR NOTHING');
   expect('and not one NaN got into the buffer', bad === 0, `${bad} non-finite floats`);
 }
 
+// ── WATERLINE COLLAR v2 (b4.2e, ships-04) ────────────────────────────────────
+// The collar was a constant 0.8-1.6 m apron round a hull at rest. Now: <= 0.25 m
+// at rest on any sea, >= 0.2 W on the bow sector at full speed, a stern wash aft.
+{
+  console.log('\nwaterline collar (b4.2e, ships-04)');
+  const THREE = await import('three');
+  const wake = await import('../src/client/rendering/ship/wake.ts');
+  const { getHullProfile } = await import('../src/shared/hull.ts');
+  const ok = typeof wake.buildWaterlineCollar === 'function' && typeof wake.seatWaterlineCollar === 'function';
+  expect('wake.ts builds and seats the speed/slope-driven collar', ok, 'buildWaterlineCollar / seatWaterlineCollar missing (constant-width foam.ts collar)');
+  if (ok) {
+    for (const type of ['sloop', 'brigantine', 'galleon']) {
+      const profile = getHullProfile(type);
+      const W = profile.W;
+      const mesh = wake.buildWaterlineCollar(profile, null);
+      const root = new THREE.Object3D();
+      root.position.set(137.5, 0, -61.25);
+      root.rotation.set(0.04, 0.9, -0.07);
+      const run = (speed01, storm) => {
+        let maxW = 0, minBow = Infinity, maxMid = 0, maxStern = 0, bad = 0;
+        for (let f = 0; f < 4; f++) {
+          wake.seatWaterlineCollar(mesh, root, 3.1 + f * 0.37, storm, MUTATE ? 1 : speed01);
+          const st = wake.collarState(mesh);
+          for (let i = 0; i < st.widths.length; i++) {
+            const w = st.widths[i];
+            if (!Number.isFinite(w)) bad++;
+            maxW = Math.max(maxW, w);
+            if (st.bow[i] >= 0.5) minBow = Math.min(minBow, w);
+            if (st.bow[i] < 0.05 && st.stern[i] < 0.05) maxMid = Math.max(maxMid, w);
+            if (st.stern[i] >= 0.5) maxStern = Math.max(maxStern, w);
+          }
+        }
+        const pos = mesh.geometry.attributes.position.array;
+        for (const v of pos) if (!Number.isFinite(v)) bad++;
+        return { maxW, minBow, maxMid, maxStern, bad };
+      };
+      for (const storm of [0, 1]) {
+        const r = run(0, storm);
+        expect(`${type} storm ${storm}: collar at rest <= 0.25 m everywhere`, r.maxW <= 0.25 + 1e-6, `max ${r.maxW.toFixed(3)} m`);
+        expect(`${type} storm ${storm}: no NaN in the collar`, r.bad === 0, `${r.bad} non-finite`);
+      }
+      const fast = run(1, 0.3);
+      expect(`${type}: bow sector >= 0.2 W at top speed`, fast.minBow >= 0.2 * W, `min bow ${fast.minBow.toFixed(3)} m vs 0.2 W = ${(0.2 * W).toFixed(3)}`);
+      expect(`${type}: the bow wave is wider than the side at speed`, fast.minBow > fast.maxMid, `bow ${fast.minBow.toFixed(2)} side ${fast.maxMid.toFixed(2)}`);
+      expect(`${type}: stern wash grows with speed`, fast.maxStern > 0.25 + 0.1 * W, `stern ${fast.maxStern.toFixed(2)} m`);
+    }
+  }
+}
+
 console.log(`\n${failures === 0 ? 'PASS' : 'FAIL'} — ${checks - failures}/${checks} checks`);
 process.exit(failures === 0 ? 0 : 1);

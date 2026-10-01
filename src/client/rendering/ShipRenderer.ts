@@ -38,14 +38,13 @@ const UPGRADE_PENNANT_COLORS: Record<ShipUpgradeType, number> = {
 
 import { finishCanvasTexture, foamTexture, sailTexture, sprayTexture, supplyLidTexture, woodCanvas, woodTexture } from './ship/textures.js';
 import type { SupplyKind } from './ship/textures.js';
-import { applyPlankDetail, makePlankUniforms, type PlankUniforms } from './ship/plankDetail.js';
+import { applyPlankDetail, makePlankUniforms, addStrakeSpace, type PlankUniforms } from './ship/plankDetail.js';
 import { releaseShipGeometry } from './ship/geometry.js';
 import { selectShipLod, shipLodKey, SHIP_LOD_BANDS, SHIP_LOD_HYSTERESIS, type ShipLodLevel } from './ship/lod.js';
 import { buildRudder, buildSternCastle } from './ship/stern.js';
-import { buildWaterlineFoam, seatWaterlineFoam } from './ship/foam.js';
 import { buildRig, updateSailCloth } from './ship/sails.js';
 import { updateRigging, type Rigging } from './ship/rigging.js';
-import { buildWakeSurface, writeWakeSurface, setArmsVisible, makeWakeFrame, ARM_FACTOR_FLOOR, type WakeSurface, type WakeFrame } from './ship/wake.js';
+import { buildWakeSurface, writeWakeSurface, setArmsVisible, makeWakeFrame, ARM_FACTOR_FLOOR, buildWaterlineCollar, seatWaterlineCollar, type WakeSurface, type WakeFrame } from './ship/wake.js';
 import { makeLoftedSlabGeometry, makeSheerRunGeometry, sheerHalfWidthAt, sheerZRange, makeHullStrakeGeometry, makeSplineHullGeometry, makeStairRampGeometry, makeWaterlineFoamTexture, mergeStaticMeshes, bakeVertexColorMerge, NO_MERGE_EXCLUDE } from './ship/geometry.js';
 import { applyFlagWave, FLAG_DROP, FLAG_FLY, flagPhaseFromId, flagTexture, makeBarrel, makeCylinderBetween, makeFigurehead, makeHatchGrating, makeLanternFixture, makeRopeCoil } from './ship/dressing.js';
 import type { FlagUniforms, ShipFlag } from './ship/dressing.js';
@@ -1072,6 +1071,9 @@ export class ShipRenderer {
     // per side). The low tier draws its one LOD0 hull (the one you stand on)
     // on the LOD1 grid so the whole hull stays under its 60k cap.
     const hullGeo = makeSplineHullGeometry(profile, this.quality === 'low' ? 1 : 0);
+    // b4.2e: strake-space coordinates for plank shader v2 (strakes follow the
+    // sheer into the stem, same count at the stem as amidships).
+    addStrakeSpace(hullGeo);
     // REAL see-through breaches: the fragment shader discards hull planking
     // inside each active hole (hull-local space — the loft mesh sits at
     // identity in the ship group, so `position` IS hull-local). The material
@@ -1099,7 +1101,7 @@ export class ShipRenderer {
     // surface within ~0.05 m), but with no contact treatment the ocean just
     // clipped the shell with a hard silhouette and the hull's own shadow read
     // as an air gap under the keel. This collar is what makes it sit IN the sea.
-    const waterlineFoam = buildWaterlineFoam(profile, this.waterlineFoamTex);
+    const waterlineFoam = buildWaterlineCollar(profile, this.waterlineFoamTex);
     group.add(waterlineFoam);
 
     // Breaches are NOT built here any more. A hole is an ENTITY at whatever
@@ -3534,27 +3536,21 @@ void main() {
         mesh.plankUniforms.uWetY.value =
           gerstnerHeight(mesh.root.position.x, mesh.root.position.z, waveT, WAVE_PARAMS, storm01)
           - mesh.root.position.y;
-        const speed01 = THREE.MathUtils.clamp(Math.hypot(ship.velocity.x, ship.velocity.z) / 8, 0, 1);
+        const shipSpeed = Math.hypot(ship.velocity.x, ship.velocity.z);
+        const speed01 = THREE.MathUtils.clamp(shipSpeed / 8, 0, 1);
+        const collarSpeed01 = THREE.MathUtils.clamp(shipSpeed / (SHIP_STATS[ship.type]?.maxSpeed ?? 13), 0, 1);
         const breathe = 0.9 + 0.1 * Math.sin(t * 1.7 + ship.position.x * 0.05);
         mesh.waterlineFoam.visible = detailNear && !ship.sinking;
-        foamMat.opacity = (0.52 + 0.34 * speed01 + 0.14 * storm01) * breathe;
+        // b4.2e (ships-04): 40-50% alpha at rest (the texture breaks it up),
+        // brighter as the bow wave builds.
+        foamMat.opacity = (0.46 + 0.3 * speed01 + 0.14 * storm01) * breathe;
         // ── WHICH ONE IS MINE ──────────────────────────────────────────────
-        // The swallowtail says it at any range; the wet edge says it at boarding
-        // range. Ten hulls in one anchorage differ only by team colour, and the
-        // colour of a stranger's ship looks exactly as much like an identity as
-        // the colour of your own, so an auditor fought half a match off someone
-        // else's derelict without ever being told. The collar gilds over the
-        // last 50 m — the distance at which you are choosing a gangway.
+        // The swallowtail pennant says it at any range; a thin gilded edge on
+        // the boot-top says it at boarding range (plank shader uOwnEdge). It
+        // used to gild the whole foam collar, which read as a sand tray under
+        // the hull at a berth (ships-04), so the collar stays sea-white.
         mesh.ownPennant.visible = localCrewShip;
-        if (localCrewShip) {
-          const gild = cameraPosition
-            ? THREE.MathUtils.clamp(1 - (Math.sqrt(distSq) - 22) / 28, 0, 1)
-            : 1;
-          foamMat.color.setRGB(1, 1 - 0.28 * gild, 1 - 0.62 * gild);
-          foamMat.opacity = Math.min(1, foamMat.opacity * (1 + 0.55 * gild));
-        } else if (foamMat.color.g !== 1 || foamMat.color.b !== 1) {
-          foamMat.color.setRGB(1, 1, 1);
-        }
+        mesh.plankUniforms.uOwnEdge.value = localCrewShip ? 1 : 0;
         // Cancel the hull's pitch/roll (previous frame's settled value — one
         // frame of lag is invisible) so the wet edge stays glued to the sea
         // instead of riding the ship's attitude out of the water. The collar
@@ -3567,8 +3563,8 @@ void main() {
         if (foamMat.map) {
           foamMat.map.offset.x = (t * (0.03 + speed01 * 0.12)) % 1;
         }
-        // Yaw-only frame + vertices lifted onto the local Gerstner surface (ship/foam.ts).
-        seatWaterlineFoam(mesh.waterlineFoam, mesh.root, waveT, storm01);
+        // Yaw-only frame, speed/slope-driven widths, vertices on the local Gerstner surface (ship/wake.ts).
+        seatWaterlineCollar(mesh.waterlineFoam, mesh.root, waveT, storm01, collarSpeed01);
       }
       for (let s = 0; s < mesh.proxySails.length; s++) {
         const sail = mesh.proxySails[s];

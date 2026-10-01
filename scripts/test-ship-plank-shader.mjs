@@ -35,8 +35,10 @@ function expect(label, ok, detail = '') {
 }
 
 function stubShader() {
-  // Deliberately in three's real emission order: common, then normals, then
-  // map, then roughness. If the patch declares the plank grid in the wrong
+  // Deliberately in three's real emission order (meshphysical.glsl.js r160):
+  // common, map, roughness, normal_fragment_begin, emissivemap. (b4.2e: the
+  // stub used to put normals first, which is not three's order and kept the
+  // declaration check red at HEAD for a shader that links fine.) If the patch declares the plank grid in the wrong
   // chunk the assembled source reads a name before it exists.
   return {
     uniforms: {},
@@ -44,9 +46,10 @@ function stubShader() {
     fragmentShader: [
       '#include <common>',
       'void main() {',
-      '#include <normal_fragment_begin>',
       '#include <map_fragment>',
       '#include <roughnessmap_fragment>',
+      '#include <normal_fragment_begin>',
+      '#include <emissivemap_fragment>',
       '}',
     ].join('\n'),
   };
@@ -84,16 +87,24 @@ for (const surface of ['hull', 'deck']) {
     'the <map_fragment> replacement missed — the hull is back to the flat canvas');
   expect(`${surface}: the wet line is wired as a uniform`,
     shader.uniforms.uWetY !== undefined && shader.uniforms.uWetBand !== undefined);
-  expect(`${surface}: the plank grid is hull-local, not UV`,
-    /vPlankPos\.z \/ /.test(shader.fragmentShader),
-    'a UV grid stretches over the loft taper; the whole point is metric cells');
+  if (surface === 'deck') {
+    expect('deck: the board grid is hull-local, not UV',
+      /float shipPlankAlongM = vPlankPos\.z;/.test(shader.fragmentShader),
+      'a UV grid stretches over the loft taper; the whole point is metric cells');
+  } else {
+    // b4.2e (ships-05): strake space, not world-Y bands.
+    expect('hull: the strake grid reads the strakeUv attribute (strake space), not world Y',
+      /attribute vec3 strakeUv;/.test(shader.vertexShader) && /float shipStrakeIdx = vStrake\.y;/.test(shader.fragmentShader)
+        && !/vPlankPos\.y \/ /.test(shader.fragmentShader),
+      'planks still stack in hull-local Y: they ignore the sheer and the stem taper');
+  }
 }
 
 // ── 2. Declaration before use, in three's real chunk order ───────────────────
 {
   const { shader } = patched('hull', true);
   const src = shader.fragmentShader;
-  for (const name of ['shipPlankSeam', 'shipPlankRnd', 'shipPlankWet']) {
+  for (const name of ['shipPlankSeam', 'shipPlankRnd', 'shipPlankWet', 'shipTrenail', 'shipGold']) {
     // Word-boundary, or `shipPlankSeam` matches inside `shipPlankSeamA` and the
     // gate grades the wrong token.
     const decl = src.indexOf(`float ${name} =`);
@@ -119,7 +130,7 @@ for (const surface of ['hull', 'deck']) {
   expect('hull: the plank block ALSO runs',
     /shipPlankSeam/.test(shader.fragmentShader));
   expect('hull: the program cache key folds in the previous patch',
-    mat.customProgramCacheKey().startsWith('hull-hole-discard-1|ship-plank-hull-'),
+    mat.customProgramCacheKey().startsWith('hull-hole-discard-1|ship-plank2-hull-'),
     `got ${mat.customProgramCacheKey()}`);
 }
 
@@ -181,6 +192,69 @@ for (const surface of ['hull', 'deck']) {
     typeof wet === 'number' && wet > flooded && wet > dry + 0.9,
     `uWetY went ${dry} -> flooded ${flooded} -> sinking ${wet} (expected wetter still, and +0.9 m on dry)`);
   sr.clear();
+}
+
+// ── 6. Plank shader v2: strake space on the real spline shell (b4.2e) ────────
+{
+  console.log('\nplank shader v2 (b4.2e, ships-05)');
+  const pd = await import('../src/client/rendering/ship/plankDetail.ts');
+  const { makeSplineHullGeometry } = await import('../src/client/rendering/ship/geometry.ts');
+  const { getHullProfile } = await import('../src/shared/hull.ts');
+  const have = typeof pd.computeStrakeSpace === 'function';
+  expect('plankDetail exports computeStrakeSpace (strake-space UVs)', have);
+  if (have) {
+    expect('plank length 5-8 m on the hull and the deck',
+      pd.PLANK_LENGTH.hull >= 5 && pd.PLANK_LENGTH.hull <= 8 && pd.PLANK_LENGTH.deck >= 5 && pd.PLANK_LENGTH.deck <= 8);
+    expect('3-strake butt stagger, trenails every 0.6 m, 1-1.5 cm caulking, 0.4 m grime',
+      pd.BUTT_STAGGER_STRAKES === 3 && pd.TRENAIL_PITCH === 0.6 && pd.CAULK_WIDTH >= 0.01 && pd.CAULK_WIDTH <= 0.015 && pd.GRIME_HEIGHT === 0.4);
+    for (const type of ['sloop', 'brigantine', 'galleon']) {
+      for (const tier of [0, 1]) {
+        const geo = makeSplineHullGeometry(getHullProfile(type), tier);
+        const { cols, rows } = geo.userData;
+        const { data, strakes } = pd.computeStrakeSpace(geo);
+        let nonMono = 0, alongBad = 0, countBad = 0, minW = Infinity, maxW = 0;
+        for (const side of [0, 1]) {
+          for (let c = 0; c < cols; c++) {
+            const at = (r) => (side * cols * rows + c * rows + r) * 3;
+            for (let r = 1; r < rows; r++) if (data[at(r) + 1] < data[at(r - 1) + 1] - 1e-6) nonMono++;
+            if (Math.abs(data[at(0) + 1]) > 1e-4 || Math.abs(data[at(rows - 1) + 1] - strakes) > 1e-3) countBad++;
+            if (c > 0) for (let r = 0; r < rows; r++) if (data[at(r)] < data[(side * cols * rows + (c - 1) * rows + r) * 3] - 1e-6) alongBad++;
+            minW = Math.min(minW, data[at(0) + 2]); maxW = Math.max(maxW, data[at(0) + 2]);
+          }
+        }
+        expect(`${type} tier ${tier}: strake v monotonic along the girth on every column`, nonMono === 0, `${nonMono} reversals`);
+        expect(`${type} tier ${tier}: ${strakes} strakes at the stem == amidships (sheer 0 -> keel ${strakes} on every column)`, countBad === 0, `${countBad} columns lose or gain a strake`);
+        expect(`${type} tier ${tier}: plank run monotonic from transom to stem`, alongBad === 0, `${alongBad} reversals`);
+        expect(`${type} tier ${tier}: strakes taper toward the ends (narrowest < 0.8 x widest, widest ~${pd.STRAKE_TARGET_WIDTH} m)`,
+          minW < 0.8 * maxW && Math.abs(maxW - pd.STRAKE_TARGET_WIDTH) < 0.06, `min ${minW.toFixed(3)} max ${maxW.toFixed(3)}`);
+      }
+    }
+    const { shader } = patched('hull', true);
+    const src = shader.fragmentShader;
+    expect('hull: trenail pairs on the frame line, boot-top, own-ship gold edge, env lift all compiled in',
+      /vPlankPos\.z \/ 0\.6000/.test(src) && /shipBoot/.test(src) && /uOwnEdge/.test(src) && /totalEmissiveRadiance \+= diffuseColor\.rgb \* uEnvLift/.test(src),
+      'one of trenails / boot-top / gold edge / env lift is missing');
+    expect('hull: live wet band and grime keyed to uWetY', /vPlankPos\.y - uWetY/.test(src) && shader.uniforms.uOwnEdge && shader.uniforms.uEnvLift);
+    // The renderer attaches strake space to the detail hull and drives the gold edge.
+    const { ShipRenderer } = await import('../src/client/rendering/ShipRenderer.ts');
+    const { SHIP_STATS } = await import('../src/shared/constants/index.ts');
+    const scene = new THREE.Scene();
+    const sr = new ShipRenderer();
+    sr.init(scene, 'balanced');
+    const ship = {
+      id: 's2', type: 'galleon', position: { x: 0, y: 0, z: 0 }, rotation: 0,
+      velocity: { x: 0, y: 0, z: 0 }, health: SHIP_STATS.galleon.maxHealth,
+      maxHealth: SHIP_STATS.galleon.maxHealth, sailAngle: 0, sailOpen: 1, speed: 0,
+      crew: [], crewIds: [], holes: [], waterLevel: 0, sinking: false, anchored: false,
+      repairCooldown: 0, autoRepairProgress: 0, teamColor: 0x3366cc, alive: true, upgrades: [],
+    };
+    sr.buildShip(ship);
+    let shell = null;
+    scene.traverse((o) => { if (o.isMesh && o.material && o.material.name === 'ship-hull-shell') shell = o; });
+    expect('the detail hull shell carries the strakeUv attribute', Boolean(shell && shell.geometry.attributes.strakeUv),
+      'the shader would read (0,0,0): one plank over the whole hull');
+    sr.clear();
+  }
 }
 
 console.log(`\n${failures === 0 ? 'PASS' : 'FAIL'} — ${checks - failures}/${checks} checks`);

@@ -366,7 +366,8 @@ export const NO_MERGE_EXCLUDE: ReadonlySet<THREE.Object3D> = new Set();
 export function normalizeForMerge(geo: THREE.BufferGeometry, matrix: THREE.Matrix4): THREE.BufferGeometry {
   const g = geo.index ? geo.toNonIndexed() : geo.clone();
   for (const name of Object.keys(g.attributes)) {
-    if (name !== 'position' && name !== 'normal' && name !== 'uv') g.deleteAttribute(name);
+    // strakeUv (plank shader v2, b4.2e) survives so the merged hull keeps its strake space.
+    if (name !== 'position' && name !== 'normal' && name !== 'uv' && name !== 'strakeUv') g.deleteAttribute(name);
   }
   if (!g.attributes.uv) {
     g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(g.attributes.position.count * 2), 2));
@@ -503,6 +504,21 @@ export function mergeStaticMeshes(root: THREE.Object3D, excluded: ReadonlySet<TH
     bucket.receiveShadow ||= mesh.receiveShadow;
   };
   visit(root);
+  // b4.2e: a bucket whose shell carries strakeUv pads every other part on that
+  // material with horizontal metric planks (along z, strake = -y / 0.26 m) so
+  // the attribute sets match and nothing reads a zero-width strake.
+  for (const bucket of buckets.values()) {
+    if (!bucket.geos.some((geo) => geo.attributes.strakeUv)) continue;
+    for (const geo of bucket.geos) {
+      if (geo.attributes.strakeUv) continue;
+      const p = geo.attributes.position as THREE.BufferAttribute;
+      const su = new Float32Array(p.count * 3);
+      for (let i = 0; i < p.count; i++) {
+        su[i * 3] = p.getZ(i); su[i * 3 + 1] = -p.getY(i) / 0.26; su[i * 3 + 2] = 0.26;
+      }
+      geo.setAttribute('strakeUv', new THREE.BufferAttribute(su, 3));
+    }
+  }
 
   // Two materials in one build can carry the same NAME (a clone keeps it unless
   // it is renamed), so the cache key counts occurrences: `sloop|ship-rope#1`.

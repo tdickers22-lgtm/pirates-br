@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { gerstnerHeight, WAVE_PARAMS } from '../../../shared/utils/index.js';
+import type { HullProfile } from '../../../shared/hull.js';
+import { makeWaterlineFoamGeometry } from './geometry.js';
 
 /**
  * WAKE — SHIPVIS-01 phase B.
@@ -313,4 +315,119 @@ function writeFan(
       }
     }
   }
+}
+
+// ── WATERLINE COLLAR v2 (b4.2e, ships-04) ────────────────────────────────────
+// The old collar was a constant max(0.55, 0.16 W) = 0.8-1.6 m cream apron round
+// a hull that was not moving, gilded on the own ship, and it read as a sand
+// tray or a raft at a berth. Now its width is driven per ring vertex by speed
+// and the local wave slope: a thin broken lapping line at rest (0.15-0.25 m),
+// a bow wave that grows to a quarter of the beam on the bow sector at full
+// speed (with the inner edge climbing the stem), and a stern wash aft. Own-ship
+// identity moved to the plank shader's gold edge and the pennant.
+
+/** Rest width of the collar on flat water and on the steepest slope, metres. */
+export const COLLAR_REST_MIN = 0.15;
+export const COLLAR_REST_MAX = 0.25;
+/** Bow-sector width at full speed, as a fraction of the beam (spec >= 0.2 W). */
+export const COLLAR_BOW_BEAM = 0.25;
+/** Stern-wash width at full speed, as a fraction of the beam. */
+export const COLLAR_STERN_BEAM = 0.16;
+/** Side (amidships) growth at full speed, metres. */
+export const COLLAR_SIDE_SPEED = 0.3;
+/** How far the bow wave climbs the stem at full speed, metres. */
+export const COLLAR_BOW_RISE = 0.14;
+
+const sstep = (a: number, b: number, x: number) => {
+  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+};
+
+/** Collar width (m) at a ring vertex. bow01/stern01: sector weights, speed01:
+ *  speed / class top speed, slope: local |dh/dx| of the sea, beam: hull W. */
+export function collarWidth(bow01: number, stern01: number, speed01: number, slope: number, beam: number): number {
+  const s = Math.min(1, Math.max(0, speed01));
+  const rest = COLLAR_REST_MIN + (COLLAR_REST_MAX - COLLAR_REST_MIN) * Math.min(1, Math.max(0, slope / 0.35));
+  // Sector weights saturate at 0.6 so the whole bow sector (weight >= 0.5)
+  // carries at least 0.83 of the full bow wave.
+  const bow = Math.min(1, bow01 / 0.6), stern = Math.min(1, stern01 / 0.6);
+  const run = Math.max(bow * COLLAR_BOW_BEAM * beam, stern * COLLAR_STERN_BEAM * beam, COLLAR_SIDE_SPEED);
+  return rest + run * s * s * (3 - 2 * s) * (s > 0 ? 1 : 0);
+}
+
+interface CollarData {
+  inner: Float32Array; // ring xz (hull-local)
+  dir: Float32Array; // outward unit xz
+  bow: Float32Array; // bow-sector weight
+  stern: Float32Array; // stern-sector weight
+  slope: Float32Array; // last frame's measured slope
+  widths: Float32Array; // last written width per ring vertex
+  beam: number;
+}
+
+/** Build the collar: the same ring as before (makeWaterlineFoamGeometry), but
+ *  the outer edge is re-placed every frame at collarWidth along the outward dir. */
+export function buildWaterlineCollar(profile: HullProfile, map: THREE.Texture | null): THREE.Mesh {
+  const geo = makeWaterlineFoamGeometry(profile, 1);
+  const pos = geo.attributes.position as THREE.BufferAttribute;
+  const n = pos.count / 2;
+  const d: CollarData = {
+    inner: new Float32Array(n * 2), dir: new Float32Array(n * 2), bow: new Float32Array(n),
+    stern: new Float32Array(n), slope: new Float32Array(n), widths: new Float32Array(n), beam: profile.W,
+  };
+  let zMin = Infinity, zMax = -Infinity;
+  for (let i = 0; i < n; i++) { const z = pos.getZ(2 * i); zMin = Math.min(zMin, z); zMax = Math.max(zMax, z); }
+  for (let i = 0; i < n; i++) {
+    const ix = pos.getX(2 * i), iz = pos.getZ(2 * i);
+    d.inner[2 * i] = ix; d.inner[2 * i + 1] = iz;
+    d.dir[2 * i] = pos.getX(2 * i + 1) - ix; d.dir[2 * i + 1] = pos.getZ(2 * i + 1) - iz;
+    const t = (iz - zMin) / Math.max(1e-6, zMax - zMin); // 0 transom -> 1 stem
+    d.bow[i] = sstep(0.62, 0.9, t);
+    d.stern[i] = 1 - sstep(0.06, 0.3, t);
+    d.widths[i] = COLLAR_REST_MIN;
+  }
+  geo.userData.collar = d;
+  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    map, transparent: true, opacity: 0.5, depthWrite: false, side: THREE.DoubleSide, toneMapped: false,
+  }));
+  mesh.name = 'waterline-foam';
+  mesh.renderOrder = 2;
+  return mesh;
+}
+
+/** Last-written collar widths (one per ring vertex) and the bow/stern weights. */
+export function collarState(mesh: THREE.Mesh): { widths: Float32Array; bow: Float32Array; stern: Float32Array; beam: number } {
+  const d = mesh.geometry.userData.collar as CollarData;
+  return { widths: d.widths, bow: d.bow, stern: d.stern, beam: d.beam };
+}
+
+/**
+ * Seat the collar for this frame: yaw-only frame (cancel pitch/roll, Euler
+ * 'ZXY', ships-01; sign-agnostic, so the b2 heel sign cannot invert it), widths
+ * from speed and the slope measured across the collar last frame, every vertex
+ * lifted onto the LOCAL Gerstner surface, the inner edge raised on the bow at speed.
+ */
+export function seatWaterlineCollar(
+  foam: THREE.Mesh, root: THREE.Object3D, waveT: number, storm01: number, speed01: number,
+): void {
+  foam.rotation.set(-root.rotation.x, 0, -root.rotation.z, 'ZXY');
+  if (!foam.visible) return;
+  const d = foam.geometry.userData.collar as CollarData | undefined;
+  if (!d) return;
+  const pos = foam.geometry.attributes.position as THREE.BufferAttribute;
+  const cy = Math.cos(root.rotation.y), sy = Math.sin(root.rotation.y);
+  const n = d.bow.length;
+  const s = Math.min(1, Math.max(0, speed01));
+  for (let i = 0; i < n; i++) {
+    const w = collarWidth(d.bow[i], d.stern[i], s, d.slope[i], d.beam);
+    d.widths[i] = w;
+    const ix = d.inner[2 * i], iz = d.inner[2 * i + 1];
+    const ox = ix + d.dir[2 * i] * w, oz = iz + d.dir[2 * i + 1] * w;
+    const hIn = gerstnerHeight(root.position.x + ix * cy + iz * sy, root.position.z - ix * sy + iz * cy, waveT, WAVE_PARAMS, storm01);
+    const hOut = gerstnerHeight(root.position.x + ox * cy + oz * sy, root.position.z - ox * sy + oz * cy, waveT, WAVE_PARAMS, storm01);
+    d.slope[i] = Math.abs(hOut - hIn) / w;
+    pos.setXYZ(2 * i, ix, hIn - root.position.y + 0.035 + COLLAR_BOW_RISE * d.bow[i] * s, iz);
+    pos.setXYZ(2 * i + 1, ox, hOut - root.position.y + 0.005, oz);
+  }
+  pos.needsUpdate = true;
 }

@@ -2,7 +2,7 @@
   "note": "Baseline for scripts/test-ship-geometry-hash.mjs. Rebuild ONLY inside a slice that intends the geometry change, and name the moved families in the commit.",
   "hulls": {
     "sloop": {
-      "digest": "3c2ca54e",
+      "digest": "5ae5266c",
       "meshCount": 102,
       "vertTotal": 111222,
       "families": {
@@ -332,20 +332,20 @@
           "meshes": 1,
           "verts": 384,
           "tris": 384,
-          "hash": "405bd4df",
+          "hash": "93c65c95",
           "box": [
-            -3.096,
+            -3.296,
             0.005,
-            -5.936,
-            3.096,
+            -6.136,
+            3.296,
             0.035,
-            6.367
+            6.567
           ]
         }
       }
     },
     "brigantine": {
-      "digest": "aef4fbd7",
+      "digest": "8f355717",
       "meshCount": 131,
       "vertTotal": 128466,
       "families": {
@@ -675,20 +675,20 @@
           "meshes": 1,
           "verts": 384,
           "tris": 384,
-          "hash": "966e14f2",
+          "hash": "be40a7aa",
           "box": [
-            -4.334,
+            -4.214,
             0.005,
-            -7.966,
-            4.334,
+            -7.846,
+            4.214,
             0.035,
-            8.54
+            8.42
           ]
         }
       }
     },
     "galleon": {
-      "digest": "abc971e3",
+      "digest": "fc0e3a93",
       "meshCount": 173,
       "vertTotal": 155979,
       "families": {
@@ -1018,14 +1018,14 @@
           "meshes": 1,
           "verts": 384,
           "tris": 384,
-          "hash": "91bedf0b",
+          "hash": "a5281333",
           "box": [
-            -6.192,
+            -5.592,
             0.005,
-            -11.007,
-            6.192,
+            -10.407,
+            5.592,
             0.035,
-            11.795
+            11.195
           ]
         }
       }
