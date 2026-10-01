@@ -22,10 +22,12 @@ export const SHIP_LOD_HYSTERESIS = 0.1;
 
 /** Spline shell sampling per level: `cols` stations along the length (dense
  *  toward the stem, where uniform u turns ~20 deg per face), `rows` girth
- *  samples per side. LOD0 rows are 40, not the plan's 22: the b4.2b2 spec
- *  change (< 5 deg between adjacent girth faces needs >= 40). */
+ *  samples per side. LOD0 rows are 48, not the plan's 22: the b4.2b2 spec
+ *  change (< 5 deg between adjacent girth faces needs >= 40 on uniform u) plus
+ *  the b4.2d bow columns (stem-dense u samples the sharp sections near the
+ *  stem head, where 40 rows read 5.1-5.3 deg; 48 rows read 3.8-4.4). */
 export const HULL_TIER_GRID: ReadonlyArray<{ cols: number; rows: number }> = [
-  { cols: 72, rows: 40 },
+  { cols: 72, rows: 48 },
   { cols: 36, rows: 12 },
   { cols: 18, rows: 8 },
   { cols: 9, rows: 5 },

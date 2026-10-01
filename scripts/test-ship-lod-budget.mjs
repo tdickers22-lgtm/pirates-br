@@ -10,7 +10,7 @@
 //   1. policy (ship/lod.ts): bands 30 / 90 / 250 m, 10% hysteresis both ways,
 //      low + phone: every other hull starts at LOD2, the hull you stand on is
 //      LOD0 (phones on the LOD1 shell grid);
-//   2. the spline shell at every tier grid (LOD0 72 x 40 per side, the b4.2b2
+//   2. the spline shell at every tier grid (LOD0 72 x 48 per side, the b4.2b2
 //      spec change from 72 x 22; LOD1 36 x 12, LOD2 18 x 8, far 9 x 5): vertex
 //      count, every shell vertex on sampleHullSurface's surface within 1 cm
 //      (independent check: hullSurfacePointAt's Newton solve at the vertex z,y),
@@ -54,7 +54,7 @@ if (lod) {
   expect('bands 30 / 90 / 250 m', SHIP_LOD_BANDS[0] === 30 && SHIP_LOD_BANDS[1] === 90 && SHIP_LOD_BANDS[2] === 250, JSON.stringify(SHIP_LOD_BANDS));
   expect('hysteresis 10%', Math.abs(SHIP_LOD_HYSTERESIS - 0.1) < 1e-9);
   const grid = HULL_TIER_GRID.map((g) => `${g.rows}`).join('/');
-  expect('tier girth rows 40 / 12 / 8 / 5, LOD0 columns >= 72', HULL_TIER_GRID[0].rows === 40 && HULL_TIER_GRID[1].rows === 12 && HULL_TIER_GRID[2].rows === 8 && HULL_TIER_GRID[3].rows === 5 && HULL_TIER_GRID[0].cols >= 72 && HULL_TIER_GRID[1].cols === 36 && HULL_TIER_GRID[2].cols === 18 && HULL_TIER_GRID[3].cols === 9, grid);
+  expect('tier girth rows 48 / 12 / 8 / 5, LOD0 columns >= 72', HULL_TIER_GRID[0].rows === 48 && HULL_TIER_GRID[1].rows === 12 && HULL_TIER_GRID[2].rows === 8 && HULL_TIER_GRID[3].rows === 5 && HULL_TIER_GRID[0].cols >= 72 && HULL_TIER_GRID[1].cols === 36 && HULL_TIER_GRID[2].cols === 18 && HULL_TIER_GRID[3].cols === 9, grid);
   const hi = { quality: 'high', phone: false, ownHull: false };
   const walk = (opts, ds, start = 0) => { let l = start; const out = []; for (const d of ds) { l = selectShipLod(l, d, opts); out.push(l); } return out; };
   const out = walk(hi, [10, 29, 31, 32.9, 33.1, 60, 95, 99.1, 200, 270, 276, 240, 226, 224, 90, 82, 80.9, 28, 27.4, 26.9]);
@@ -165,12 +165,10 @@ for (const type of CLASSES) {
   const lowDetail = lowRoot.children.find((c) => c.name === 'ship-detail-root');
   const cl = census(lowDetail);
   expect(`${type} low-tier own hull <= ${LOW_OWN_CAP} tris`, cl.tris <= LOW_OWN_CAP, `${cl.tris}`);
-  if (lod && geoMod.makeSplineHullGeometry) {
-    const profile = hull.getHullProfile(type);
-    const s0 = geoMod.makeSplineHullGeometry(profile, 0), s1 = geoMod.makeSplineHullGeometry(profile, 1);
-    const phone = cl.tris - s0.index.count / 3 + s1.index.count / 3;
-    expect(`${type} phone own hull (LOD1 shell) <= ${PHONE_OWN_CAP} tris`, phone <= PHONE_OWN_CAP, `${Math.round(phone)}`);
-  }
+  // Phones run the low build (its shell is already the LOD1 grid). The low
+  // build is graded with a high build of the same class already cached: the
+  // shared static merge must not leak the 72 x 48 shell across tiers.
+  expect(`${type} phone own hull (low build, LOD1 shell) <= ${PHONE_OWN_CAP} tris`, cl.tris <= PHONE_OWN_CAP, `${cl.tris}`);
 }
 console.log(`\nmeasured LOD0: ${JSON.stringify(measured)}`);
 console.log(`\n${checks} checks, ${failures} failed`);

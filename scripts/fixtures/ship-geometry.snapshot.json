@@ -2,9 +2,9 @@
   "note": "Baseline for scripts/test-ship-geometry-hash.mjs. Rebuild ONLY inside a slice that intends the geometry change, and name the moved families in the commit.",
   "hulls": {
     "sloop": {
-      "digest": "bf0bd15a",
+      "digest": "b0fe73bb",
       "meshCount": 102,
-      "vertTotal": 67302,
+      "vertTotal": 111222,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 2,
@@ -24,7 +24,7 @@
           "meshes": 61,
           "verts": 29766,
           "tris": 11066,
-          "hash": "118d5fb6",
+          "hash": "0784bb2e",
           "box": [
             -4.11,
             0.447,
@@ -150,12 +150,12 @@
           "meshes": 2,
           "verts": 3252,
           "tris": 1084,
-          "hash": "e18d3ed9",
+          "hash": "e9b5a0d1",
           "box": [
-            -1.466,
+            -1.535,
             2.268,
             -6.175,
-            1.466,
+            1.535,
             3.235,
             5.815
           ]
@@ -164,7 +164,7 @@
           "meshes": 7,
           "verts": 10208,
           "tris": 3456,
-          "hash": "43241ed7",
+          "hash": "b251f233",
           "box": [
             -2.901,
             -0.893,
@@ -178,12 +178,12 @@
           "meshes": 1,
           "verts": 744,
           "tris": 248,
-          "hash": "4ece1309",
+          "hash": "23a0bf95",
           "box": [
-            -2.779,
+            -2.794,
             2.54,
             -5.43,
-            2.779,
+            2.794,
             2.64,
             5.43
           ]
@@ -192,12 +192,12 @@
           "meshes": 1,
           "verts": 2040,
           "tris": 680,
-          "hash": "e3f7db39",
+          "hash": "50326235",
           "box": [
-            -2.798,
+            -2.8,
             0.21,
             -5.4,
-            2.798,
+            2.8,
             9.176,
             5.4
           ]
@@ -218,23 +218,23 @@
         },
         "ship-hull-shell": {
           "meshes": 1,
-          "verts": 684,
-          "tris": 228,
-          "hash": "d08f4699",
+          "verts": 40644,
+          "tris": 13548,
+          "hash": "d87d863a",
           "box": [
             -2.926,
-            -0.803,
+            -0.812,
             -6.06,
             2.926,
-            2.376,
-            6.36
+            2.377,
+            6.528
           ]
         },
         "ship-hull-strake": {
           "meshes": 1,
-          "verts": 792,
-          "tris": 264,
-          "hash": "0f7ab69f",
+          "verts": 4752,
+          "tris": 1584,
+          "hash": "a4bfed9d",
           "box": [
             -2.996,
             0.036,
@@ -248,7 +248,7 @@
           "meshes": 4,
           "verts": 5536,
           "tris": 1856,
-          "hash": "bb0d127f",
+          "hash": "b473260d",
           "box": [
             -1.859,
             0.445,
@@ -345,9 +345,9 @@
       }
     },
     "brigantine": {
-      "digest": "0804df46",
+      "digest": "17d6fe3a",
       "meshCount": 131,
-      "vertTotal": 84546,
+      "vertTotal": 128466,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 4,
@@ -367,7 +367,7 @@
           "meshes": 85,
           "verts": 41889,
           "tris": 15776,
-          "hash": "917a4429",
+          "hash": "cf875cc9",
           "box": [
             -5.11,
             0.447,
@@ -493,12 +493,12 @@
           "meshes": 2,
           "verts": 3540,
           "tris": 1180,
-          "hash": "2382a9ea",
+          "hash": "8297f182",
           "box": [
-            -1.934,
+            -2.031,
             2.908,
             -8.195,
-            1.934,
+            2.031,
             3.835,
             7.495
           ]
@@ -507,7 +507,7 @@
           "meshes": 8,
           "verts": 11244,
           "tris": 3824,
-          "hash": "80072f7a",
+          "hash": "5746206e",
           "box": [
             -4.108,
             -1.098,
@@ -521,12 +521,12 @@
           "meshes": 1,
           "verts": 744,
           "tris": 248,
-          "hash": "dbc8d155",
+          "hash": "a5c2b775",
           "box": [
-            -3.891,
+            -3.911,
             3.14,
             -7.23,
-            3.891,
+            3.911,
             3.24,
             7.23
           ]
@@ -535,12 +535,12 @@
           "meshes": 1,
           "verts": 2076,
           "tris": 692,
-          "hash": "c169e6b9",
+          "hash": "a8a9549d",
           "box": [
-            -3.917,
+            -3.92,
             0.21,
             -7.2,
-            3.917,
+            3.92,
             10.43,
             7.2
           ]
@@ -561,23 +561,23 @@
         },
         "ship-hull-shell": {
           "meshes": 1,
-          "verts": 684,
-          "tris": 228,
-          "hash": "e648d424",
+          "verts": 40644,
+          "tris": 13548,
+          "hash": "9416af67",
           "box": [
             -4.194,
-            -1.008,
+            -1.019,
             -8.08,
             4.194,
-            3.024,
-            8.48
+            3.025,
+            8.704
           ]
         },
         "ship-hull-strake": {
           "meshes": 1,
-          "verts": 792,
-          "tris": 264,
-          "hash": "121eb8f4",
+          "verts": 4752,
+          "tris": 1584,
+          "hash": "384fe830",
           "box": [
             -4.264,
             0.03,
@@ -591,7 +591,7 @@
           "meshes": 4,
           "verts": 4912,
           "tris": 1648,
-          "hash": "0b42ada2",
+          "hash": "6be1cb31",
           "box": [
             -2.737,
             1.045,
@@ -688,9 +688,9 @@
       }
     },
     "galleon": {
-      "digest": "60e6c1f1",
+      "digest": "8ba0e961",
       "meshCount": 173,
-      "vertTotal": 112059,
+      "vertTotal": 155979,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 8,
@@ -710,7 +710,7 @@
           "meshes": 120,
           "verts": 61381,
           "tris": 23238,
-          "hash": "ea862533",
+          "hash": "23eb2f03",
           "box": [
             -6.61,
             0.447,
@@ -836,12 +836,12 @@
           "meshes": 2,
           "verts": 3828,
           "tris": 1276,
-          "hash": "8f180302",
+          "hash": "a8982c46",
           "box": [
-            -2.636,
+            -2.775,
             3.655,
             -11.225,
-            2.636,
+            2.775,
             4.535,
             10.015
           ]
@@ -850,7 +850,7 @@
           "meshes": 9,
           "verts": 12580,
           "tris": 4292,
-          "hash": "db81c588",
+          "hash": "ec881ac0",
           "box": [
             -5.97,
             -1.315,
@@ -864,12 +864,12 @@
           "meshes": 1,
           "verts": 744,
           "tris": 248,
-          "hash": "b0125e8d",
+          "hash": "b50f6c89",
           "box": [
-            -5.558,
+            -5.588,
             3.84,
             -9.93,
-            5.558,
+            5.588,
             3.94,
             9.93
           ]
@@ -878,12 +878,12 @@
           "meshes": 1,
           "verts": 2112,
           "tris": 704,
-          "hash": "d566c66d",
+          "hash": "e420c59d",
           "box": [
-            -5.596,
+            -5.6,
             0.21,
             -9.9,
-            5.596,
+            5.6,
             12.996,
             9.9
           ]
@@ -904,23 +904,23 @@
         },
         "ship-hull-shell": {
           "meshes": 1,
-          "verts": 684,
-          "tris": 228,
-          "hash": "e74deec0",
+          "verts": 40644,
+          "tris": 13548,
+          "hash": "002c4573",
           "box": [
             -6.16,
-            -1.225,
+            -1.239,
             -11.11,
             6.16,
-            3.78,
-            11.66
+            3.782,
+            11.968
           ]
         },
         "ship-hull-strake": {
           "meshes": 1,
-          "verts": 792,
-          "tris": 264,
-          "hash": "40f3101d",
+          "verts": 4752,
+          "tris": 1584,
+          "hash": "f8bc9a21",
           "box": [
             -6.23,
             0.025,
@@ -934,7 +934,7 @@
           "meshes": 4,
           "verts": 5536,
           "tris": 1856,
-          "hash": "8a21e893",
+          "hash": "a0359696",
           "box": [
             -4.056,
             1.745,

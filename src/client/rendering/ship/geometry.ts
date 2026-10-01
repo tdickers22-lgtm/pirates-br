@@ -4,7 +4,8 @@
 // HULLGEO-01 slice a); scripts/test-ship-geometry-hash.mjs pins the move.
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { hullUvV, stationSurfaceAt } from '../../../shared/hull.js';
+import { hullSurfacePointAt, hullUvV, sampleHullSurface, stationSurfaceAt } from '../../../shared/hull.js';
+import { HULL_TIER_GRID } from './lod.js';
 import type { HullProfile, HullProfileStation } from '../../../shared/hull.js';
 
 /** Axis a CylinderGeometry is built along, for makeCylinderBetween. */
@@ -111,60 +112,128 @@ export function makeWaterlineFoamTexture(): THREE.CanvasTexture {
   return tex;
 }
 
-/** The lofted hull shell. Open at the top (deck slabs are separate so the
- *  companionway stays a real hole); capped at the transom and stem. */
-export function makeLoftedHullGeometry(profile: HullProfile, lowDetail = false): THREE.BufferGeometry {
-  const stationIdx = lowDetail ? [0, 1, 3, 5, 7, 8] : [0, 1, 2, 3, 4, 5, 6, 7, 8];
-  const slotIdx = lowDetail ? [0, 2, 4, 6] : [0, 1, 2, 3, 4, 5, 6];
-  const S = stationIdx.length;
-  const J = slotIdx.length;
-  const L = profile.L;
+/** u columns for a tier: denser toward the stem (uniform u turned ~20 deg per
+ *  face just aft of the stem head; this reads 13-14 deg) and a little at the
+ *  counter, by inverse CDF of a smooth density. Deterministic, both ends
+ *  included. Stem weight 1.3 with 48 LOD0 rows keeps adjacent girth faces
+ *  3.8/4.2/4.4 deg (weights 1.2-1.4 all < 4.5; 2.5 put columns on the sharp
+ *  sections at u 0.98-0.99 and read 5.1-5.3 on 40 rows). */
+function shellColumns(cols: number): number[] {
+  const N = 2048;
+  const smooth = (a: number, b: number, x: number) => {
+    const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+    return t * t * (3 - 2 * t);
+  };
+  const cdf: number[] = [0];
+  for (let i = 1; i <= N; i++) {
+    const u = (i - 0.5) / N;
+    const rho = 1 + 1.3 * smooth(0.78, 0.93, u) + 0.8 * (1 - smooth(0, 0.08, u));
+    cdf.push(cdf[i - 1] + rho / N);
+  }
+  const total = cdf[N];
+  const us: number[] = [];
+  let k = 0;
+  for (let c = 0; c < cols; c++) {
+    const target = (c / (cols - 1)) * total;
+    while (k < N && cdf[k + 1] < target) k++;
+    const span = cdf[k + 1] - cdf[k];
+    us.push(c === 0 ? 0 : c === cols - 1 ? 1 : (k + (span > 0 ? (target - cdf[k]) / span : 0)) / N);
+  }
+  return us;
+}
 
+/** Newell normal of a closed loop of flat-array vertices. */
+function loopNormal(verts: number[], loop: number[]): [number, number, number] {
+  let nx = 0, ny = 0, nz = 0;
+  for (let i = 0; i < loop.length; i++) {
+    const a = loop[i] * 3, b = loop[(i + 1) % loop.length] * 3;
+    nx += (verts[a + 1] - verts[b + 1]) * (verts[a + 2] + verts[b + 2]);
+    ny += (verts[a + 2] - verts[b + 2]) * (verts[a] + verts[b]);
+    nz += (verts[a] - verts[b]) * (verts[a + 1] + verts[b + 1]);
+  }
+  const len = Math.hypot(nx, ny, nz) || 1;
+  return [nx / len, ny / len, nz / len];
+}
+
+/**
+ * THE HULL SHELL ON THE SPLINE (b4.2d, ships-01): sampleHullSurface at the
+ * tier's grid (HULL_TIER_GRID: LOD0 72 x 40 per side ... far 9 x 5), analytic
+ * normals, open at the top (the deck slab is separate so the companionway stays
+ * a real hole), capped with flat transom and stem panels. Layout: starboard
+ * block (col-major, `rows` per column), port block, then the two caps; the
+ * shell vertices ARE spline points, so the renderer and the server agree to
+ * float precision. uv as before: (z / L + 0.5, hullUvV(y)).
+ */
+export function makeSplineHullGeometry(profile: HullProfile, tier: number): THREE.BufferGeometry {
+  const grid = HULL_TIER_GRID[Math.min(HULL_TIER_GRID.length - 1, Math.max(0, tier | 0))];
+  const cols = grid.cols, rows = grid.rows;
+  const us = shellColumns(cols);
+  const L = profile.L;
   const verts: number[] = [];
+  const norms: number[] = [];
   const uvs: number[] = [];
-  for (const si of stationIdx) {
-    const st = profile.stations[si];
-    for (const side of [1, -1] as const) { // starboard block, then port block
-      for (const ji of slotIdx) {
-        const s = st.slots[ji];
-        verts.push(side * s.x, s.y, s.z);
-        uvs.push((s.z / L) + 0.5, hullUvV(profile, s.y));
+  const samples: Array<{ x: number; y: number; z: number; nx: number; ny: number; nz: number }> = [];
+  for (let c = 0; c < cols; c++) {
+    for (let r = 0; r < rows; r++) samples.push(sampleHullSurface(profile, us[c], r / (rows - 1)));
+  }
+  for (const side of [1, -1] as const) { // starboard block, then port block
+    for (const s of samples) {
+      verts.push(side * s.x, s.y, s.z);
+      norms.push(side * s.nx, s.ny, s.nz);
+      uvs.push(s.z / L + 0.5, hullUvV(profile, s.y));
+    }
+  }
+  const faces: number[] = [];
+  const vi = (c: number, side: 0 | 1, r: number) => side * cols * rows + c * rows + r;
+  for (let c = 0; c < cols - 1; c++) {
+    for (let r = 0; r < rows - 1; r++) {
+      // starboard (+x): outward winding
+      let a = vi(c, 0, r), b = vi(c + 1, 0, r), cc = vi(c, 0, r + 1), d = vi(c + 1, 0, r + 1);
+      faces.push(a, b, cc, b, d, cc);
+      // port (-x): mirrored, reversed winding
+      a = vi(c, 1, r); b = vi(c + 1, 1, r); cc = vi(c, 1, r + 1); d = vi(c + 1, 1, r + 1);
+      faces.push(a, cc, b, b, cc, d);
+    }
+  }
+  // Transom (u = 0) and stem (u = 1) caps on their own vertices, flat-shaded.
+  const shellCount = verts.length / 3;
+  for (const end of [0, cols - 1]) {
+    const base = verts.length / 3;
+    for (const side of [0, 1] as const) {
+      for (let r = 0; r < rows; r++) {
+        const k = vi(end, side, r) * 3;
+        verts.push(verts[k], verts[k + 1], verts[k + 2]);
+        uvs.push(uvs[(k / 3) * 2], uvs[(k / 3) * 2 + 1]);
       }
     }
-  }
-
-  const faces: number[] = [];
-  const vi = (s: number, side: 0 | 1, j: number) => s * (2 * J) + side * J + j;
-  for (let s = 0; s < S - 1; s++) {
-    for (let j = 0; j < J - 1; j++) {
-      // starboard (+x): outward winding
-      let a = vi(s, 0, j), b = vi(s + 1, 0, j), c = vi(s, 0, j + 1), d = vi(s + 1, 0, j + 1);
-      faces.push(a, b, c, b, d, c);
-      // port (−x): mirrored → reversed winding
-      a = vi(s, 1, j); b = vi(s + 1, 1, j); c = vi(s, 1, j + 1); d = vi(s + 1, 1, j + 1);
-      faces.push(a, c, b, b, c, d);
+    const S = (r: number) => base + r, P = (r: number) => base + rows + r;
+    const loop: number[] = [];
+    for (let r = 0; r < rows; r++) loop.push(S(r));
+    for (let r = rows - 1; r >= 0; r--) loop.push(P(r));
+    let n = loopNormal(verts, loop);
+    const aft = end === 0;
+    if ((aft && n[2] > 0) || (!aft && n[2] < 0)) n = [-n[0], -n[1], -n[2]];
+    for (let i = 0; i < 2 * rows; i++) norms.push(n[0], n[1], n[2]);
+    for (let r = 0; r < rows - 1; r++) {
+      if (aft) faces.push(S(r), S(r + 1), P(r), S(r + 1), P(r + 1), P(r));
+      else faces.push(S(r), P(r), S(r + 1), S(r + 1), P(r), P(r + 1));
     }
   }
-  // Transom cap (−Z) and stem cap (+Z)
-  for (let j = 0; j < J - 1; j++) {
-    faces.push(vi(0, 0, j), vi(0, 0, j + 1), vi(0, 1, j));
-    faces.push(vi(0, 0, j + 1), vi(0, 1, j + 1), vi(0, 1, j));
-    const e = S - 1;
-    faces.push(vi(e, 0, j), vi(e, 1, j), vi(e, 0, j + 1));
-    faces.push(vi(e, 0, j + 1), vi(e, 1, j), vi(e, 1, j + 1));
-  }
-
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(norms, 3));
   geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
   geo.setIndex(faces);
-  geo.computeVertexNormals();
+  geo.userData = { cols, rows, shellVerts: shellCount, tier };
   return geo;
 }
 
 /** A strake (wale / rub rail / armor belt) that HUGS the loft: a thin proud
  *  ridge following the hull surface at a per-station height. Replaces the old
  *  straight BoxGeometry rails that floated off the tapered bow/stern. */
+/** Spline points per station interval along a strake. */
+const STRAKE_SUBDIV = 6;
+
 export function makeHullStrakeGeometry(
   profile: HullProfile,
   side: 1 | -1,
@@ -174,12 +243,27 @@ export function makeHullStrakeGeometry(
   i0 = 0,
   i1 = profile.stations.length - 1,
 ): THREE.BufferGeometry {
-  const pts: Array<{ x: number; y: number; z: number; nx: number; ny: number }> = [];
+  // Station knots on their spline rows, then STRAKE_SUBDIV spline points
+  // between each pair (b4.2d): the run follows the curved shell instead of
+  // cutting chords across it between stations.
+  const knots: Array<{ x: number; y: number; z: number; nx: number; ny: number }> = [];
   for (let i = i0; i <= i1; i++) {
     const st = profile.stations[i];
     const y = yAt(st);
     const s = stationSurfaceAt(st, y);
-    pts.push({ x: s.x, y, z: s.z, nx: s.nx, ny: s.ny });
+    knots.push({ x: s.x, y, z: s.z, nx: s.nx, ny: s.ny });
+  }
+  const pts: Array<{ x: number; y: number; z: number; nx: number; ny: number }> = [];
+  for (let k = 0; k < knots.length; k++) {
+    pts.push(knots[k]);
+    if (k === knots.length - 1) break;
+    const a = knots[k], b = knots[k + 1];
+    for (let j = 1; j < STRAKE_SUBDIV; j++) {
+      const t = j / STRAKE_SUBDIV;
+      const z = a.z + (b.z - a.z) * t, y = a.y + (b.y - a.y) * t;
+      const s = hullSurfacePointAt(profile, z, y);
+      pts.push({ x: s.x, y, z, nx: s.nx, ny: s.ny });
+    }
   }
   const S = pts.length;
   const verts: number[] = [];
@@ -500,20 +584,39 @@ export function mergeStaticMeshes(root: THREE.Object3D, excluded: ReadonlySet<TH
  *  interpolated on its raked z, so the run closes at the real stem and transom
  *  rather than at the station's base z. */
 export function sheerHalfWidthAt(profile: HullProfile, z: number): number {
-  const sts = profile.stations;
-  const zs = sts.map((st) => st.slots[0].z);
-  if (z <= zs[0]) return sts[0].slots[0].x;
-  if (z >= zs[zs.length - 1]) return sts[sts.length - 1].slots[0].x;
-  let i = 0;
-  while (i < zs.length - 2 && z > zs[i + 1]) i++;
-  const t = (z - zs[i]) / Math.max(0.0001, zs[i + 1] - zs[i]);
-  return sts[i].slots[0].x + (sts[i + 1].slots[0].x - sts[i].slots[0].x) * t;
+  const t = sheerTable(profile);
+  const zs = t.z, xs = t.x;
+  if (z <= zs[0]) return xs[0];
+  if (z >= zs[zs.length - 1]) return xs[xs.length - 1];
+  let lo = 0, hi = zs.length - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (zs[m] <= z) lo = m; else hi = m; }
+  const f = (z - zs[lo]) / Math.max(1e-6, zs[hi] - zs[lo]);
+  return xs[lo] + (xs[hi] - xs[lo]) * f;
+}
+
+/** The sheer (v = 0 iso-line of the spline) sampled densely once per profile
+ *  (b4.2d): deck slab, bulwarks, sheer runs and the castle follow the curved
+ *  deck edge, not chords between the 9 loft stations. */
+const SHEER_SAMPLES = 160;
+const SHEER_TABLES = new WeakMap<HullProfile, { z: Float64Array; x: Float64Array }>();
+function sheerTable(profile: HullProfile): { z: Float64Array; x: Float64Array } {
+  let t = SHEER_TABLES.get(profile);
+  if (t) return t;
+  const z = new Float64Array(SHEER_SAMPLES + 1), x = new Float64Array(SHEER_SAMPLES + 1);
+  for (let i = 0; i <= SHEER_SAMPLES; i++) {
+    const s = sampleHullSurface(profile, i / SHEER_SAMPLES, 0);
+    z[i] = s.z; x[i] = s.x;
+  }
+  for (let i = 1; i <= SHEER_SAMPLES; i++) if (z[i] < z[i - 1]) z[i] = z[i - 1];
+  t = { z, x };
+  SHEER_TABLES.set(profile, t);
+  return t;
 }
 
 /** Fore-and-aft z of the sheer at the transom and at the stem. */
 export function sheerZRange(profile: HullProfile): { aft: number; fore: number } {
-  const sts = profile.stations;
-  return { aft: sts[0].slots[0].z, fore: sts[sts.length - 1].slots[0].z };
+  const t = sheerTable(profile);
+  return { aft: t.z[0], fore: t.z[t.z.length - 1] };
 }
 
 function slabZSamples(zFrom: number, zTo: number, samples: number, extra: number[]): number[] {

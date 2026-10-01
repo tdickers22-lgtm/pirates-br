@@ -40,12 +40,13 @@ import { finishCanvasTexture, foamTexture, sailTexture, sprayTexture, supplyLidT
 import type { SupplyKind } from './ship/textures.js';
 import { applyPlankDetail, makePlankUniforms, type PlankUniforms } from './ship/plankDetail.js';
 import { releaseShipGeometry } from './ship/geometry.js';
+import { selectShipLod, shipLodKey, SHIP_LOD_BANDS, SHIP_LOD_HYSTERESIS, type ShipLodLevel } from './ship/lod.js';
 import { buildRudder, buildSternCastle } from './ship/stern.js';
 import { buildWaterlineFoam, seatWaterlineFoam } from './ship/foam.js';
 import { buildRig, updateSailCloth } from './ship/sails.js';
 import { updateRigging, type Rigging } from './ship/rigging.js';
 import { buildWakeSurface, writeWakeSurface, setArmsVisible, makeWakeFrame, ARM_FACTOR_FLOOR, type WakeSurface, type WakeFrame } from './ship/wake.js';
-import { makeLoftedSlabGeometry, makeSheerRunGeometry, sheerHalfWidthAt, makeHullStrakeGeometry, makeLoftedHullGeometry, makeStairRampGeometry, makeWaterlineFoamTexture, mergeStaticMeshes, NO_MERGE_EXCLUDE } from './ship/geometry.js';
+import { makeLoftedSlabGeometry, makeSheerRunGeometry, sheerHalfWidthAt, sheerZRange, makeHullStrakeGeometry, makeSplineHullGeometry, makeStairRampGeometry, makeWaterlineFoamTexture, mergeStaticMeshes, NO_MERGE_EXCLUDE } from './ship/geometry.js';
 import { applyFlagWave, FLAG_DROP, FLAG_FLY, flagPhaseFromId, flagTexture, makeBarrel, makeCylinderBetween, makeFigurehead, makeHatchGrating, makeLanternFixture, makeRopeCoil } from './ship/dressing.js';
 import type { FlagUniforms, ShipFlag } from './ship/dressing.js';
 import {
@@ -307,6 +308,13 @@ interface ShipMeshGroup {
   detailRoot: THREE.Group;
   proxyRoot: THREE.Group;
   proxySails: THREE.Mesh[];
+  /** b4.2d LOD2 (90-250 m): spline shell 18 x 8, timber, one instanced sail draw, flag. */
+  lod2Root: THREE.Group;
+  lod2Sails: THREE.InstancedMesh;
+  lod2SailAngle: number;
+  lod2SailScale: number;
+  /** Current ship LOD level (ship/lod.ts selectShipLod, 10% hysteresis). */
+  lodLevel: ShipLodLevel;
   sails: THREE.Mesh[];
   furledSails: THREE.Mesh[];
   pennants: THREE.Mesh[];
@@ -625,77 +633,57 @@ export class ShipRenderer {
     return tex;
   }
 
-  private buildShipProxy(
-    ship: Ship,
-    stats: typeof SHIP_STATS[keyof typeof SHIP_STATS],
-    proxySails: THREE.Mesh[],
-  ) {
-    const W = stats.width;
-    const L = stats.length;
-    const H = stats.height;
+  /** Far (> 250 m, level 3): spline shell 9 x 5, deck, castle, bowsprit, masts
+   *  and sail cards in ONE vertex-coloured draw, plus the flag (team identity
+   *  at range). Static: sails do not trim at this range. */
+  private buildShipFar(ship: Ship, stats: typeof SHIP_STATS[keyof typeof SHIP_STATS]) {
+    const W = stats.width, L = stats.length, H = stats.height;
     const group = new THREE.Group();
     group.name = 'ship-proxy';
-
-    // Low-poly LOFT of the exact same silhouette as the detail hull (same
-    // profile, fewer stations/slots) with the same painted-wale team texture —
-    // crossing the detail distance no longer pops shape, draft or stripe.
     const profile = getHullProfile(ship.type);
-    const hullMat = new THREE.MeshStandardMaterial({
-      map: this.getTeamHullTexture(ship.teamColor),
-      roughness: 0.85,
-      metalness: 0.02,
-    });
-    hullMat.name = 'proxy-hull-shell';
-    const darkMat = new THREE.MeshStandardMaterial({ color: 0x3a2412, roughness: 0.95 });
-    darkMat.name = 'proxy-timber';
-    const sailMat = new THREE.MeshStandardMaterial({ color: 0xeadfbf, roughness: 0.8, side: THREE.DoubleSide });
-    sailMat.name = 'proxy-sail-canvas';
-
-    const hull = new THREE.Mesh(makeLoftedHullGeometry(profile, true), hullMat);
-    group.add(hull);
-
-    // Deck slab top face matches the walkable plane (H + 0.1)
-    const deck = new THREE.Mesh(new THREE.BoxGeometry(W * 0.9, 0.12, L * 0.72), darkMat);
-    deck.position.y = H + 0.04;
-    group.add(deck);
-
-    // Stern castle + bowsprit so the far silhouette matches the detail model
-    const castle = new THREE.Mesh(new THREE.BoxGeometry(W * 0.88, H * 0.28, L * 0.22), darkMat);
-    castle.position.set(0, H + H * 0.14, -L * 0.37);
-    group.add(castle);
-    const bowsprit = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.1, L * 0.33, 5), darkMat);
-    bowsprit.rotation.x = Math.PI * 0.5;
-    bowsprit.rotation.z = -0.04;
-    bowsprit.position.set(0, H + 0.48, L * 0.61);
-    group.add(bowsprit);
-
+    const team = new THREE.Color(ship.teamColor);
+    const hullC = new THREE.Color(0x5a3a22), timberC = new THREE.Color(0x3a2412);
+    const sailC = new THREE.Color(0xeadfbf), teamSailC = sailC.clone().lerp(team, 0.45);
+    const parts: THREE.BufferGeometry[] = [];
+    const m4 = new THREE.Matrix4();
+    const add = (geo: THREE.BufferGeometry, color: THREE.Color, matrix?: THREE.Matrix4) => {
+      const g = geo.index ? geo.toNonIndexed() : geo.clone();
+      geo.dispose();
+      for (const name of Object.keys(g.attributes)) if (name !== 'position' && name !== 'normal') g.deleteAttribute(name);
+      if (matrix) g.applyMatrix4(matrix);
+      if (!g.attributes.normal) g.computeVertexNormals();
+      const n = g.attributes.position.count;
+      const col = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) { col[i * 3] = color.r; col[i * 3 + 1] = color.g; col[i * 3 + 2] = color.b; }
+      g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      parts.push(g);
+    };
+    add(makeSplineHullGeometry(profile, 3), hullC);
+    add(new THREE.BoxGeometry(W * 0.9, 0.12, L * 0.72), timberC, m4.makeTranslation(0, H + 0.04, 0));
+    add(new THREE.BoxGeometry(W * 0.88, H * 0.28, L * 0.22), timberC, m4.makeTranslation(0, H + H * 0.14, -L * 0.37));
+    add(new THREE.CylinderGeometry(0.06, 0.1, L * 0.33, 5), timberC,
+      new THREE.Matrix4().compose(new THREE.Vector3(0, H + 0.48, L * 0.61), new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI * 0.5, 0, -0.04)), new THREE.Vector3(1, 1, 1)));
     const mastCount = stats.mastCount;
-    // Keep the aftmost mast forward of the stern helm so its sail never drapes
-    // over the wheel (aftmost lands ~-L*0.14, wheel sits at -L*0.315).
     const mastSpacing = L * 0.42 / Math.max(mastCount - 1, 1);
     const mastStartZ = L * 0.28;
+    const mastH = getMastHeight({ height: H, mastCount });
     for (let m = 0; m < mastCount; m++) {
       const mastZ = mastStartZ - m * mastSpacing;
-      // Same mast height law as the detail model — no rig-height pop at the LOD line
-      const mastH = getMastHeight({ height: H, mastCount });
-      const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.1, mastH, 5), darkMat);
-      mast.position.set(0, H + mastH * 0.5, mastZ);
-      group.add(mast);
-
-      const proxySailMat = m === 0 ? sailMat.clone() : sailMat;
-      if (m === 0) proxySailMat.map = this.getTeamSailTexture(ship.teamColor);
-      // ~12% smaller than the old proxy (tracks the detail-model sail shrink);
-      // the aftmost mast narrows a further 10% — it's the helm's view blocker.
-      const proxySailW = W * 0.92 * (mastCount > 1 && m === mastCount - 1 ? 0.9 : 1);
-      const sail = new THREE.Mesh(new THREE.PlaneGeometry(proxySailW, H * 0.9), proxySailMat);
-      sail.position.set(0, H + mastH * 0.58, mastZ);
-      sail.rotation.order = 'YXZ';
-      sail.rotation.x = 0.055; // slight billow tilt so the plane doesn't read flat
-      group.add(sail);
-      proxySails.push(sail);
+      add(new THREE.CylinderGeometry(0.07, 0.1, mastH, 5), timberC, m4.makeTranslation(0, H + mastH * 0.5, mastZ));
+      const sailW = W * 0.92 * (mastCount > 1 && m === mastCount - 1 ? 0.9 : 1);
+      add(new THREE.PlaneGeometry(sailW, H * 0.9), m === 0 ? teamSailC : sailC,
+        new THREE.Matrix4().compose(new THREE.Vector3(0, H + mastH * 0.58, mastZ), new THREE.Quaternion().setFromEuler(new THREE.Euler(0.055, 0, 0, 'YXZ')), new THREE.Vector3(1, 1, 1)));
     }
+    const merged = mergeGeometries(parts, false)!;
+    for (const g of parts) g.dispose();
+    const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.88, metalness: 0.02, side: THREE.DoubleSide });
+    mat.name = 'ship-far';
+    group.add(new THREE.Mesh(merged, mat));
+    group.add(this.makeLodFlag(ship, H, mastStartZ));
+    return group;
+  }
 
-    // Flag keeps the saturated team color — it IS the team identity at range
+  private makeLodFlag(ship: Ship, H: number, mastStartZ: number): THREE.Mesh {
     const flag = new THREE.Mesh(
       new THREE.PlaneGeometry(1.15, 0.62),
       new THREE.MeshStandardMaterial({
@@ -707,13 +695,84 @@ export class ShipRenderer {
       }),
     );
     flag.position.set(0.38, H * 3.9, mastStartZ);
-    group.add(flag);
-
-    // perf-15: proxy hulls of one class share one merged geometry too.
-    mergeStaticMeshes(group, new Set<THREE.Object3D>([...proxySails, flag]), `proxy-${ship.type}`);
-
-    return group;
+    return flag;
   }
+
+  /** LOD2 (90-250 m): the same silhouette as the detail hull on the 18 x 8
+   *  spline shell with the painted-wale team texture, a deck slab that follows
+   *  the spline sheer, castle, bowsprit and masts merged into one timber draw,
+   *  every sail one InstancedMesh draw (trimmed and hoisted per instance), and
+   *  the flag: 4 draws. */
+  private buildShipLod2(ship: Ship, stats: typeof SHIP_STATS[keyof typeof SHIP_STATS]) {
+    const W = stats.width, L = stats.length, H = stats.height;
+    const group = new THREE.Group();
+    group.name = 'ship-lod2-root';
+    const profile = getHullProfile(ship.type);
+    const hullMat = new THREE.MeshStandardMaterial({ map: this.getTeamHullTexture(ship.teamColor), roughness: 0.85, metalness: 0.02 });
+    hullMat.name = 'lod2-hull-shell';
+    const darkMat = new THREE.MeshStandardMaterial({ color: 0x3a2412, roughness: 0.95 });
+    darkMat.name = 'lod2-timber';
+    group.add(new THREE.Mesh(makeSplineHullGeometry(profile, 2), hullMat));
+    const zr = sheerZRange(profile);
+    const deck = new THREE.Mesh(makeLoftedSlabGeometry(profile, { topY: H + 0.1, thickness: 0.12, zFrom: zr.aft, zTo: zr.fore, inset: 0.04, samples: 14 }), darkMat);
+    group.add(deck);
+    const castle = new THREE.Mesh(new THREE.BoxGeometry(W * 0.88, H * 0.28, L * 0.22), darkMat);
+    castle.position.set(0, H + H * 0.14, -L * 0.37);
+    group.add(castle);
+    const bowsprit = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.1, L * 0.33, 5), darkMat);
+    bowsprit.rotation.x = Math.PI * 0.5;
+    bowsprit.rotation.z = -0.04;
+    bowsprit.position.set(0, H + 0.48, L * 0.61);
+    group.add(bowsprit);
+    const mastCount = stats.mastCount;
+    const mastSpacing = L * 0.42 / Math.max(mastCount - 1, 1);
+    const mastStartZ = L * 0.28;
+    const mastH = getMastHeight({ height: H, mastCount });
+    for (let m = 0; m < mastCount; m++) {
+      const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.1, mastH, 5), darkMat);
+      mast.position.set(0, H + mastH * 0.5, mastStartZ - m * mastSpacing);
+      group.add(mast);
+    }
+    const sailMat = new THREE.MeshStandardMaterial({ color: 0xeadfbf, roughness: 0.8, side: THREE.DoubleSide, map: this.getTeamSailTexture(ship.teamColor) });
+    sailMat.name = 'lod2-sail-canvas';
+    const sails = new THREE.InstancedMesh(new THREE.PlaneGeometry(W * 0.92, H * 0.9), sailMat, mastCount);
+    sails.name = 'lod2-sails';
+    sails.userData.lod2 = { mastStartZ, mastSpacing, y: H + mastH * 0.58, mastCount };
+    group.add(sails);
+    const flag = this.makeLodFlag(ship, H, mastStartZ);
+    group.add(flag);
+    mergeStaticMeshes(group, new Set<THREE.Object3D>([sails, flag]), shipLodKey(ship.type, 2));
+    return { group, sails };
+  }
+
+  private readonly lodMat = new THREE.Matrix4();
+  private readonly lodQuat = new THREE.Quaternion();
+  private readonly lodEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+  private readonly lodPos = new THREE.Vector3();
+  private readonly lodScale = new THREE.Vector3();
+
+  /** Trim and hoist the LOD2 sails (one instance per mast). */
+  private updateLod2Sails(mesh: ShipMeshGroup, ship: Ship, dt: number) {
+    const k = 1 - Math.exp(-8 * dt);
+    mesh.lod2SailAngle = THREE.MathUtils.lerp(mesh.lod2SailAngle, ship.sailAngle, k);
+    mesh.lod2SailScale = THREE.MathUtils.lerp(mesh.lod2SailScale, Math.max(0.18, ship.sailHeight), k);
+    const sails = mesh.lod2Sails;
+    sails.visible = ship.sailHeight > 0.06;
+    const info = sails.userData.lod2 as { mastStartZ: number; mastSpacing: number; y: number; mastCount: number };
+    this.lodEuler.set(0.055, mesh.lod2SailAngle, 0, 'YXZ');
+    this.lodQuat.setFromEuler(this.lodEuler);
+    for (let m = 0; m < info.mastCount; m++) {
+      const narrow = info.mastCount > 1 && m === info.mastCount - 1 ? 0.9 : 1;
+      this.lodPos.set(0, info.y, info.mastStartZ - m * info.mastSpacing);
+      this.lodScale.set(narrow, mesh.lod2SailScale, 1);
+      sails.setMatrixAt(m, this.lodMat.compose(this.lodPos, this.lodQuat, this.lodScale));
+    }
+    sails.instanceMatrix.needsUpdate = true;
+  }
+
+  /** Phones: every other hull starts at LOD2 (D26). Set by the client boot. */
+  private lodPhone = false;
+  setLodPhone(phone: boolean) { this.lodPhone = phone; }
 
   buildShip(ship: Ship): THREE.Group {
     const stats = SHIP_STATS[ship.type];
@@ -865,7 +924,10 @@ export class ShipRenderer {
     // Only the SHELL changed — deck plane, rails, cannon/mast positions and the
     // walkable footprint (sheer half-widths) are identical to the server tables.
     const profile = getHullProfile(ship.type);
-    const hullGeo = makeLoftedHullGeometry(profile);
+    // b4.2d: the shell IS the shared spline at tier resolution (LOD0 72 x 40
+    // per side). The low tier draws its one LOD0 hull (the one you stand on)
+    // on the LOD1 grid so the whole hull stays under its 60k cap.
+    const hullGeo = makeSplineHullGeometry(profile, this.quality === 'low' ? 1 : 0);
     // REAL see-through breaches: the fragment shader discards hull planking
     // inside each active hole (hull-local space — the loft mesh sits at
     // identity in the ship group, so `position` IS hull-local). The material
@@ -2268,7 +2330,10 @@ export class ShipRenderer {
     };
     dropSharedMats(group);
     // A hull whose lanterns are GLBs merges a different static set: its own key.
-    mergeStaticMeshes(group, mergeExclude, `detail-${ship.type}${hwLanterns.length ? '-hwlantern' : ''}`);
+    // The quality is in the key too (b4.2d): the low tier builds its shell on
+    // the LOD1 grid, and a merge cached by a high build would hand a low hull
+    // the 72 x 48 shell (galleon low own hull 63k instead of 54k).
+    mergeStaticMeshes(group, mergeExclude, `detail-${ship.type}-${this.quality}${hwLanterns.length ? '-hwlantern' : ''}`);
 
     // ── Wake foam ─────────────────────────────────────────────
     // Scene-level (NOT parented to the ship): the old wake quad inherited hull
@@ -2284,9 +2349,12 @@ export class ShipRenderer {
     }
     group.add(detailRoot);
 
-    const proxyRoot = this.buildShipProxy(ship, stats, proxySails);
+    const proxyRoot = this.buildShipFar(ship, stats);
     proxyRoot.visible = false;
     group.add(proxyRoot);
+    const lod2 = this.buildShipLod2(ship, stats);
+    lod2.group.visible = false;
+    group.add(lod2.group);
 
     group.position.set(ship.position.x, ship.position.y, ship.position.z);
     group.rotation.y = ship.rotation;
@@ -2297,6 +2365,11 @@ export class ShipRenderer {
       detailRoot,
       proxyRoot,
       proxySails,
+      lod2Root: lod2.group,
+      lod2Sails: lod2.sails,
+      lod2SailAngle: ship.sailAngle,
+      lod2SailScale: Math.max(0.18, ship.sailHeight),
+      lodLevel: 0,
       sails,
       furledSails,
       pennants,
@@ -3083,6 +3156,7 @@ void main() {
     for (const sail of mesh.sails) this.setSailUpgradeMaterial(sail, swift, false);
     for (const sail of mesh.furledSails) this.setSailUpgradeMaterial(sail, swift, true);
     for (const sail of mesh.proxySails) this.setSailUpgradeMaterial(sail, swift, false);
+    this.setSailUpgradeMaterial(mesh.lod2Sails, swift, false);
   }
 
   private setSailUpgradeMaterial(sail: THREE.Mesh, swift: boolean, furled: boolean) {
@@ -3150,6 +3224,7 @@ void main() {
         mesh.root.visible = false;
         mesh.detailRoot.visible = false;
         mesh.proxyRoot.visible = false;
+        mesh.lod2Root.visible = false;
         mesh.wake.group.visible = false;
         continue;
       }
@@ -3160,12 +3235,17 @@ void main() {
       activeUpgrades.clear();
       for (let u = 0; u < ship.upgrades.length; u++) activeUpgrades.add(ship.upgrades[u].type);
       this.updateUpgradeVisuals(mesh, activeUpgrades);
-      const detailDistance = this.quality === 'low' ? 170 : this.quality === 'balanced' ? 285 : 380;
+      // b4.2d: the detail hull covers LOD0 + LOD1 (< 90 m, + 10% hysteresis);
+      // its merged LOD1 variant waits for the b4.3 kit atlas.
+      const detailDistance = SHIP_LOD_BANDS[1] * (1 + SHIP_LOD_HYSTERESIS);
       const distSq = cameraPosition
         ? (ship.position.x - cameraPosition.x) ** 2 + (ship.position.z - cameraPosition.z) ** 2
         : 0;
       const localCrewShip = !!localPlayerId && ship.crewIds.includes(localPlayerId);
-      let detailNear = !cameraPosition || localCrewShip || distSq < detailDistance * detailDistance;
+      mesh.lodLevel = selectShipLod(mesh.lodLevel, Math.sqrt(distSq), {
+        quality: this.quality, phone: this.lodPhone, ownHull: !cameraPosition || localCrewShip,
+      });
+      let detailNear = mesh.lodLevel <= 1;
       // A hull's detail root is ~78 geometries and it flips on one frame when
       // the camera crosses detailDistance — the same shape of stall the island
       // reveal was built to flatten, and two ships crossing together were
@@ -3179,7 +3259,8 @@ void main() {
       // frame for the allowance must keep its proxy and its proxy sails, or it
       // sails for two frames with no canvas on it.
       detailNear = mesh.detailRoot.visible;
-      mesh.proxyRoot.visible = !detailNear;
+      mesh.lod2Root.visible = !detailNear && mesh.lodLevel <= 2;
+      mesh.proxyRoot.visible = !detailNear && mesh.lodLevel === 3;
       // b3.4e: the queue-window fallback gives way once the library has the
       // hardware; after that only the near/far sibling swap runs.
       // The world set lands on ONE frame, and every hull in view mounts then:
@@ -3323,6 +3404,7 @@ void main() {
         sail.rotation.y = THREE.MathUtils.lerp(sail.rotation.y, ship.sailAngle, 1 - Math.exp(-8 * dt)); // 1:1 with the simulated brace
         sail.scale.y = THREE.MathUtils.lerp(sail.scale.y, Math.max(0.18, ship.sailHeight), 1 - Math.exp(-8 * dt));
       }
+      if (mesh.lod2Root.visible) this.updateLod2Sails(mesh, ship, dt);
       if (!detailNear) {
         // No client-only heel here either: the server's own attitude spring
         // already carries turn heel (±0.06) and wind heel, sampled from the real
