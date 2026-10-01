@@ -80,7 +80,7 @@ export const BOOT_TOP: [number, number] = [-0.08, 0.15];
 export const OWN_EDGE_Y = 0.19;
 export const OWN_EDGE_HALF = 0.022;
 /** Default env lift (fraction of albedo added as bounce light). */
-export const PLANK_ENV_LIFT = 0.22;
+export const PLANK_ENV_LIFT = 0.36;
 /** Deck boards are fixed-width, laid in X. */
 const DECK_BOARD_WIDTH = 0.22;
 

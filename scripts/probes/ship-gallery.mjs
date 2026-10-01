@@ -9,6 +9,10 @@
 //   hullLuma     mean luma of the beauty frame over the pixels the ID pass marks as hull (ship-hull-* materials)
 //   white        fraction of the whole frame with luma > 235 (blown highlights)
 //   sailWhite    fraction of sail pixels with luma > 235 (sails reading as flat paper white)
+//   bandWhite    (band-15m view only) foam-white fraction of a 2 m band around the stationary hull at 15 m:
+//                the ID-pass hull mask dilated by the projected 2 m, minus every ship pixel, counted where
+//                luma > 200 and chroma (max-min) < 40. The grade caps highlights below 235, so frame `white`
+//                reads 0 everywhere; this is the foam-tray metric (b4.2e gate < 8%).
 //   sailPx/hullPx and sailHull = sailPx / hullPx, from a material-swap ID pass: every sail mesh (userData.sailKind
 //                or material ship-sail-canvas) drawn pure red, every ship-hull-* mesh pure green, the rest of the
 //                ship black, all MeshBasicMaterial without fog or tone mapping; originals restored right after.
@@ -17,7 +21,10 @@
 // 960x540 via scripts/lib/browser-args.mjs, everything killed in finally. Refuses to start while
 // ~/.vidlab/recording exists (a take is being recorded) and waits while load1 > 8.
 //
-//   node scripts/probes/ship-gallery.mjs [--quality high|balanced|low] [--only sloop,galleon] [--out dir] [--recompute]
+//   node scripts/probes/ship-gallery.mjs [--quality high|balanced|low] [--only sloop,galleon] [--views near-bowq,band-15m]
+//                                        [--out dir] [--recompute]
+// Gates (b4.2e, printed and stored under report.gates): hullLuma >= 45/255 at noon on every outboard view
+// (near-bowq, mid-broadside, stern); bandWhite < 0.08 on band-15m. Exit code 1 when one fails.
 import { spawn, execSync } from 'node:child_process';
 import { mkdirSync, createWriteStream, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -29,6 +36,11 @@ const arg = (name, def) => { const i = process.argv.indexOf(`--${name}`); return
 const QUALITY = arg('quality', 'high');
 const ONLY = arg('only', 'sloop,brigantine,galleon').split(',');
 const OUT = arg('out', 'test-results/ship-gallery');
+const VIEWS = arg('views', '') ? arg('views', '').split(',') : null;
+const HULL_LUMA_MIN = 45, BAND_WHITE_MAX = 0.08;
+// Shaded-hull luma is graded on the low outboard views; band-15m looks down on the sunlit deck (deck planks
+// share the ship-hull material), so it is excluded from the luma gate.
+const OUTBOARD_VIEWS = ['near-bowq', 'mid-broadside', 'stern'];
 const SERVER_PORT = '8091', CLIENT_PORT = '3101', MAP_SEED = '20260801';
 const URL_BASE = `http://127.0.0.1:${CLIENT_PORT}`;
 mkdirSync(OUT, { recursive: true });
@@ -68,7 +80,38 @@ async function ensure(name, cmd, url, env) {
 }
 
 const luma = (d, i) => 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
-function metrics(beauty, id) {
+// ID classes after the grade: sail red ~(250,25,25), hull green ~(150,230,85), other black -> cream ~(230,215,185).
+const isSail = (r, g, b) => r > 200 && g < 70 && b < 70;
+const isHull = (r, g, b) => g > 190 && b < 130 && g - r > 40;
+const isOther = (r, g, b) => r > 195 && g > 180 && b > 140 && b < 215 && r - b > 25 && r - b < 75;
+// Foam-white ring: Euclidean dilation of the hull mask by bandPx (row distance pass, then a disc over rows).
+function bandWhite(beauty, id, bandPx) {
+  const W = beauty.width, H = beauty.height, R = Math.max(1, Math.round(bandPx));
+  const hull = new Uint8Array(W * H), ship = new Uint8Array(W * H);
+  for (let p = 0; p < W * H; p++) {
+    const j = p * id.channels, r = id.data[j], g = id.data[j + 1], b = id.data[j + 2];
+    hull[p] = isHull(r, g, b) ? 1 : 0; ship[p] = hull[p] || isSail(r, g, b) || isOther(r, g, b) ? 1 : 0;
+  }
+  const dx = new Float32Array(W * H).fill(1e9);
+  for (let y = 0; y < H; y++) {
+    let last = -1e9;
+    for (let x = 0; x < W; x++) { if (hull[y * W + x]) last = x; dx[y * W + x] = x - last; }
+    last = 1e9;
+    for (let x = W - 1; x >= 0; x--) { if (hull[y * W + x]) last = x; dx[y * W + x] = Math.min(dx[y * W + x], last - x); }
+  }
+  let ring = 0, foam = 0;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const p = y * W + x; if (ship[p]) continue;
+    let inside = false;
+    for (let d = -R; d <= R && !inside; d++) { const yy = y + d; if (yy < 0 || yy >= H) continue; const h = dx[yy * W + x]; if (h * h + d * d <= R * R) inside = true; }
+    if (!inside) continue;
+    ring++;
+    const i = p * beauty.channels, r = beauty.data[i], g = beauty.data[i + 1], b = beauty.data[i + 2];
+    if (luma(beauty.data, i) > 200 && Math.max(r, g, b) - Math.min(r, g, b) < 40) foam++;
+  }
+  return { bandWhite: ring ? +(foam / ring).toFixed(3) : null, bandPx: R, ringPx: ring };
+}
+function metrics(beauty, id, opts = {}) {
   const n = beauty.width * beauty.height;
   let frameL = 0, white = 0, hullL = 0, hullPx = 0, sailPx = 0, sailWhite = 0;
   for (let p = 0; p < n; p++) {
@@ -78,12 +121,25 @@ function metrics(beauty, id) {
     const r = id.data[j], g = id.data[j + 1], b = id.data[j + 2];
     // The game's final grade still runs over the flat ID colours (measured: red -> ~(250,25,25),
     // green -> ~(150,230,85), black -> cream ~(230,215,185)), so classify by hue margin, not by purity.
-    if (r > 200 && g < 70 && b < 70) { sailPx++; if (l > 235) sailWhite++; }
-    else if (g > 190 && b < 130 && g - r > 40) { hullPx++; hullL += l; }
+    if (isSail(r, g, b)) { sailPx++; if (l > 235) sailWhite++; }
+    else if (isHull(r, g, b)) { hullPx++; hullL += l; }
   }
   const r3 = (v) => +v.toFixed(3);
   return { frameLuma: +(frameL / n).toFixed(1), hullLuma: hullPx ? +(hullL / hullPx).toFixed(1) : null, white: r3(white / n),
-    sailWhite: sailPx ? r3(sailWhite / sailPx) : null, sailPx, hullPx, sailHull: hullPx ? r3(sailPx / hullPx) : null };
+    sailWhite: sailPx ? r3(sailWhite / sailPx) : null, sailPx, hullPx, sailHull: hullPx ? r3(sailPx / hullPx) : null,
+    ...(opts.bandPx ? bandWhite(beauty, id, opts.bandPx) : {}) };
+}
+const line = (v) => `[gallery] ${v.type.padEnd(10)} ${v.view.padEnd(16)} luma ${String(v.frameLuma).padStart(5)} hull ${String(v.hullLuma).padStart(5)} white ${v.white.toFixed(3)} sailWhite ${v.sailWhite ?? '-'} sail/hull ${v.sailHull ?? '-'} (${v.sailPx}/${v.hullPx} px)${v.bandWhite != null ? ` band2m ${v.bandWhite} (${v.ringPx} px, r ${v.bandPx})` : ''}`;
+function grade(views) {
+  const fails = [];
+  for (const v of views) {
+    if (OUTBOARD_VIEWS.includes(v.view) && v.hullLuma != null && v.hullLuma < HULL_LUMA_MIN) fails.push(`${v.type} ${v.view} hullLuma ${v.hullLuma} < ${HULL_LUMA_MIN}`);
+    if (v.view === 'band-15m' && !(v.bandWhite != null && v.bandWhite < BAND_WHITE_MAX)) fails.push(`${v.type} band-15m bandWhite ${v.bandWhite} >= ${BAND_WHITE_MAX}`);
+  }
+  if (!views.some((v) => OUTBOARD_VIEWS.includes(v.view) && v.hullLuma != null)) fails.push('no outboard view with hull pixels was graded');
+  for (const f of fails) console.log(`[gallery] GATE FAIL ${f}`);
+  if (!fails.length) console.log(`[gallery] gates OK (hullLuma >= ${HULL_LUMA_MIN} on outboard views, band2m white < ${BAND_WHITE_MAX})`);
+  return { hullLumaMin: HULL_LUMA_MIN, bandWhiteMax: BAND_WHITE_MAX, fails };
 }
 
 // --recompute: re-derive the metrics from the PNG pairs a previous run saved (no stack, no browser).
@@ -91,11 +147,12 @@ if (process.argv.includes('--recompute')) {
   const file = `${OUT}/ship-gallery-${QUALITY}.json`;
   const prev = JSON.parse(readFileSync(file, 'utf8'));
   for (const v of prev.views) {
-    Object.assign(v, metrics(readPng(readFileSync(`${OUT}/${v.file}`)), readPng(readFileSync(`${OUT}/${v.file.replace(/\.png$/, '.id.png')}`))));
-    console.log(`[gallery] ${v.type.padEnd(10)} ${v.view.padEnd(16)} luma ${String(v.frameLuma).padStart(5)} hull ${String(v.hullLuma).padStart(5)} white ${v.white.toFixed(3)} sailWhite ${v.sailWhite ?? '-'} sail/hull ${v.sailHull ?? '-'} (${v.sailPx}/${v.hullPx} px)`);
+    Object.assign(v, metrics(readPng(readFileSync(`${OUT}/${v.file}`)), readPng(readFileSync(`${OUT}/${v.file.replace(/\.png$/, '.id.png')}`)), { bandPx: v.bandPx }));
+    console.log(line(v));
   }
+  prev.gates = grade(prev.views); if (prev.gates.fails.length) process.exitCode = 1;
   writeFileSync(file, JSON.stringify(prev, null, 2));
-  process.exit(0);
+  process.exit(process.exitCode ?? 0);
 }
 
 const report = { quality: QUALITY, gl: describeGl(), viewport: '960x540', trim: 'square (sailAngle 0)', census: {}, views: [] };
@@ -129,7 +186,9 @@ try {
       const own = ships.find((s) => s.id === me?.shipId) ?? ships[0];
       if (!a.spot) {
         // Open water: the nearest ring point around the berth with no ground over a 140 m disc.
-        const deep = (x, z) => { for (let r = 0; r <= 140; r += 20) for (let k = 0; k < 12; k++) { const an = k * Math.PI / 6; if (g.sampleGroundY(x + Math.cos(an) * r, z + Math.sin(an) * r) > 0.001) return false; } return true; };
+        // Sea rocks are props, not terrain (sampleGroundY misses them) and carry their own foam ring.
+        const rocks = g.state.seaRocks ?? [];
+        const deep = (x, z) => { if (rocks.some((k) => Math.hypot(k.position.x - x, k.position.z - z) < k.radius + 70)) return false; for (let r = 0; r <= 140; r += 20) for (let k = 0; k < 12; k++) { const an = k * Math.PI / 6; if (g.sampleGroundY(x + Math.cos(an) * r, z + Math.sin(an) * r) > 0.001) return false; } return true; };
         outer: for (let R = 60; R <= 900; R += 40) for (let k = 0; k < 24; k++) { const an = k * Math.PI / 12; const x = own.position.x + Math.cos(an) * R, z = own.position.z + Math.sin(an) * R; if (deep(x, z)) { a.spot = { x, z }; break outer; } }
         a.spot = a.spot ?? { x: own.position.x, z: own.position.z };
       }
@@ -204,6 +263,14 @@ try {
       return { tris: Math.round(tris), meshes, materials: mats.size };
     }, id);
     console.log(`[gallery] ${type}`, JSON.stringify(report.census[type]));
+    const sunSide = await page.evaluate((id) => {
+      const g = window.__piratesBR; const grp = g.shipRenderer.getShipGroup(id); const scene = g.renderer.scene ?? g.scene;
+      let sun = null; scene.traverse((o) => { if (o.isDirectionalLight && (!sun || o.intensity > sun.intensity)) sun = o; });
+      if (!sun) return 1;
+      grp.updateMatrixWorld(true);
+      const d = sun.position.clone().sub(sun.target.position); const side = grp.localToWorld(grp.position.clone().set(1, 0, 0)).sub(grp.localToWorld(grp.position.clone().set(0, 0, 0)));
+      return d.x * side.x + d.z * side.z >= 0 ? 1 : -1;
+    }, id);
     const plan = [
       ['near-bowq', [w * 0.5 + 9, h + 2.5, l * 0.5 + 7], [0, h * 0.8, l * 0.1]],
       ['mid-broadside', [w * 0.5 + 38, h + 5, 0], [0, h, 0]],
@@ -216,20 +283,33 @@ try {
       ['hold-fwd', [0.3, 1.9, -l * 0.18], [0, 1.2, l * 0.35]],
       ['hold-aft', [0.3, 1.9, l * 0.15], [0, 1.2, -l * 0.35]],
       ['rig-up', [w * 0.5 + 6, h + 1, 0], [0, h + 9, 0]],
-    ];
+      // Stationary hull from 15 m (9 m out from the side, 12 m up, 53 deg down: no sky in frame) for the
+      // 2 m foam band around the waterline.
+      // The camera sits on the sun's side of the hull (sun behind it), so specular glints do not land in the band.
+      ['band-15m', [sunSide * (w * 0.5 + 9), 12, 0], [sunSide * w * 0.5, 0, 0]],
+    ].filter(([name]) => !VIEWS || VIEWS.includes(name));
     for (const [name, p, t] of plan) {
       await camLocal(id, p, t); await sleep(1200);
+      // 2 m at the waterline beside the hull, projected to px (for the band metric).
+      const bandPx = name !== 'band-15m' ? 0 : await page.evaluate(([id, x]) => {
+        const g = window.__piratesBR; const grp = g.shipRenderer.getShipGroup(id); const cam = g.renderer.camera;
+        grp.updateMatrixWorld(true); cam.updateMatrixWorld(true);
+        const a = grp.localToWorld(grp.position.clone().set(x, 0, -1)).project(cam), b = grp.localToWorld(grp.position.clone().set(x, 0, 1)).project(cam);
+        return Math.hypot((a.x - b.x) * 480, (a.y - b.y) * 270);
+      }, [id, sunSide * w * 0.5]);
       await page.evaluate(() => window.__piratesBR.settleLod?.(2)).catch(() => {});
       const file = `${type}-${name}-${QUALITY}`;
       const beautyBuf = await page.screenshot({ path: `${OUT}/${file}.png`, timeout: 120_000 });
       let idBuf;
       try { await idSwap(id, true); idBuf = await page.screenshot({ path: `${OUT}/${file}.id.png`, timeout: 120_000 }); }
       finally { await idSwap(id, false); }
-      const m = metrics(readPng(beautyBuf), readPng(idBuf));
-      report.views.push({ type, view: name, file: `${file}.png`, ...m });
-      console.log(`[gallery] ${type.padEnd(10)} ${name.padEnd(16)} luma ${String(m.frameLuma).padStart(5)} hull ${String(m.hullLuma).padStart(5)} white ${m.white.toFixed(3)} sailWhite ${m.sailWhite ?? '-'} sail/hull ${m.sailHull ?? '-'} (${m.sailPx}/${m.hullPx} px)`);
+      const m = metrics(readPng(beautyBuf), readPng(idBuf), { bandPx });
+      const v = { type, view: name, file: `${file}.png`, ...m };
+      report.views.push(v);
+      console.log(line(v));
     }
   }
+  report.gates = grade(report.views); if (report.gates.fails.length) process.exitCode = 1;
   report.info = await page.evaluate(() => { const r = window.__piratesBR.renderer.renderer.info; return { calls: r.render.calls, tris: r.render.triangles, programs: r.programs?.length }; });
   report.pageErrors = errors.slice(0, 20);
 } catch (e) {
