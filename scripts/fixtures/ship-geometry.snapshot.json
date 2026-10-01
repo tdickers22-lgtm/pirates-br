@@ -2,7 +2,7 @@
   "note": "Baseline for scripts/test-ship-geometry-hash.mjs. Rebuild ONLY inside a slice that intends the geometry change, and name the moved families in the commit.",
   "hulls": {
     "sloop": {
-      "digest": "b905111c",
+      "digest": "936af4b9",
       "meshCount": 102,
       "vertTotal": 67302,
       "families": {
@@ -220,7 +220,7 @@
           "meshes": 1,
           "verts": 684,
           "tris": 228,
-          "hash": "3f455244",
+          "hash": "b4c00ac1",
           "box": [
             -2.926,
             -0.803,
@@ -234,14 +234,14 @@
           "meshes": 1,
           "verts": 792,
           "tris": 264,
-          "hash": "991d870f",
+          "hash": "1527dc2f",
           "box": [
             -2.998,
             0.037,
             -5.985,
             2.998,
             2.128,
-            6.269
+            6.304
           ]
         },
         "ship-iron": {
@@ -332,20 +332,20 @@
           "meshes": 1,
           "verts": 384,
           "tris": 384,
-          "hash": "5002ae05",
+          "hash": "405bd4df",
           "box": [
             -3.096,
             0.005,
             -5.936,
             3.096,
             0.035,
-            5.886
+            6.367
           ]
         }
       }
     },
     "brigantine": {
-      "digest": "778961ba",
+      "digest": "ddb31aa0",
       "meshCount": 131,
       "vertTotal": 84546,
       "families": {
@@ -563,7 +563,7 @@
           "meshes": 1,
           "verts": 684,
           "tris": 228,
-          "hash": "0cc14c66",
+          "hash": "1ca3cf7c",
           "box": [
             -4.194,
             -1.008,
@@ -577,14 +577,14 @@
           "meshes": 1,
           "verts": 792,
           "tris": 264,
-          "hash": "6e61d993",
+          "hash": "60084583",
           "box": [
             -4.269,
             0.029,
             -7.98,
             4.269,
             2.709,
-            8.359
+            8.405
           ]
         },
         "ship-iron": {
@@ -675,20 +675,20 @@
           "meshes": 1,
           "verts": 384,
           "tris": 384,
-          "hash": "52349d02",
+          "hash": "966e14f2",
           "box": [
             -4.334,
             0.005,
             -7.966,
             4.334,
             0.035,
-            7.899
+            8.54
           ]
         }
       }
     },
     "galleon": {
-      "digest": "3ee30acc",
+      "digest": "3a2c1dc5",
       "meshCount": 173,
       "vertTotal": 112059,
       "families": {
@@ -906,7 +906,7 @@
           "meshes": 1,
           "verts": 684,
           "tris": 228,
-          "hash": "9008a6da",
+          "hash": "5791c058",
           "box": [
             -6.16,
             -1.225,
@@ -920,14 +920,14 @@
           "meshes": 1,
           "verts": 792,
           "tris": 264,
-          "hash": "14b6d35f",
+          "hash": "3b623dff",
           "box": [
             -6.24,
             0.022,
             -10.972,
             6.24,
             3.386,
-            11.493
+            11.556
           ]
         },
         "ship-iron": {
@@ -1018,14 +1018,14 @@
           "meshes": 1,
           "verts": 384,
           "tris": 384,
-          "hash": "1eff7f48",
+          "hash": "91bedf0b",
           "box": [
             -6.192,
             0.005,
             -11.007,
             6.192,
             0.035,
-            10.916
+            11.795
           ]
         }
       }

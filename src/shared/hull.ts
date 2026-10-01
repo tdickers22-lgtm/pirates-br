@@ -72,7 +72,11 @@ export const LOFT_STATIONS = [
   // a galleon) OUTBOARD of the drawn deck edge — an invisible rail at the bow.
   { zf:  0.32, dh: 0.390, sheer: 1.015, keel01: 0.78, wlF: 0.62, bilgeF: 0.36, mid: 0.60, ztF:  0.325, zbF:  0.310 },
   { zf:  0.42, dh: 0.320, sheer: 1.04,  keel01: 0.55, wlF: 0.46, bilgeF: 0.24, mid: 0.30, ztF:  0.445, zbF:  0.405 },
-  { zf:  0.50, dh: 0.055, sheer: 1.08,  keel01: 0.18, wlF: 0.30, bilgeF: 0.14, mid: 0.00, ztF:  0.530, zbF:  0.415 },
+  // Stem head (b4.2b2, ships-01): the forefoot sits at 0.45 draft, 0.45 L (was
+  // 0.18 draft at 0.415 L). The old rabbet climbed 0.37 draft in 0.01 L, the
+  // same way the stem profile runs down, so the bow patch had a 166 deg corner:
+  // 50 deg along-length creases and inboard normals on any smooth loft.
+  { zf:  0.50, dh: 0.055, sheer: 1.08,  keel01: 0.45, wlF: 0.30, bilgeF: 0.14, mid: 0.00, ztF:  0.530, zbF:  0.450 },
 ];
 
 const HULL_PROFILE_CACHE = new Map<ShipType, HullProfile>();
@@ -176,7 +180,8 @@ export function hullSurfacePointAt(profile: HullProfile, z: number, y: number): 
 // slots of each station along the girth, and a centripetal Catmull-Rom through
 // the stations along the length. The linear loft turned 25-40 deg between
 // adjacent faces at the bilge and pinched the bow from 0.32 W to 0.055 W in a
-// single facet; the spline turns < 5 deg per face on the 72 x 22 LOD0 sampling.
+// single facet; aft of the bow (station 7) the spline turns < 5 deg per girth face
+// on the 72 x 40 LOD0 sampling (b4.2b2 spec: >= 40 girth samples per side).
 //
 // The spline table is the 9 loft rows BIT-FOR-BIT (buildLoftStation) plus three
 // rows only the spline reads, so getHullProfile, the waterline outline and the
@@ -201,7 +206,7 @@ const SPLINE_COUNTER_ROW: LoftStationDef = {
   zf: -0.44, dh: 0.430, sheer: 0.965, keel01: 0.50, wlF: 0.68, bilgeF: 0.38, mid: 0.45, ztF: -0.440, zbF: -0.383,
 };
 const SPLINE_FLARE_ROW: LoftStationDef = {
-  zf: 0.465, dh: 0.215, sheer: 1.06, keel01: 0.36, wlF: 0.38, bilgeF: 0.19, mid: 0.12, ztF: 0.488, zbF: 0.410,
+  zf: 0.465, dh: 0.215, sheer: 1.06, keel01: 0.50, wlF: 0.42, bilgeF: 0.26, mid: 0.12, ztF: 0.488, zbF: 0.430,
 };
 /** Stem half-siding (fraction of W) and how far the stem line stands forward
  *  of the stem-head station (fraction of L, at the sheer → at the forefoot). */
@@ -209,7 +214,12 @@ const STEM_HALF_SIDING_F = 0.010;
 const STEM_LEAD_SHEER_F = 0.014;
 const STEM_LEAD_KEEL_F = 0.004;
 /** Girth spacing: 0 = arc length, 1 = turning angle only. */
-const GIRTH_TURN_WEIGHT = 0.8;
+const GIRTH_TURN_WEIGHT = 0.9;
+/** Shared girth knots (b4.2b2): each slot interval gets v in proportion to the
+ *  WORST station's need there (this blend of turning and arc), not the mean, so
+ *  the tumblehome (24 deg in 0.07 of the galleon's girth at station 3) is not
+ *  starved by the bow and stern rows that barely turn there. */
+const GIRTH_KNOT_TURN_SHARE = 0.95;
 
 type Vec3 = { x: number; y: number; z: number };
 
@@ -233,6 +243,8 @@ interface SplineRow extends HullSplineStation {
   mx: number[]; my: number[]; mz: number[];
   /** The v → s map (buildGirthMap). */
   vk: number[]; sk: number[]; sm: number[];
+  /** Section turning (rad) and arc share of each slot interval, for the shared knots. */
+  intervalTurn: number[]; intervalArc: number[];
 }
 
 export interface HullSurfaceSample {
@@ -283,7 +295,7 @@ const GIRTH_DENSE = 24;
  * the 7 slots exactly, so the surface still passes through every slot and
  * stays C1 in v (ds/dv > 0).
  */
-function measureGirth(row: { slots: Vec3[]; g0: number[]; mx: number[]; my: number[]; mz: number[] }): { sk: number[]; vk: number[]; slotAt: number[] } {
+function measureGirth(row: { slots: Vec3[]; g0: number[]; mx: number[]; my: number[]; mz: number[] }): { sk: number[]; vk: number[]; slotAt: number[]; intervalTurn: number[]; intervalArc: number[] } {
   const xs = row.slots.map((p) => p.x), ys = row.slots.map((p) => p.y), zs = row.slots.map((p) => p.z);
   const sk: number[] = [];
   const slotAt: number[] = [];
@@ -308,10 +320,15 @@ function measureGirth(row: { slots: Vec3[]; g0: number[]; mx: number[]; my: numb
     prevT = t;
   }
   const A = arc[arc.length - 1] || 1, T = turn[turn.length - 1];
+  const intervalTurn: number[] = [], intervalArc: number[] = [];
+  for (let k = 0; k < slotAt.length - 1; k++) {
+    intervalTurn.push(turn[slotAt[k + 1]] - turn[slotAt[k]]);
+    intervalArc.push((arc[slotAt[k + 1]] - arc[slotAt[k]]) / A);
+  }
   const beta = T > 1e-6 ? GIRTH_TURN_WEIGHT : 0;
   const vk = sk.map((_, j) => ((1 - beta) * arc[j] / A + (beta > 0 ? beta * turn[j] / T : 0)) * (1 - 1e-6) + 1e-6 * j / (sk.length - 1));
   vk[vk.length - 1] = 1;
-  return { sk, vk, slotAt };
+  return { sk, vk, slotAt, intervalTurn, intervalArc };
 }
 
 /** Re-target a station's measured v so slot k lands on the SHARED knot V[k]
@@ -356,8 +373,13 @@ function makeRow(kind: HullSplineStation['kind'], loftIndex: number, slots: Vec3
     my: pchipSlopes(g0, slots.map((p) => p.y)),
     mz: pchipSlopes(g0, slots.map((p) => p.z)),
   };
-  const m = baseFrom ? { sk: baseFrom.sk, vk: baseFrom.vk, slotAt: [] } : measureGirth({ slots, ...base });
-  return { kind, loftIndex, u: 0, slots, faired, ...base, vk: m.vk, sk: m.sk, sm: [], girthKnots: m.slotAt.map((j) => m.vk[j]) };
+  const m = baseFrom
+    ? { sk: baseFrom.sk, vk: baseFrom.vk, slotAt: [] as number[], intervalTurn: baseFrom.intervalTurn, intervalArc: baseFrom.intervalArc }
+    : measureGirth({ slots, ...base });
+  return {
+    kind, loftIndex, u: 0, slots, faired, ...base, vk: m.vk, sk: m.sk, sm: [], girthKnots: m.slotAt.map((j) => m.vk[j]),
+    intervalTurn: m.intervalTurn, intervalArc: m.intervalArc,
+  };
 }
 
 const SPLINE_CACHE = new WeakMap<HullProfile, SplineRow[]>();
@@ -383,11 +405,21 @@ function getSplineRows(profile: HullProfile): SplineRow[] {
     y: p.y,
     z: p.z + L * (STEM_LEAD_SHEER_F + (STEM_LEAD_KEEL_F - STEM_LEAD_SHEER_F) * (k / (n - 1))),
   })), headRow));
-  // Shared girth knots: slot k sits at the mean of the stations' own measures.
-  const V = new Array<number>(n).fill(0);
+  // Shared girth knots: slot k sits on the same v on every station.
+  // Minimax: interval k's share of v is the max over stations of its need.
   const measured = rows.filter((r) => r.kind !== 'stem');
-  for (const r of measured) for (let k = 0; k < n; k++) V[k] += r.girthKnots[k] / measured.length;
-  V[0] = 0; V[n - 1] = 1;
+  const meanTurn = measured.reduce((a, r) => a + r.intervalTurn.reduce((x, t) => x + t, 0), 0) / measured.length;
+  const need = new Array<number>(n - 1).fill(0);
+  for (const r of measured) {
+    for (let k = 0; k < n - 1; k++) {
+      const w = GIRTH_KNOT_TURN_SHARE * r.intervalTurn[k] + (1 - GIRTH_KNOT_TURN_SHARE) * r.intervalArc[k] * meanTurn;
+      if (w > need[k]) need[k] = w;
+    }
+  }
+  const needSum = need.reduce((a, x) => a + x, 0);
+  const V = [0];
+  for (let k = 0; k < n - 1; k++) V.push(V[k] + need[k] / needSum);
+  V[n - 1] = 1;
   for (const r of rows) {
     if (r.kind === 'stem') continue;
     const slotAt = r.girthKnots.map((g) => r.vk.indexOf(g));
