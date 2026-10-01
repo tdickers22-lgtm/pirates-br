@@ -12,7 +12,8 @@ import { cargoTier } from '../../shared/cargo.js';
 import { getAmmoCrateLocal, getCannonDeckLocalPosition, getShipGangwayPlan } from '../../shared/interactions.js';
 // The hull loft lives in shared/ (ships-24 phase 1): the server stands crew on
 // the same shape this renderer draws. scripts/test-hull-loft.mjs pins it.
-import { getHullProfile, getMastHeight, hullSurfacePointAt, stationSurfaceAt } from '../../shared/hull.js';
+import { HELM_COURSE_FADE, getHullProfile, getMastHeight, getShipRigPlan, hullSurfacePointAt, sailHoistFor, stationSurfaceAt } from '../../shared/hull.js';
+import type { RigSailKind } from '../../shared/hull.js';
 import type { HullProfile } from '../../shared/hull.js';
 import type { RenderQuality } from './Renderer.js';
 import { registerBudgetLight } from './LightBudget.js';
@@ -408,6 +409,19 @@ interface ShipMeshGroup {
   ownPennant: THREE.Mesh;
 }
 
+/** One instanced LOD sail per SQUARE sail of the shared rig plan (b4.2f). */
+interface LodSailSlot { kind: RigSailKind; z: number; headY: number; w: number; h: number }
+function lodSailSlots(plan: ReturnType<typeof getShipRigPlan>): LodSailSlot[] {
+  const slots: LodSailSlot[] = [];
+  for (const mast of plan) {
+    for (const s of mast.sails) {
+      if (s.kind === 'spanker') continue;
+      slots.push({ kind: s.kind, z: mast.z, headY: s.headY, w: (s.headW + s.footW) * 0.5, h: s.headY - s.footY });
+    }
+  }
+  return slots;
+}
+
 export class ShipRenderer {
   private shipMeshes: Map<string, ShipMeshGroup> = new Map();
   private scene!: THREE.Scene;
@@ -678,27 +692,28 @@ export class ShipRenderer {
     add(new THREE.BoxGeometry(W * 0.88, H * 0.28, L * 0.22), timberC, m4.makeTranslation(0, H + H * 0.14, -L * 0.37));
     add(new THREE.CylinderGeometry(0.06, 0.1, L * 0.33, 5), timberC,
       new THREE.Matrix4().compose(new THREE.Vector3(0, H + 0.48, L * 0.61), new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI * 0.5, 0, -0.04)), new THREE.Vector3(1, 1, 1)));
-    const mastCount = stats.mastCount;
-    const mastSpacing = L * 0.42 / Math.max(mastCount - 1, 1);
-    const mastStartZ = L * 0.28;
-    const mastH = getMastHeight({ height: H, mastCount });
-    for (let m = 0; m < mastCount; m++) {
-      const mastZ = mastStartZ - m * mastSpacing;
-      add(new THREE.CylinderGeometry(0.07, 0.1, mastH, 5), timberC, m4.makeTranslation(0, H + mastH * 0.5, mastZ));
-      const sailW = W * 0.92 * (mastCount > 1 && m === mastCount - 1 ? 0.9 : 1);
-      add(new THREE.PlaneGeometry(sailW, H * 0.9), m === 0 ? teamSailC : sailC,
-        new THREE.Matrix4().compose(new THREE.Vector3(0, H + mastH * 0.58, mastZ), new THREE.Quaternion().setFromEuler(new THREE.Euler(0.055, 0, 0, 'YXZ')), new THREE.Vector3(1, 1, 1)));
+    // b4.2f: the shared rig plan, one card per square sail.
+    const rigPlan = getShipRigPlan(stats);
+    const mastStartZ = rigPlan[0].z;
+    for (let m = 0; m < rigPlan.length; m++) {
+      const mast = rigPlan[m];
+      add(new THREE.CylinderGeometry(0.07, 0.1, mast.height, 5), timberC, m4.makeTranslation(0, H + mast.height * 0.5, mast.z));
+      for (const s of mast.sails) {
+        if (s.kind === 'spanker') continue;
+        add(new THREE.PlaneGeometry((s.headW + s.footW) * 0.5, s.headY - s.footY), m === 0 && s.kind === 'course' ? teamSailC : sailC,
+          new THREE.Matrix4().compose(new THREE.Vector3(0, (s.headY + s.footY) * 0.5, mast.z), new THREE.Quaternion().setFromEuler(new THREE.Euler(0.055, 0, 0, 'YXZ')), new THREE.Vector3(1, 1, 1)));
+      }
     }
     const merged = mergeGeometries(parts, false)!;
     for (const g of parts) g.dispose();
     const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.88, metalness: 0.02, side: THREE.DoubleSide });
     mat.name = 'ship-far';
     group.add(new THREE.Mesh(merged, mat));
-    group.add(this.makeLodFlag(ship, H, mastStartZ));
+    group.add(this.makeLodFlag(ship, rigPlan[0].truckY, mastStartZ));
     return group;
   }
 
-  private makeLodFlag(ship: Ship, H: number, mastStartZ: number): THREE.Mesh {
+  private makeLodFlag(ship: Ship, truckY: number, mastStartZ: number): THREE.Mesh {
     const flag = new THREE.Mesh(
       new THREE.PlaneGeometry(1.15, 0.62),
       new THREE.MeshStandardMaterial({
@@ -709,7 +724,7 @@ export class ShipRenderer {
         roughness: 0.85,
       }),
     );
-    flag.position.set(0.38, H * 3.9, mastStartZ);
+    flag.position.set(0.38, truckY + 0.5, mastStartZ);
     return flag;
   }
 
@@ -739,22 +754,21 @@ export class ShipRenderer {
     bowsprit.rotation.z = -0.04;
     bowsprit.position.set(0, H + 0.48, L * 0.61);
     group.add(bowsprit);
-    const mastCount = stats.mastCount;
-    const mastSpacing = L * 0.42 / Math.max(mastCount - 1, 1);
-    const mastStartZ = L * 0.28;
-    const mastH = getMastHeight({ height: H, mastCount });
-    for (let m = 0; m < mastCount; m++) {
-      const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.1, mastH, 5), darkMat);
-      mast.position.set(0, H + mastH * 0.5, mastStartZ - m * mastSpacing);
+    const rigPlan = getShipRigPlan(stats);
+    const mastStartZ = rigPlan[0].z;
+    for (const plan of rigPlan) {
+      const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.1, plan.height, 5), darkMat);
+      mast.position.set(0, H + plan.height * 0.5, plan.z);
       group.add(mast);
     }
+    const slots = lodSailSlots(rigPlan);
     const sailMat = new THREE.MeshStandardMaterial({ color: 0xeadfbf, roughness: 0.8, side: THREE.DoubleSide, map: this.getTeamSailTexture(ship.teamColor) });
     sailMat.name = 'lod2-sail-canvas';
-    const sails = new THREE.InstancedMesh(new THREE.PlaneGeometry(W * 0.92, H * 0.9), sailMat, mastCount);
+    const sails = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), sailMat, slots.length);
     sails.name = 'lod2-sails';
-    sails.userData.lod2 = { mastStartZ, mastSpacing, y: H + mastH * 0.58, mastCount };
+    sails.userData.lod2 = slots;
     group.add(sails);
-    const flag = this.makeLodFlag(ship, H, mastStartZ);
+    const flag = this.makeLodFlag(ship, rigPlan[0].truckY, mastStartZ);
     group.add(flag);
     mergeStaticMeshes(group, new Set<THREE.Object3D>([sails, flag]), shipLodKey(ship.type, 2));
     return { group, sails };
@@ -773,7 +787,7 @@ export class ShipRenderer {
     accept: (mesh: THREE.Mesh) => THREE.Color | null,
     key: string,
   ) {
-    const W = stats.width, L = stats.length, H = stats.height;
+    const W = stats.width;
     const group = new THREE.Group();
     group.name = 'ship-lod1-root';
     const profile = getHullProfile(ship.type);
@@ -798,26 +812,25 @@ export class ShipRenderer {
       parts.receiveShadow = true;
       group.add(parts);
     }
-    const mastCount = stats.mastCount;
-    const mastSpacing = L * 0.42 / Math.max(mastCount - 1, 1);
-    const mastStartZ = L * 0.28;
-    const mastH = getMastHeight({ height: H, mastCount });
-    // A bellied sail (forward bulge to 9% of the beam), not LOD2's flat card.
-    const sw = W * 0.92, sh = H * 0.9;
-    const sailGeo = new THREE.PlaneGeometry(sw, sh, 6, 4);
+    const rigPlan = getShipRigPlan(stats);
+    const mastStartZ = rigPlan[0].z;
+    const slots = lodSailSlots(rigPlan);
+    // A bellied sail (forward bulge to 9% of the beam), not LOD2's flat card:
+    // a unit card scaled per instance, the belly in metres.
+    const sailGeo = new THREE.PlaneGeometry(1, 1, 6, 4);
     const sp = sailGeo.attributes.position;
     for (let i = 0; i < sp.count; i++) {
-      const x = sp.getX(i) / (sw * 0.5), y = sp.getY(i) / (sh * 0.5);
+      const x = sp.getX(i) / 0.5, y = sp.getY(i) / 0.5;
       sp.setZ(i, W * 0.09 * (1 - x * x) * (1 - 0.6 * y * y));
     }
     sailGeo.computeVertexNormals();
     const sailMat = new THREE.MeshStandardMaterial({ color: 0xeadfbf, roughness: 0.8, side: THREE.DoubleSide, map: this.getTeamSailTexture(ship.teamColor) });
     sailMat.name = 'lod1-sail-canvas';
-    const sails = new THREE.InstancedMesh(sailGeo, sailMat, mastCount);
+    const sails = new THREE.InstancedMesh(sailGeo, sailMat, slots.length);
     sails.name = 'lod1-sails';
-    sails.userData.lod2 = { mastStartZ, mastSpacing, y: H + mastH * 0.58, mastCount };
+    sails.userData.lod2 = slots;
     group.add(sails);
-    group.add(this.makeLodFlag(ship, H, mastStartZ));
+    group.add(this.makeLodFlag(ship, rigPlan[0].truckY, mastStartZ));
     return { group, sails };
   }
 
@@ -901,14 +914,16 @@ export class ShipRenderer {
     mesh.lod2SailAngle = THREE.MathUtils.lerp(mesh.lod2SailAngle, ship.sailAngle, k);
     mesh.lod2SailScale = THREE.MathUtils.lerp(mesh.lod2SailScale, Math.max(0.18, ship.sailHeight), k);
     sails.visible = ship.sailHeight > 0.06;
-    const info = sails.userData.lod2 as { mastStartZ: number; mastSpacing: number; y: number; mastCount: number };
+    const slots = sails.userData.lod2 as LodSailSlot[];
     this.lodEuler.set(0.055, mesh.lod2SailAngle, 0, 'YXZ');
     this.lodQuat.setFromEuler(this.lodEuler);
-    for (let m = 0; m < info.mastCount; m++) {
-      const narrow = info.mastCount > 1 && m === info.mastCount - 1 ? 0.9 : 1;
-      this.lodPos.set(0, info.y, info.mastStartZ - m * info.mastSpacing);
-      this.lodScale.set(narrow, mesh.lod2SailScale, 1);
-      sails.setMatrixAt(m, this.lodMat.compose(this.lodPos, this.lodQuat, this.lodScale));
+    for (let i = 0; i < slots.length; i++) {
+      // Hangs from its yard; the topsail goes away first (sailHoistFor).
+      const slot = slots[i];
+      const hoist = Math.max(0.001, sailHoistFor(slot.kind, mesh.lod2SailScale));
+      this.lodPos.set(0, slot.headY - slot.h * hoist * 0.5, slot.z);
+      this.lodScale.set(slot.w, slot.h * hoist, 1);
+      sails.setMatrixAt(i, this.lodMat.compose(this.lodPos, this.lodQuat, this.lodScale));
     }
     sails.instanceMatrix.needsUpdate = true;
   }
@@ -3677,9 +3692,29 @@ void main() {
       // Round-2 field, read defensively: sails luff (flap, depowered) when pointed
       // into the no-go cone. Force the canvas slack so the cloth flutter goes hard.
       const luffing = !!(ship as Ship & { luffing?: boolean }).luffing;
+      // b4.2f: the local helmsman's FIRST-PERSON eye (within 1.6 m of the
+      // helm, aft of the wheel) sees the courses at HELM_COURSE_FADE; every
+      // other camera, and every other player, sees them solid.
+      let helmView = false;
+      if (localCrewShip && cameraPosition) {
+        const hz = -SHIP_STATS[ship.type].length * 0.315 - 0.5;
+        const c = Math.cos(ship.rotation), sn = Math.sin(ship.rotation);
+        const hx = ship.position.x + hz * sn, hzw = ship.position.z + hz * c;
+        helmView = (cameraPosition.x - hx) ** 2 + (cameraPosition.z - hzw) ** 2 < 1.6 * 1.6;
+      }
       for (let s = 0; s < mesh.sails.length; s++) {
         const sail = mesh.sails[s];
-        sail.visible = ship.sailHeight > SAIL_FURL_THRESHOLD;
+        const rigKind = sail.userData.rigKind as RigSailKind | undefined;
+        // The topsail goes away first; course, spanker and jib follow sailHeight.
+        const kindHeight = rigKind ? sailHoistFor(rigKind, ship.sailHeight) : ship.sailHeight;
+        sail.visible = kindHeight > SAIL_FURL_THRESHOLD;
+        if (rigKind === 'course') {
+          const cm = sail.material as THREE.MeshStandardMaterial;
+          const target = helmView ? HELM_COURSE_FADE : 1;
+          cm.opacity = Math.abs(cm.opacity - target) < 0.01 ? target : THREE.MathUtils.lerp(cm.opacity, target, 1 - Math.exp(-6 * dt));
+          const see = cm.opacity < 0.999;
+          if (see !== cm.transparent) { cm.transparent = see; cm.depthWrite = !see; cm.needsUpdate = true; }
+        }
         const signedRelative = angleWrap(wind.direction - ship.rotation);
         // The ONE shared brace catch (shared/sailing.ts) so the luff/billow
         // visuals agree with the authoritative sail power.
@@ -3692,7 +3727,7 @@ void main() {
         const trimPivot = sail.userData.trimPivot as THREE.Group | undefined;
         const targetSailYaw = typeof fixedYaw === 'number' ? fixedYaw : ship.sailAngle;
         const targetSailPitch = tornPitch * (0.55 + 0.15 * Math.sin(t * 0.9 + phaseSeed * 0.2));
-        const deployedHeight = Math.max(0.06, ship.sailHeight * Math.max(0.22, sailIntegrity));
+        const deployedHeight = Math.max(0.06, kindHeight * Math.max(0.22, sailIntegrity));
         const hoistTopY = typeof sail.userData.hoistTopY === 'number' ? sail.userData.hoistTopY : sail.position.y;
         const hoistHeight = typeof sail.userData.hoistHeight === 'number' ? sail.userData.hoistHeight : 1;
         const hoistCentered = sail.userData.hoistCentered !== false;
@@ -3710,7 +3745,7 @@ void main() {
         sail.scale.y = THREE.MathUtils.lerp(sail.scale.y, deployedHeight, sailAlpha);
         // Billow puffs the sail outward along its normal — that's the +Z axis in its
         // own local frame (set up at construction). scale.z grows the billow depth.
-        const billow = Math.sin(t * 1.2 + phaseSeed * 0.3) * (0.12 + trimCatch * 0.2) * ship.sailHeight * sailIntegrity;
+        const billow = Math.sin(t * 1.2 + phaseSeed * 0.3) * (0.12 + trimCatch * 0.2) * kindHeight * sailIntegrity;
         sail.scale.z = THREE.MathUtils.lerp(sail.scale.z, 1 + billow, sailAlpha);
         if (sail.visible) {
           if (sail.userData.sailKind === 'stay') {
@@ -3730,7 +3765,8 @@ void main() {
       updateRigging(mesh.rigging);
       for (let f = 0; f < mesh.furledSails.length; f++) {
         const furled = mesh.furledSails[f];
-        furled.visible = ship.sailHeight <= SAIL_FURL_THRESHOLD;
+        const furledKind = furled.userData.rigKind as RigSailKind | undefined;
+        furled.visible = (furledKind ? sailHoistFor(furledKind, ship.sailHeight) : ship.sailHeight) <= SAIL_FURL_THRESHOLD;
         const furledSeed = typeof furled.userData.phaseSeed === 'number' ? furled.userData.phaseSeed : furled.position.z;
         furled.scale.setScalar(0.88 + Math.sin(t * 0.9 + furledSeed) * 0.015);
       }

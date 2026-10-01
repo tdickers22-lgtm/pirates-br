@@ -1559,7 +1559,7 @@ export function getMainMastLocalZ(stats: { length: number }): number {
 }
 
 /** Standing height in crow's nest (ship-local Y above waterline). */
-export function getCrowNestStandingY(stats: { height: number; mastCount: number }): number {
+export function getCrowNestStandingY(stats: { height: number; length: number; mastCount: number }): number {
   const H = stats.height;
   const mastH = getMastHeight(stats); // the one mast-height law (shared/hull.ts)
   // Nest rides just ABOVE the main sail's yard (sail top settles at ~0.82·mastH),

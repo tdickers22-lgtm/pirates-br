@@ -197,6 +197,127 @@ for (const type of ['sloop', 'brigantine', 'galleon']) {
     rig.mesh.instanceMatrix.version === v0, `version ${v0} -> ${rig.mesh.instanceMatrix.version}`);
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// b4.2f RIG PROPORTIONS (ships-02). The spec numbers live HERE, independent of
+// the code under test: main truck above the deck / LOA sloop 1.10, brigantine
+// 1.00, galleon 0.92; every yard 1.5-1.8 x beam; course + topsail on every
+// brigantine/galleon mast, a gaff spanker abaft the brigantine's aft mast;
+// every course foot >= 2.4 m above the raised quarterdeck; the renderer's mast
+// truck == shared getMastHeight within 1 cm; the crow's nest floor and ladder
+// top on getCrowNestStandingY; the local helmsman's first-person view fades
+// the courses to 35% and nobody else's does.
+console.log('\nRIG PROPORTIONS (ships-02, b4.2f)');
+{
+  const hull = await import('../src/shared/hull.ts');
+  const { getCrowNestStandingY, getShipQuarterdeckConfig } = await import('../src/shared/utils/index.ts');
+  const SPEC_TRUCK = { sloop: 1.10, brigantine: 1.00, galleon: 0.92 };
+  const COURSE_FOOT = 2.4;
+  globalThis.__shipNoMerge = true;
+  const census = new ShipRenderer();
+  census.init(new THREE.Scene(), 'balanced');
+  for (const type of ['sloop', 'brigantine', 'galleon']) {
+    const stats = SHIP_STATS[type];
+    const H = stats.height, L = stats.length, W = stats.width;
+    const ship = fixtureShip(type);
+    census.buildShip(ship);
+    frame(census, [ship], 0, new THREE.Vector3(CAM.x, CAM.y, CAM.z));
+    const group = census.getShipGroup(ship.id);
+    group.updateMatrixWorld(true);
+    const inGroup = (o, v) => group.worldToLocal(o.localToWorld(v.clone()));
+    const masts = [];
+    const pivots = [];
+    const squares = [];
+    let spankers = 0, nestFloor = null, grips = null;
+    group.traverse((o) => {
+      if (o.isMesh && o.geometry?.type === 'CylinderGeometry' && /^mast-\d$/.test(o.name)) masts.push(o);
+      if (o.name === 'yard-trim-pivot') pivots.push(o);
+      if (o.isMesh && o.userData.sailKind === 'square') squares.push(o);
+      if (o.isMesh && o.userData.rigKind === 'spanker') spankers += 1;
+      if (o.name === 'nest-floor') nestFloor = o;
+      if (o.name === 'mast-ladder-grips') grips = o;
+    });
+    // Fall back to "every tall centreline cylinder" so the pre-b4.2f rig
+    // (unnamed masts) is graded on its numbers, not on a missing name.
+    if (masts.length === 0) {
+      group.traverse((o) => {
+        if (o.isMesh && o.geometry?.type === 'CylinderGeometry' && o.geometry.parameters.height > 4 && Math.abs(o.position.x) < 1e-6) masts.push(o);
+      });
+    }
+    const truck = (m) => inGroup(m, new THREE.Vector3(0, m.geometry.parameters.height * 0.5, 0)).y;
+    // Fallback census keeps the mastCount tallest, then fore-to-aft order.
+    masts.sort((a, b) => truck(b) - truck(a));
+    masts.length = Math.min(masts.length, stats.mastCount);
+    masts.sort((a, b) => b.position.z - a.position.z);
+    const main = masts[0];
+    const mainTruck = main ? truck(main) : NaN;
+    const ratio = (mainTruck - H) / L;
+    console.log(`\n[${type}] ${masts.length} masts, main truck ${mainTruck.toFixed(2)} m (${ratio.toFixed(3)} x LOA), ${pivots.length} yards, ${spankers} spanker`);
+    expect(`${type}: main truck / LOA ${ratio.toFixed(3)} == ${SPEC_TRUCK[type]} (+-0.01)`, Math.abs(ratio - SPEC_TRUCK[type]) <= 0.01);
+    expect(`${type}: renderer main truck == H + shared getMastHeight within 1 cm`,
+      Math.abs(mainTruck - (H + hull.getMastHeight(stats))) <= 0.01, `drawn ${mainTruck.toFixed(3)} vs ${(H + hull.getMastHeight(stats)).toFixed(3)}`);
+    const plan = hull.getShipRigPlan?.(stats) ?? [];
+    expect(`${type}: every drawn mast truck == the shared plan within 1 cm`,
+      masts.length === stats.mastCount && plan.length === stats.mastCount
+      && masts.every((m, i) => Math.abs(truck(m) - plan[i].truckY) <= 0.01),
+      masts.map((m, i) => `${truck(m).toFixed(2)}/${plan[i]?.truckY?.toFixed(2)}`).join(' '));
+    const spans = pivots.map((p) => {
+      const yard = p.children.find((c) => c.isMesh && c.geometry?.type === 'CylinderGeometry');
+      return yard ? yard.geometry.parameters.height / W : 0;
+    });
+    expect(`${type}: every yard 1.5-1.8 x beam (${spans.map((v) => v.toFixed(2)).join(', ')})`,
+      spans.length > 0 && spans.every((v) => v >= 1.5 - 1e-6 && v <= 1.8 + 1e-6));
+    const wantYards = type === 'sloop' ? 1 : stats.mastCount * 2;
+    expect(`${type}: ${wantYards} square sails (course${type === 'sloop' ? '' : ' + topsail per mast'})`,
+      pivots.length === wantYards && squares.length === wantYards, `${pivots.length} yards, ${squares.length} square sails`);
+    expect(`${type}: ${type === 'brigantine' ? 'a gaff spanker abaft the aft mast' : 'no spanker'}`,
+      spankers === (type === 'brigantine' ? 1 : 0), `${spankers}`);
+    const rise = getShipQuarterdeckConfig(stats).rise;
+    expect(`${type}: shared RIG_QUARTERDECK_RISE == the quarterdeck's rise (${rise})`, hull.RIG_QUARTERDECK_RISE === rise);
+    // Course foot at full hoist: the pivot sits at the yard, the canvas hangs
+    // hoistHeight below it. The lowest square foot on the ship is a course.
+    const feet = squares.map((sq) => {
+      const pivot = sq.userData.trimPivot ?? sq.parent;
+      return inGroup(pivot, new THREE.Vector3()).y - (sq.userData.hoistHeight ?? 0);
+    });
+    const lowFoot = Math.min(...feet);
+    expect(`${type}: lowest course foot ${(lowFoot - H - rise).toFixed(2)} m above the quarterdeck (>= ${COURSE_FOOT})`,
+      lowFoot - H - rise >= COURSE_FOOT - 0.01);
+    const nestY = getCrowNestStandingY(stats);
+    const floorY = nestFloor ? inGroup(nestFloor, new THREE.Vector3()).y : NaN;
+    expect(`${type}: crow's nest floor rides at getCrowNestStandingY - 0.12 within 1 cm`,
+      Math.abs(floorY - (nestY - 0.12)) <= 0.01, `floor ${floorY.toFixed(3)} vs ${(nestY - 0.12).toFixed(3)}`);
+    const gripTop = grips ? Math.max(...grips.userData.ikGrips?.points?.map((p) => p.y) ?? Object.values(grips.userData).flatMap((v) => v?.points ?? []).map((p) => p.y)) : NaN;
+    expect(`${type}: mast ladder tops out at the nest (getCrowNestStandingY + 0.02)`,
+      Math.abs(gripTop - (nestY + 0.02)) <= 0.01, `ladder top ${gripTop.toFixed(3)} vs ${(nestY + 0.02).toFixed(3)}`);
+    expect(`${type}: the nest is on the main mast (above its top yard, below its truck)`,
+      main && Math.abs(nestFloor?.position.z - main.position.z) < 0.01 && floorY < mainTruck);
+
+    // Helm view: crew camera at the helm (aft of the wheel), local player in
+    // the crew -> courses 0.35 and see-through; a chase camera -> solid.
+    const courses = squares.filter((sq) => sq.userData.rigKind === 'course');
+    const helmCam = new THREE.Vector3(0, H + rise + 1.6, -L * 0.315 - 0.5);
+    const helmShip = { ...fixtureShip(type), id: `${type}-helm`, crewIds: ['p1'] };
+    census.buildShip(helmShip);
+    const run = (cam, pid) => { for (let f = 0; f < 90; f++) { openFirstDrawBudgetForSettle(); census.update([helmShip], [], 1 + f / 60, 1 / 60, 0, cam, pid); } };
+    const helmCourses = [];
+    run(helmCam, 'p1');
+    census.getShipGroup(helmShip.id).traverse((o) => { if (o.isMesh && o.userData.rigKind === 'course') helmCourses.push(o); });
+    const op = () => helmCourses.map((c) => c.material.opacity);
+    expect(`${type}: local helmsman's first-person view fades every course to 35%`,
+      courses.length > 0 && helmCourses.length === courses.length && op().every((v) => Math.abs(v - 0.35) < 0.02) && helmCourses.every((c) => c.material.transparent),
+      `opacity ${op().map((v) => v.toFixed(2)).join(',')}`);
+    run(helmCam, 'p2');
+    expect(`${type}: a camera at the helm that is not the local crew sees the courses solid`,
+      op().every((v) => v === 1) && helmCourses.every((c) => !c.material.transparent), `opacity ${op().join(',')}`);
+    run(helmCam, 'p1');
+    run(new THREE.Vector3(CAM.x, CAM.y, CAM.z), 'p1');
+    expect(`${type}: the helmsman's chase camera sees the courses solid again`,
+      op().every((v) => v === 1) && helmCourses.every((c) => !c.material.transparent), `opacity ${op().join(',')}`);
+  }
+  census.clear();
+  globalThis.__shipNoMerge = false;
+}
+
 sr.clear();
 console.log(`\n${failures === 0 ? 'PASS' : 'FAIL'} — ${checks - failures}/${checks} checks`);
 process.exit(failures === 0 ? 0 : 1);

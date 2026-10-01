@@ -2,8 +2,8 @@
   "note": "Baseline for scripts/test-ship-geometry-hash.mjs. Rebuild ONLY inside a slice that intends the geometry change, and name the moved families in the commit.",
   "hulls": {
     "sloop": {
-      "digest": "bd469e0d",
-      "meshCount": 102,
+      "digest": "5fe37b36",
+      "meshCount": 92,
       "vertTotal": 111222,
       "families": {
         "MeshBasicMaterial": {
@@ -21,16 +21,16 @@
           ]
         },
         "MeshStandardMaterial": {
-          "meshes": 61,
-          "verts": 29766,
-          "tris": 11066,
-          "hash": "0784bb2e",
+          "meshes": 51,
+          "verts": 29206,
+          "tris": 10366,
+          "hash": "3e2cc2a1",
           "box": [
             -4.11,
             0.447,
             -6.077,
             4.11,
-            10.86,
+            16.14,
             6.962
           ]
         },
@@ -164,13 +164,13 @@
           "meshes": 7,
           "verts": 9968,
           "tris": 3376,
-          "hash": "827f61c9",
+          "hash": "558ff79d",
           "box": [
-            -2.901,
+            -4.25,
             -0.893,
             -6.011,
-            2.901,
-            11.02,
+            4.25,
+            16.3,
             9.301
           ]
         },
@@ -192,13 +192,13 @@
           "meshes": 1,
           "verts": 2040,
           "tris": 680,
-          "hash": "50326235",
+          "hash": "fd51c771",
           "box": [
             -2.8,
             0.21,
             -5.4,
             2.8,
-            9.176,
+            13.717,
             5.4
           ]
         },
@@ -302,15 +302,15 @@
         },
         "ship-sail-canvas": {
           "meshes": 4,
-          "verts": 676,
-          "tris": 1133,
-          "hash": "38fc6cbf",
+          "verts": 1236,
+          "tris": 1833,
+          "hash": "92390a13",
           "box": [
-            -2.385,
+            -3.91,
             2.72,
             2.89,
-            2.385,
-            9.328,
+            3.91,
+            13.724,
             9.12
           ]
         },
@@ -345,9 +345,9 @@
       }
     },
     "brigantine": {
-      "digest": "e7e31dab",
-      "meshCount": 131,
-      "vertTotal": 128466,
+      "digest": "3f2f8b15",
+      "meshCount": 118,
+      "vertTotal": 131224,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 4,
@@ -364,16 +364,16 @@
           ]
         },
         "MeshStandardMaterial": {
-          "meshes": 85,
-          "verts": 41889,
-          "tris": 15776,
-          "hash": "cf875cc9",
+          "meshes": 65,
+          "verts": 40769,
+          "tris": 14376,
+          "hash": "6a8a3615",
           "box": [
             -5.11,
             0.447,
             -8.097,
             5.11,
-            12.22,
+            19.54,
             9.001
           ]
         },
@@ -504,16 +504,16 @@
           ]
         },
         "ship-dark-timber": {
-          "meshes": 8,
-          "verts": 11004,
-          "tris": 3744,
-          "hash": "afadaeea",
+          "meshes": 10,
+          "verts": 11396,
+          "tris": 3920,
+          "hash": "dea5a010",
           "box": [
-            -4.108,
+            -6.3,
             -1.098,
             -8.002,
-            4.108,
-            12.38,
+            6.3,
+            19.7,
             12.4
           ]
         },
@@ -535,13 +535,13 @@
           "meshes": 1,
           "verts": 2076,
           "tris": 692,
-          "hash": "a8a9549d",
+          "hash": "2e2f9605",
           "box": [
             -3.92,
             0.21,
             -7.2,
             3.92,
-            10.43,
+            16.725,
             7.2
           ]
         },
@@ -618,7 +618,7 @@
         "ship-rigging-rope": {
           "meshes": 1,
           "verts": 12,
-          "tris": 110,
+          "tris": 150,
           "hash": "6580bbdd",
           "box": [
             -0.951,
@@ -644,16 +644,16 @@
           ]
         },
         "ship-sail-canvas": {
-          "meshes": 6,
-          "verts": 1297,
-          "tris": 2233,
-          "hash": "7bb160b1",
+          "meshes": 11,
+          "verts": 4783,
+          "tris": 7235,
+          "hash": "af422217",
           "box": [
-            -3.339,
+            -5.796,
             3.32,
-            -2.71,
-            3.339,
-            10.612,
+            -5.06,
+            5.796,
+            16.163,
             12.16
           ]
         },
@@ -688,9 +688,9 @@
       }
     },
     "galleon": {
-      "digest": "025b75f5",
-      "meshCount": 173,
-      "vertTotal": 155979,
+      "digest": "476b5b25",
+      "meshCount": 152,
+      "vertTotal": 159750,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 8,
@@ -707,16 +707,16 @@
           ]
         },
         "MeshStandardMaterial": {
-          "meshes": 120,
-          "verts": 61381,
-          "tris": 23238,
-          "hash": "23eb2f03",
+          "meshes": 90,
+          "verts": 59701,
+          "tris": 21138,
+          "hash": "7223c8c1",
           "box": [
             -6.61,
             0.447,
             -11.127,
             6.61,
-            15.09,
+            24.48,
             12.659
           ]
         },
@@ -847,16 +847,16 @@
           ]
         },
         "ship-dark-timber": {
-          "meshes": 9,
-          "verts": 12340,
-          "tris": 4212,
-          "hash": "01d95aa2",
+          "meshes": 12,
+          "verts": 12568,
+          "tris": 4356,
+          "hash": "75060432",
           "box": [
-            -5.97,
+            -9,
             -1.315,
             -10.972,
-            5.97,
-            15.25,
+            9,
+            24.64,
             17.049
           ]
         },
@@ -878,13 +878,13 @@
           "meshes": 1,
           "verts": 2112,
           "tris": 704,
-          "hash": "e420c59d",
+          "hash": "f0dc5fe1",
           "box": [
             -5.6,
             0.21,
             -9.9,
             5.6,
-            12.996,
+            21.071,
             9.9
           ]
         },
@@ -961,7 +961,7 @@
         "ship-rigging-rope": {
           "meshes": 1,
           "verts": 12,
-          "tris": 130,
+          "tris": 190,
           "hash": "6580bbdd",
           "box": [
             -0.951,
@@ -987,16 +987,16 @@
           ]
         },
         "ship-sail-canvas": {
-          "meshes": 8,
-          "verts": 1918,
-          "tris": 3333,
-          "hash": "60895bac",
+          "meshes": 14,
+          "verts": 7141,
+          "tris": 10833,
+          "hash": "085c3153",
           "box": [
-            -4.77,
+            -8.28,
             4.02,
             -3.55,
-            4.77,
-            13.265,
+            8.28,
+            20.413,
             16.72
           ]
         },

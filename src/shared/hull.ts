@@ -788,40 +788,173 @@ export function getHullContactChain(type: ShipType): ReadonlyArray<{ zF: number;
   return chain;
 }
 
-/** THE RIGGING SILHOUETTE — where the CANVAS is, per mast, so a rigging weapon
- *  connects with sail and not with the sky beside it.
+/** THE RIG PLAN (ships-02, b4.2f) — the ONE set of rig numbers. The renderer
+ *  (ship/sails.ts buildRig, the LOD1/LOD2/far variants), the crow's nest and
+ *  its ladder (getCrowNestStandingY), and the server's chainshot band
+ *  (isPointInRiggingCanvas) all read this, so what you see aloft is what a
+ *  chain connects with.
  *
- *  Chainshot used one flat box, |x| ≤ 0.75 W: three quarters of a beam either
- *  side of the centreline, which on a galleon is 1.34 W-tenths OUTBOARD of the
- *  widest timber on the ship. A chain passing a metre clear of the wale tore
- *  canvas it never touched (ships-24). A yard is narrower than the wale:
- *  yardW = W·(1.06 − 0.1·m) in the renderer (ShipRenderer mast loop), so the
- *  half-width here is 0.53 W on the main and less on each mast aft of her.
+ *  Proportions (period practice, read at range as a sailing ship):
+ *  - main truck above the deck / LOA: sloop 1.10, brigantine 1.00, galleon
+ *    0.92 (RIG_TRUCK_PER_LOA by mast count); the galleon mizzen 0.84 of that.
+ *  - yards 1.5-1.8 x beam: a course yard 1.8 W on the fore, 0.1 W less per
+ *    mast aft (the sloop's single course 1.7 W), every topsail yard 1.5 W.
+ *  - two square sails per mast on the brigantine and galleon (course + topsail;
+ *    the topsail furls first, sailHoistFor), one big course on the sloop, and a
+ *    gaff spanker abaft the brigantine's aft mast.
+ *  - every course foot (and the spanker boom) at least COURSE_FOOT_ABOVE_
+ *    QUARTERDECK above the raised quarterdeck, so the helmsman sees under the
+ *    canvas; the renderer also fades courses to 35% for the local helmsman's
+ *    first-person view only.
  *
- *  Mast layout mirrors that same loop: mastStartZ = 0.28 L, spacing
- *  0.42 L / (mastCount − 1). Fore-and-aft the band is generous, because stays,
- *  shrouds and a swinging boom really do spread the rig over the deck.
- *
- *  Consumers: PhysicsSystem.isChainshotInRiggingBand (server), graded by
- *  scripts/test-combat-fixes.mjs. The client draws the yards from the same
- *  numbers; when ShipRenderer is rebuilt (HULLGEO-01) it should read this. */
-export function getShipRiggingMasts(
+ *  All y values are SHIP-LOCAL (deck = stats.height, waterline = 0). */
+export const RIG_TRUCK_PER_LOA = [1.10, 1.00, 0.92] as const;
+/** Mizzen (third mast) height as a fraction of the main. */
+export const RIG_MIZZEN_HEIGHT = 0.84;
+export const RIG_COURSE_YARD_PER_BEAM = 1.8;
+export const RIG_SLOOP_COURSE_YARD_PER_BEAM = 1.7;
+export const RIG_TOPSAIL_YARD_PER_BEAM = 1.5;
+/** Course yard / topsail yard heights as a fraction of that mast's height above
+ *  the deck. The crow's nest rides at 0.86, just above the top yard. */
+export const RIG_COURSE_YARD_AT = 0.5;
+export const RIG_TOP_YARD_AT = 0.8;
+/** Must equal getShipQuarterdeckConfig(stats).rise (graded by test-ship-rigging). */
+export const RIG_QUARTERDECK_RISE = 0.45;
+export const COURSE_FOOT_ABOVE_QUARTERDECK = 2.4;
+/** Canvas width as a fraction of its yard (the yardarms overhang the sail). */
+export const RIG_CANVAS_PER_YARD = 0.92;
+/** Course opacity for the local helmsman's first-person view only. */
+export const HELM_COURSE_FADE = 0.35;
+
+export type RigSailKind = 'course' | 'topsail' | 'spanker';
+export interface RigSail {
+  kind: RigSailKind;
+  /** Head of the canvas (the yard, or the gaff peak), ship-local y. */
+  headY: number;
+  /** Foot of the canvas fully set, ship-local y. */
+  footY: number;
+  /** Yard half-length (square sails) or half the spanker's thickness band. */
+  halfSpan: number;
+  /** Canvas width at the head and at the foot (a topsail tapers to its head). */
+  headW: number;
+  footW: number;
+  /** Fore and aft extent of the canvas, ship-local z. */
+  zFore: number;
+  zAft: number;
+}
+export interface RigMast {
+  z: number;
+  /** Mast height above the deck; the truck is at stats.height + height. */
+  height: number;
+  truckY: number;
+  sails: RigSail[];
+}
+
+/** Mast height above the deck of the MAIN (the nest mast): LOA x truck ratio. */
+export function getMastHeight(stats: { length: number; mastCount: number }): number {
+  const ratio = RIG_TRUCK_PER_LOA[Math.min(Math.max(stats.mastCount, 1), 3) - 1];
+  return stats.length * ratio;
+}
+
+/** Where a set sail of this kind stands for a ship sail height 0..1: the
+ *  topsail goes away first (it is fully in by sailHeight 0.35), the course and
+ *  spanker follow sailHeight directly. */
+export function sailHoistFor(kind: RigSailKind, sailHeight: number): number {
+  const h = Math.min(1, Math.max(0, sailHeight));
+  return kind === 'topsail' ? Math.min(1, Math.max(0, (h - 0.35) / 0.65)) : h;
+}
+
+export function getShipRigPlan(
   stats: { width: number; length: number; height: number; mastCount: number },
-): Array<{ z: number; halfWidth: number; halfDepth: number }> {
-  const spacing = stats.length * 0.42 / Math.max(stats.mastCount - 1, 1);
-  const masts = [];
-  for (let m = 0; m < stats.mastCount; m++) {
-    masts.push({
-      z: stats.length * 0.28 - m * spacing,
-      halfWidth: stats.width * (1.06 - m * 0.1) * 0.5,
-      halfDepth: Math.max(spacing * 0.5, stats.length * 0.22),
-    });
+): RigMast[] {
+  const H = stats.height, L = stats.length, W = stats.width;
+  const n = stats.mastCount;
+  // Layout unchanged: the fore at 0.28 L, the aftmost 0.42 L behind it, still
+  // forward of the helm (wheel at -0.315 L).
+  const spacing = L * 0.42 / Math.max(n - 1, 1);
+  const main = getMastHeight(stats);
+  const courseFootY = H + RIG_QUARTERDECK_RISE + COURSE_FOOT_ABOVE_QUARTERDECK;
+  const masts: RigMast[] = [];
+  for (let m = 0; m < n; m++) {
+    const z = L * 0.28 - m * spacing;
+    const height = main * (m >= 2 ? RIG_MIZZEN_HEIGHT : 1);
+    const sails: RigSail[] = [];
+    if (n === 1) {
+      const yard = W * RIG_SLOOP_COURSE_YARD_PER_BEAM;
+      sails.push({
+        kind: 'course', headY: H + height * RIG_TOP_YARD_AT, footY: courseFootY, halfSpan: yard * 0.5,
+        headW: yard * RIG_CANVAS_PER_YARD, footW: yard * RIG_CANVAS_PER_YARD, zFore: z + 0.4, zAft: z - 0.4,
+      });
+    } else {
+      const course = W * (RIG_COURSE_YARD_PER_BEAM - 0.1 * m);
+      const top = W * RIG_TOPSAIL_YARD_PER_BEAM;
+      const courseYardY = H + height * RIG_COURSE_YARD_AT;
+      sails.push({
+        kind: 'course', headY: courseYardY, footY: courseFootY, halfSpan: course * 0.5,
+        headW: course * RIG_CANVAS_PER_YARD, footW: course * RIG_CANVAS_PER_YARD, zFore: z + 0.4, zAft: z - 0.4,
+      });
+      sails.push({
+        kind: 'topsail', headY: H + height * RIG_TOP_YARD_AT, footY: courseYardY + 0.3, halfSpan: top * 0.5,
+        headW: top * RIG_CANVAS_PER_YARD, footW: course * 0.88, zFore: z + 0.4, zAft: z - 0.4,
+      });
+      if (n === 2 && m === n - 1) {
+        // Gaff spanker abaft the brigantine's aft mast: boom at the course
+        // foot (over the helmsman's head), gaff peak at 0.62 of the mast.
+        const boom = L * 0.17;
+        sails.push({
+          kind: 'spanker', headY: H + height * 0.62, footY: courseFootY, halfSpan: 0.5,
+          headW: L * 0.13, footW: boom, zFore: z - 0.1, zAft: z - 0.1 - boom,
+        });
+      }
+    }
+    masts.push({ z, height, truckY: H + height, sails });
   }
   return masts;
 }
 
-/** Mast height above the deck — H × 3.6 single-masted, × 3.1 otherwise. The
- *  canvas tops out at 0.90 of it (the crow's nest rides at 0.86). */
-export function getMastHeight(stats: { height: number; mastCount: number }): number {
-  return stats.height * (stats.mastCount === 1 ? 3.6 : 3.1);
+/** Per-mast canvas boxes (z, widest half-span, fore-aft half-depth) — the
+ *  coarse broad phase; the exact test is isPointInRiggingCanvas. */
+export function getShipRiggingMasts(
+  stats: { width: number; length: number; height: number; mastCount: number },
+): Array<{ z: number; halfWidth: number; halfDepth: number }> {
+  const spacing = stats.length * 0.42 / Math.max(stats.mastCount - 1, 1);
+  const band = Math.max(spacing * 0.5, stats.length * 0.22);
+  return getShipRigPlan(stats).map((mast) => {
+    let halfWidth = 0, fore = mast.z + band, aft = mast.z - band;
+    for (const s of mast.sails) {
+      halfWidth = Math.max(halfWidth, s.kind === 'spanker' ? s.halfSpan : Math.max(s.headW, s.footW) * 0.5);
+      fore = Math.max(fore, s.zFore); aft = Math.min(aft, s.zAft);
+    }
+    return { z: mast.z, halfWidth, halfDepth: Math.max(fore - mast.z, mast.z - aft) };
+  });
+}
+
+/** THE CHAINSHOT BAND: is a ship-local point inside set canvas? Each sail is
+ *  its own box: across, its canvas half-width (a metre outboard of the
+ *  yardarm is sky); vertically, from its head down to its foot as hoisted
+ *  (sailHoistFor; a half-set course hangs half as deep, a furled sail is spars
+ *  and air); fore-and-aft, a generous band either side of the mast for the
+ *  belly, stays and shrouds (0.22 L or half the mast spacing), the spanker its
+ *  own boom length. `set` is sailHeight x sailIntegrity. */
+export function isPointInRiggingCanvas(
+  stats: { width: number; length: number; height: number; mastCount: number },
+  local: { x: number; y: number; z: number },
+  set: number,
+): boolean {
+  const spacing = stats.length * 0.42 / Math.max(stats.mastCount - 1, 1);
+  const halfDepth = Math.max(spacing * 0.5, stats.length * 0.22);
+  for (const mast of getShipRigPlan(stats)) {
+    for (const s of mast.sails) {
+      const hoist = sailHoistFor(s.kind, set);
+      if (hoist <= 0.06) continue;
+      const lowY = s.headY - (s.headY - s.footY) * hoist;
+      if (local.y < lowY || local.y > s.headY) continue;
+      if (s.kind === 'spanker') {
+        if (Math.abs(local.x) <= s.halfSpan && local.z <= s.zFore && local.z >= s.zAft) return true;
+        continue;
+      }
+      if (Math.abs(local.x) <= Math.max(s.headW, s.footW) * 0.5 && Math.abs(local.z - mast.z) <= halfDepth) return true;
+    }
+  }
+  return false;
 }

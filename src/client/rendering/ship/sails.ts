@@ -2,11 +2,12 @@ import * as THREE from 'three';
 import { IK_GRIPS_KEY } from '../character/ikSolvers.js';
 import type { SHIP_STATS } from '../../../shared/constants/index.js';
 import type { Ship, ShipUpgradeType } from '../../../shared/types/index.js';
-import { getMastHeight, hullSurfacePointAt } from '../../../shared/hull.js';
+import { getMastHeight, getShipRigPlan, hullSurfacePointAt } from '../../../shared/hull.js';
 import type { HullProfile } from '../../../shared/hull.js';
 import { getBraceStationLocals, getCrowNestStandingY, getMainMastLocalZ, getSailRopeStationLocals } from '../../../shared/utils/index.js';
 import type { RenderQuality } from '../Renderer.js';
 import { makeBillowedSailGeometry } from './geometry.js';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { makeCylinderBetween, makeRopeCoil } from './dressing.js';
 import { buildRigging, type RopeRun, type Rigging } from './rigging.js';
 
@@ -141,8 +142,10 @@ export function buildRig(ctx: RigContext): RigBuild {
   const mastCount = stats.mastCount;
   // Keep the aftmost mast forward of the stern helm so its sail never drapes
   // over the wheel (aftmost lands ~-L*0.14, wheel sits at -L*0.315).
-  const mastSpacing = L * 0.42 / Math.max(mastCount - 1, 1);
   const mastStartZ = L * 0.28;
+  // b4.2f: every rig number (mast heights, yards, course + topsail, spanker)
+  // comes from the shared plan the server's chainshot band also reads.
+  const rigPlan = getShipRigPlan(stats);
 
   // All rigging collapses into two INSTANCED draw calls (rope + ratline): one
   // draw each, exactly as the old LineSegments, but lit, shadowed and thick
@@ -154,14 +157,16 @@ export function buildRig(ctx: RigContext): RigBuild {
   const yardHalfSpanForMast: number[] = [];
 
   for (let m = 0; m < mastCount; m++) {
-    const mastZ = mastStartZ - m * mastSpacing;
-    const mastH = getMastHeight({ height: H, mastCount });
+    const mastPlan = rigPlan[m];
+    const mastZ = mastPlan.z;
+    const mastH = mastPlan.height;
     const mastR = 0.075 + (ship.type === 'galleon' ? 0.045 : ship.type === 'brigantine' ? 0.025 : 0);
 
     const mast = new THREE.Mesh(
       new THREE.CylinderGeometry(mastR * 0.8, mastR * 1.4, mastH, 16),
       darkMat,
     );
+    mast.name = `mast-${m}`;
     mast.position.set(0, H + mastH * 0.5, mastZ);
     mast.castShadow = true;
     group.add(mast);
@@ -190,7 +195,7 @@ export function buildRig(ctx: RigContext): RigBuild {
     // settles at ~0.82·mastH) so the canvas hangs below it, not through it.
     // Keep in sync with getCrowNestStandingY (the standing spot).
     if (m === 0 && mastH > 6) {
-      const nestY = H + mastH * 0.86;
+      const nestY = getCrowNestStandingY(stats) - 0.12;
       // A genuine lookout platform, not a dinner plate: floor r = 1.0 carries
       // the server's 0.9 m walkable disc (PhysicsSystem CROW_NEST_WALK_RADIUS)
       // with the rail hoop just outboard at 1.06, so a pacing lookout stops at
@@ -223,38 +228,6 @@ export function buildRig(ctx: RigContext): RigBuild {
       }
     }
 
-    // Boom / yardarm — lives inside a trim pivot together with its sail and
-    // furled roll, so bracing the sails visibly swings the SPAR too instead
-    // of the canvas rotating away from a frozen yard.
-    // ~12% narrower than round-1 (1.2 base) so the helm can see forward past the rig
-    const yardW = W * (1.06 - m * 0.1);
-    const trimPivot = new THREE.Group();
-    trimPivot.name = 'yard-trim-pivot';
-    trimPivot.position.set(0, H + mastH * 0.82, mastZ);
-    group.add(trimPivot);
-    trimPivots.push(trimPivot);
-    const yard = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.042, 0.042, yardW, 12),
-      darkMat,
-    );
-    yard.rotation.z = Math.PI * 0.5;
-    yard.castShadow = true;
-    trimPivot.add(yard);
-
-    // Lifts from the yardarm down to the deck. The upper end is ON the yard,
-    // which lives in the trim pivot, so it is stored PIVOT-LOCAL: the yard is
-    // a cylinder laid along the pivot's x axis at its origin, so the yardarm
-    // is (±yardW·0.48, 0, 0) in that frame.
-    yardHalfSpanForMast[m] = yardW * 0.48;
-    for (const sx of [-1, 1]) {
-      ropeRuns.push({
-        a: new THREE.Vector3(sx * W * 0.44, H + 0.15, mastZ - L * 0.04),
-        b: new THREE.Vector3(sx * yardW * 0.48, H + mastH * 0.82, mastZ),
-        pivot: trimPivot,
-        bLocal: new THREE.Vector3(sx * yardW * 0.48, 0, 0),
-      });
-    }
-
     const addRigLine = (a: THREE.Vector3, b: THREE.Vector3) => {
       ratlineRuns.push({ a, b });
     };
@@ -275,102 +248,210 @@ export function buildRig(ctx: RigContext): RigBuild {
       }
     }
 
-    // Square-rigged sail — hangs from the yardarm. PlaneGeometry's default frame is
-    // exactly what we want: width along X (matches yardarm direction), height along Y
-    // (drops toward deck), normal along +Z (faces forward when "square" to wind).
-    // The sail trim animation rotates around Y by `ship.sailAngle`.
-    // The aftmost mast's canvas is what blocks the helm's forward view —
-    // it narrows a further 10% on top of the global shrink.
-    const sailW = yardW * 0.85 * (mastCount > 1 && m === mastCount - 1 ? 0.9 : 1);
-    const sailH = mastH * 0.64;
-    const sailGeo = makeBillowedSailGeometry(sailW, sailH, 10, 7);
-    const mastSailMat = sailMat.clone();
-    // Main sail carries the painted team band (team read at distance)
-    if (m === 0) mastSailMat.map = teamSailTexture(ship.teamColor);
-    const sail = new THREE.Mesh(sailGeo, mastSailMat);
-    sail.rotation.order = 'YXZ';
-    sail.rotation.y = 0;
-    // Pivot-local frame: the pivot sits AT the yard, so hoist metadata is
-    // relative to it (hoistTopY = 0 = the yard height).
-    sail.position.set(0, -sailH * 0.375, 0);
-    sail.userData.hoistTopY = 0;
-    sail.userData.hoistHeight = sailH;
-    sail.userData.hoistCentered = true;
-    sail.userData.sailKind = 'square';
-    sail.userData.trimPivot = trimPivot;
-    sail.userData.phaseSeed = mastZ;
-    // Cloth flutter: keep the rest-pose so per-frame displacement is additive
-    sail.userData.clothBase = Float32Array.from(
-      (sailGeo.attributes.position as THREE.BufferAttribute).array as Float32Array,
-    );
-    sail.userData.clothW = sailW;
-    sail.userData.clothH = sailH;
-    sail.castShadow = false;
-    sail.receiveShadow = false;
-    addSwiftSailTrim(sail, sailW, sailH, upgradeVisuals.swift_sails);
-    trimPivot.add(sail);
-    sails.push(sail);
+    for (const plan of mastPlan.sails) {
+      if (plan.kind === 'spanker') continue;
+      // Boom / yardarm — lives inside a trim pivot together with its sail and
+      // furled roll, so bracing the sails visibly swings the SPAR too instead
+      // of the canvas rotating away from a frozen yard.
+      // ~12% narrower than round-1 (1.2 base) so the helm can see forward past the rig
+      const yardW = plan.halfSpan * 2;
+      const trimPivot = new THREE.Group();
+      trimPivot.name = 'yard-trim-pivot';
+      trimPivot.position.set(0, plan.headY, mastZ);
+      group.add(trimPivot);
+      trimPivots.push(trimPivot);
+      const yard = new THREE.Mesh(
+        new THREE.CylinderGeometry(plan.kind === 'course' ? 0.06 : 0.045, plan.kind === 'course' ? 0.06 : 0.045, yardW, 12),
+        darkMat,
+      );
+      yard.rotation.z = Math.PI * 0.5;
+      yard.castShadow = true;
+      trimPivot.add(yard);
 
-    // Furled canvas: a fat lashed BUNDLE gathered against the yard, not a
-    // thin rod — an anchored ship must read as "sails stowed", not
-    // dismasted. Slight vertical sag + gasket lashings sell the bundle.
-    const furledGroup = new THREE.Group();
-    // The bundle is a LATHE along the yard whose radius bulges between the
-    // gaskets and pinches under them, and whose axis sags in a shallow
-    // catenary — canvas gathered and strapped, not a length of white pipe.
-    const gasketCount = 5;
-    const bundleLen = yardW * 0.9;
-    const bundleSegs = 40;
-    const bundleGeo = new THREE.CylinderGeometry(1, 1, bundleLen, 12, bundleSegs, true);
-    {
-      // The mesh is rotated z=+90° below, so the cylinder's LOCAL +Y runs out
-      // along the yard and LOCAL −X points DOWN in ship space — that is the
-      // axis the bundle sags along.
-      const pos = bundleGeo.attributes.position as THREE.BufferAttribute;
-      const sag = 0.15;
-      for (let i = 0; i < pos.count; i++) {
-        const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
-        const u = y / bundleLen + 0.5;               // 0..1 along the yard
-        // Pinch hard under each gasket, swell in the bays between them.
-        const lash = Math.abs(Math.sin(u * Math.PI * gasketCount));
-        const taper = 0.74 + 0.26 * Math.sin(Math.PI * Math.min(1, Math.max(0, u)));
-        const r = (0.28 + 0.15 * lash) * taper;
-        // Catenary over the whole yard + a droop in each bay between gaskets.
-        const droop = sag * (1 - Math.pow(2 * u - 1, 2)) + 0.06 * lash;
-        pos.setX(i, x * r - droop);
-        pos.setZ(i, z * r);
+      // Lifts from the yardarm down to the deck. The upper end is ON the yard,
+      // which lives in the trim pivot, so it is stored PIVOT-LOCAL: the yard is
+      // a cylinder laid along the pivot's x axis at its origin, so the yardarm
+      // is (±yardW·0.48, 0, 0) in that frame.
+      yardHalfSpanForMast[trimPivots.length - 1] = yardW * 0.48;
+      for (const sx of [-1, 1]) {
+        ropeRuns.push({
+          a: new THREE.Vector3(sx * W * 0.44, H + 0.15, mastZ - L * 0.04),
+          b: new THREE.Vector3(sx * yardW * 0.48, plan.headY, mastZ),
+          pivot: trimPivot,
+          bLocal: new THREE.Vector3(sx * yardW * 0.48, 0, 0),
+        });
       }
-      bundleGeo.computeVertexNormals();
+
+      // Square-rigged sail — hangs from the yardarm. PlaneGeometry's default frame is
+      // exactly what we want: width along X (matches yardarm direction), height along Y
+      // (drops toward deck), normal along +Z (faces forward when "square" to wind).
+      // The sail trim animation rotates around Y by `ship.sailAngle`.
+      // The aftmost mast's canvas is what blocks the helm's forward view —
+      // it narrows a further 10% on top of the global shrink.
+      const sailW = Math.max(plan.headW, plan.footW);
+      const sailH = plan.headY - plan.footY;
+      const sailGeo = makeBillowedSailGeometry(sailW, sailH, quality === 'low' ? 8 : 10, quality === 'low' ? 5 : 7);
+      if (plan.headW !== plan.footW) {
+        // A topsail tapers from the course yard's spread at its foot to its own
+        // shorter yard at the head.
+        const tp = sailGeo.attributes.position as THREE.BufferAttribute;
+        for (let i = 0; i < tp.count; i++) {
+          const t = THREE.MathUtils.clamp(tp.getY(i) / sailH + 0.5, 0, 1);
+          tp.setX(i, tp.getX(i) * (plan.footW + (plan.headW - plan.footW) * t) / sailW);
+        }
+        sailGeo.computeVertexNormals();
+      }
+      const mastSailMat = sailMat.clone();
+      // Main sail carries the painted team band (team read at distance)
+      if (m === 0 && plan.kind === 'course') mastSailMat.map = teamSailTexture(ship.teamColor);
+      const sail = new THREE.Mesh(sailGeo, mastSailMat);
+      sail.rotation.order = 'YXZ';
+      sail.rotation.y = 0;
+      // Pivot-local frame: the pivot sits AT the yard, so hoist metadata is
+      // relative to it (hoistTopY = 0 = the yard height).
+      sail.position.set(0, -sailH * 0.375, 0);
+      sail.userData.hoistTopY = 0;
+      sail.userData.hoistHeight = sailH;
+      sail.userData.hoistCentered = true;
+      sail.userData.sailKind = 'square';
+      sail.userData.rigKind = plan.kind;
+      sail.userData.trimPivot = trimPivot;
+      sail.userData.phaseSeed = mastZ + (plan.kind === 'topsail' ? 0.7 : 0);
+      // Cloth flutter: keep the rest-pose so per-frame displacement is additive
+      sail.userData.clothBase = Float32Array.from(
+        (sailGeo.attributes.position as THREE.BufferAttribute).array as Float32Array,
+      );
+      sail.userData.clothW = sailW;
+      sail.userData.clothH = sailH;
+      sail.castShadow = false;
+      sail.receiveShadow = false;
+      addSwiftSailTrim(sail, sailW, sailH, upgradeVisuals.swift_sails);
+      trimPivot.add(sail);
+      sails.push(sail);
+
+      // Furled canvas: a fat lashed BUNDLE gathered against the yard, not a
+      // thin rod — an anchored ship must read as "sails stowed", not
+      // dismasted. Slight vertical sag + gasket lashings sell the bundle.
+      const furledGroup = new THREE.Group();
+      // The bundle is a LATHE along the yard whose radius bulges between the
+      // gaskets and pinches under them, and whose axis sags in a shallow
+      // catenary — canvas gathered and strapped, not a length of white pipe.
+      const gasketCount = 5;
+      const bundleLen = yardW * 0.9;
+      const bundleSegs = quality === 'low' ? 14 : 40;
+      const bundleGeo = new THREE.CylinderGeometry(1, 1, bundleLen, quality === 'low' ? 8 : 12, bundleSegs, true);
+      {
+        // The mesh is rotated z=+90° below, so the cylinder's LOCAL +Y runs out
+        // along the yard and LOCAL −X points DOWN in ship space — that is the
+        // axis the bundle sags along.
+        const pos = bundleGeo.attributes.position as THREE.BufferAttribute;
+        const sag = 0.15;
+        for (let i = 0; i < pos.count; i++) {
+          const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+          const u = y / bundleLen + 0.5;               // 0..1 along the yard
+          // Pinch hard under each gasket, swell in the bays between them.
+          const lash = Math.abs(Math.sin(u * Math.PI * gasketCount));
+          const taper = 0.74 + 0.26 * Math.sin(Math.PI * Math.min(1, Math.max(0, u)));
+          const r = (0.28 + 0.15 * lash) * taper;
+          // Catenary over the whole yard + a droop in each bay between gaskets.
+          const droop = sag * (1 - Math.pow(2 * u - 1, 2)) + 0.06 * lash;
+          pos.setX(i, x * r - droop);
+          pos.setZ(i, z * r);
+        }
+        bundleGeo.computeVertexNormals();
+      }
+      const bundleMat = sailMat.clone();
+      // Stowed canvas is weathered and shaded, not showroom white — the audit
+      // read the old bundles as bright white tubes on the yard.
+      bundleMat.color.set(0xd9cda6);
+      bundleMat.roughness = 0.95;
+      // b4.2f: the bundle, its gaskets and their tails are ONE draw (vertex
+      // colour tints the rope parts), so a course + topsail rig does not spend
+      // 11 draws per yard on a stowed sail. bundleMat.color multiplies every
+      // vertex colour: divide it out so the rope lands on the old 0x6b5836.
+      const lowRig = quality === 'low';
+      const gasketTone = new THREE.Color(0x6b5836);
+      gasketTone.r /= bundleMat.color.r; gasketTone.g /= bundleMat.color.g; gasketTone.b /= bundleMat.color.b;
+      const furledParts: THREE.BufferGeometry[] = [];
+      const tint = (g: THREE.BufferGeometry, c: THREE.Color) => {
+        const n = g.attributes.position.count;
+        const col = new Float32Array(n * 3);
+        for (let i = 0; i < n; i++) { col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b; }
+        g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+        return g;
+      };
+      furledParts.push(tint(bundleGeo.applyMatrix4(new THREE.Matrix4().makeRotationZ(Math.PI * 0.5)), new THREE.Color(1, 1, 1)));
+      const partM = new THREE.Matrix4();
+      const partQ = new THREE.Quaternion();
+      const partE = new THREE.Euler();
+      const unit = new THREE.Vector3(1, 1, 1);
+      for (let g = -2; g <= 2; g++) {
+        const gu = (g + 2) / (gasketCount - 1);
+        const gasketY = -0.15 * (1 - Math.pow(2 * gu - 1, 2));
+        const gx = g * bundleLen * 0.245;
+        const gasket = new THREE.TorusGeometry(0.27, 0.034, lowRig ? 4 : 5, lowRig ? 8 : 12);
+        gasket.applyMatrix4(partM.compose(new THREE.Vector3(gx, gasketY, 0), partQ.setFromEuler(partE.set(0, Math.PI * 0.5, 0)), unit));
+        furledParts.push(tint(gasket, gasketTone));
+        // Gasket tail hanging off the bundle — the giveaway that it is lashed.
+        const tail = new THREE.CylinderGeometry(0.017, 0.013, 0.36, 5);
+        tail.applyMatrix4(partM.compose(new THREE.Vector3(gx + 0.04, gasketY - 0.36, 0.02), partQ.setFromEuler(partE.set(0, 0, 0.16 * (g % 2 === 0 ? 1 : -1))), unit));
+        furledParts.push(tint(tail, gasketTone));
+      }
+      const furledGeo = mergeGeometries(furledParts, false)!;
+      for (const g of furledParts) g.dispose();
+      bundleMat.vertexColors = true;
+      const furled = new THREE.Mesh(furledGeo, bundleMat);
+      furled.castShadow = true;
+      furledGroup.add(furled);
+      furledGroup.position.set(0, -Math.min(0.5, 0.25 + sailH * 0.03), -0.04);
+      furledGroup.userData.rigKind = plan.kind;
+      furledGroup.userData.phaseSeed = mastZ;
+      furledGroup.scale.y = 1;
+      trimPivot.add(furledGroup);
+      furledSails.push(furledGroup as unknown as THREE.Mesh);
     }
-    const bundleMat = sailMat.clone();
-    // Stowed canvas is weathered and shaded, not showroom white — the audit
-    // read the old bundles as bright white tubes on the yard.
-    bundleMat.color.set(0xd9cda6);
-    bundleMat.roughness = 0.95;
-    const furled = new THREE.Mesh(bundleGeo, bundleMat);
-    furled.rotation.z = Math.PI * 0.5;
-    furled.castShadow = true;
-    furledGroup.add(furled);
-    // Rope gaskets lashing the bundle to the yard at intervals
-    const gasketMat = new THREE.MeshStandardMaterial({ color: 0x6b5836, roughness: 1 });
-    for (let g = -2; g <= 2; g++) {
-      const gu = (g + 2) / (gasketCount - 1);
-      const gasketY = -0.15 * (1 - Math.pow(2 * gu - 1, 2));
-      const gasket = new THREE.Mesh(new THREE.TorusGeometry(0.27, 0.034, 5, 12), gasketMat);
-      gasket.rotation.y = Math.PI * 0.5;
-      gasket.position.set(g * bundleLen * 0.245, gasketY, 0);
-      furledGroup.add(gasket);
-      // Gasket tail hanging off the bundle — the giveaway that it is lashed.
-      const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.017, 0.013, 0.36, 5), gasketMat);
-      tail.position.set(gasket.position.x + 0.04, gasketY - 0.36, 0.02);
-      tail.rotation.z = 0.16 * (g % 2 === 0 ? 1 : -1);
-      furledGroup.add(tail);
+
+    for (const plan of mastPlan.sails) {
+      if (plan.kind !== 'spanker') continue;
+      // Gaff spanker abaft the aft mast: boom at the course foot (over the
+      // helmsman's head), gaff up to the peak, canvas fore-and-aft. Shape x
+      // runs AFT (rotation.y = PI/2 maps local +x to -z), like the jib.
+      const boomLen = plan.footW, gaffLen = plan.headW;
+      const throatDy = (plan.headY - plan.footY) * 0.78;
+      const peakDy = plan.headY - plan.footY;
+      const boom = makeCylinderBetween(
+        new THREE.Vector3(0, plan.footY, plan.zFore + 0.05),
+        new THREE.Vector3(0, plan.footY, plan.zFore - boomLen - 0.2), 0.06, darkMat, 10);
+      boom.castShadow = true;
+      group.add(boom);
+      const gaff = makeCylinderBetween(
+        new THREE.Vector3(0, plan.footY + throatDy, plan.zFore + 0.05),
+        new THREE.Vector3(0, plan.footY + peakDy, plan.zFore - gaffLen - 0.15), 0.05, darkMat, 10);
+      gaff.castShadow = true;
+      group.add(gaff);
+      const shape = new THREE.Shape();
+      shape.moveTo(0, 0);
+      shape.lineTo(boomLen, 0);
+      shape.lineTo(gaffLen, peakDy);
+      shape.lineTo(0, throatDy);
+      shape.lineTo(0, 0);
+      const spanker = new THREE.Mesh(new THREE.ShapeGeometry(shape), sailMat.clone());
+      spanker.rotation.order = 'YXZ';
+      spanker.rotation.y = Math.PI * 0.5;
+      spanker.position.set(0, plan.footY, plan.zFore);
+      spanker.userData.hoistTopY = plan.footY + peakDy;
+      spanker.userData.hoistHeight = peakDy;
+      spanker.userData.hoistCentered = false;
+      spanker.userData.sailKind = 'stay';
+      spanker.userData.rigKind = 'spanker';
+      spanker.userData.fixedYaw = Math.PI * 0.5;
+      spanker.userData.phaseSeed = plan.zFore;
+      spanker.castShadow = false;
+      spanker.receiveShadow = false;
+      addSwiftSailTrim(spanker, boomLen, peakDy, upgradeVisuals.swift_sails, true);
+      group.add(spanker);
+      sails.push(spanker);
     }
-    furledGroup.position.set(0, -mastH * 0.045, -0.04);
-    furledGroup.userData.phaseSeed = mastZ;
-    furledGroup.scale.y = 1;
-    trimPivot.add(furledGroup);
-    furledSails.push(furledGroup as unknown as THREE.Mesh);
   }
 
   // Crow's nest ladder — vertical rails hug the main mast pole (x=0), not offset toward the rail edge
@@ -506,10 +587,13 @@ export function buildRig(ctx: RigContext): RigBuild {
   // the bowsprit tip (forward + low) up to the foremast (aft + high), so the
   // canvas hugs the rig instead of floating as a vertical slab above the bow.
   // (Local X → world -Z after the y=90° rotation; local Y → world Y.)
+  // Forestay to the fore course yard (b4.2f): the jib grows with the rig.
+  const foreStayHeadY = H + rigPlan[0].height * 0.55;
+  const jibHeadH = (foreStayHeadY - (H + 0.52)) * 0.9;
   const jibShape = new THREE.Shape();
   jibShape.moveTo(-L * 0.20, 0);        // tack — at the bowsprit tip (world z≈L*0.76)
   jibShape.lineTo(L * 0.26, H * 0.30);  // clew — aft + low (sheet corner, the belly)
-  jibShape.lineTo(L * 0.28, H * 1.18);  // head — up the foremast (world z≈L*0.28)
+  jibShape.lineTo(L * 0.28, jibHeadH);  // head — up the foremast (world z≈L*0.28)
   jibShape.lineTo(-L * 0.20, 0);
   const jib = new THREE.Mesh(new THREE.ShapeGeometry(jibShape), sailMat.clone());
   jib.rotation.order = 'YXZ';
@@ -517,21 +601,21 @@ export function buildRig(ctx: RigContext): RigBuild {
   // points sideways. It does NOT trim with the yardarm sails — fixed yaw.
   jib.rotation.y = Math.PI * 0.5;
   jib.position.set(0, H + 0.52, L * 0.56);
-  jib.userData.hoistTopY = H + 0.52 + H * 1.18;
-  jib.userData.hoistHeight = H * 1.18;
+  jib.userData.hoistTopY = H + 0.52 + jibHeadH;
+  jib.userData.hoistHeight = jibHeadH;
   jib.userData.hoistCentered = false;
   jib.userData.sailKind = 'stay';
   jib.userData.fixedYaw = Math.PI * 0.5;
   jib.userData.phaseSeed = L * 0.56;
   jib.castShadow = false;
   jib.receiveShadow = false;
-  addSwiftSailTrim(jib, L * 0.24, H * 1.18, upgradeVisuals.swift_sails, true);
+  addSwiftSailTrim(jib, L * 0.24, jibHeadH, upgradeVisuals.swift_sails, true);
   group.add(jib);
   sails.push(jib);
   // Furled jib bundle lies ALONG the forestay (bowsprit tip → foremast head),
   // axis exactly on the stay so it reads as canvas lashed to it.
   const stayTip = new THREE.Vector3(0, H + 0.55, L * 0.76);
-  const stayHead = new THREE.Vector3(0, H + H * 2.15, mastStartZ);
+  const stayHead = new THREE.Vector3(0, foreStayHeadY, mastStartZ);
   const stayDir = stayHead.clone().sub(stayTip).normalize();
   const furledJib = makeCylinderBetween(
     stayTip.clone().addScaledVector(stayDir, 0.2),
@@ -548,13 +632,13 @@ export function buildRig(ctx: RigContext): RigBuild {
   const foreMastZ = mastStartZ;
   ropeRuns.push({
     a: new THREE.Vector3(0, H + 0.55, L * 0.76),
-    b: new THREE.Vector3(0, H + H * 2.15, foreMastZ),
+    b: new THREE.Vector3(0, foreStayHeadY, foreMastZ),
   });
   // Side stays land ON the bowsprit shaft just behind the tip — never in open air
   for (const sx of [-1, 1] as const) {
     ropeRuns.push({
       a: new THREE.Vector3(sx * 0.06, H + 0.53, L * 0.72),
-      b: new THREE.Vector3(0, H + H * 1.95, foreMastZ),
+      b: new THREE.Vector3(0, foreStayHeadY - 0.4, foreMastZ),
     });
   }
 
