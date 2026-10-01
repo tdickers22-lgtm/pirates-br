@@ -1,6 +1,7 @@
 import { createNoise2D } from 'simplex-noise';
 import type { Island, IslandCave, IslandDock, IslandGeyser, IslandTavern, SeaRock, SeaRockCollider, Ship, ShipType, Vec3, Vec2 } from '../types/index.js';
 import { SHIP, SHIP_STATS, PLAYER, STORM_TAILWIND, BERTH_FRAME_ALONG_SLACK, BERTH_FRAME_LATERAL_SLACK } from '../constants/index.js';
+import { getMastHeight } from '../hull.js';
 
 export function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
@@ -1560,7 +1561,7 @@ export function getMainMastLocalZ(stats: { length: number }): number {
 /** Standing height in crow's nest (ship-local Y above waterline). */
 export function getCrowNestStandingY(stats: { height: number; mastCount: number }): number {
   const H = stats.height;
-  const mastH = H * (stats.mastCount === 1 ? 3.6 : 3.1);
+  const mastH = getMastHeight(stats); // the one mast-height law (shared/hull.ts)
   // Nest rides just ABOVE the main sail's yard (sail top settles at ~0.82·mastH),
   // so the canvas hangs below it instead of clipping through the basket.
   return H + mastH * 0.86 + 0.12;
