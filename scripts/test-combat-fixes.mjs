@@ -21,6 +21,7 @@ import { SHIP, SHIP_STATS, FLOODING, PLAYER } from '../src/shared/constants/inde
 import { gerstnerHeight, WAVE_PARAMS, getShipCompanionwayConfig } from '../src/shared/utils/index.ts';
 import { countOpenHoles, getShipFloorYAt, isStandingInShipHold, toShipLocalPoint } from '../src/shared/interactions.ts';
 import { buildHotSnapshot, buildWireSnapshot } from '../src/server/core/snapshot.ts';
+import { getShipRigPlan } from '../src/shared/hull.ts';
 
 /** Which hull face a hull-local breach point lies on. Beam-normalised: a hull
  *  is far longer than it is wide, so a point at the half-beam 3.6 m aft is on
@@ -216,8 +217,10 @@ console.log('\n2. Chainshot shreds rigging ABOVE the hull band; never holes hull
     position: { x: 0, y: gerstnerHeight(0, 0, 0, WAVE_PARAMS), z: 0 },
     sailHeight: 1,
   });
-  // Well above the hull hit band (height + 1.1) but through the canvas.
-  const riggingY = ship.position.y + stats.height + 2.0;
+  // b4.2f: through the middle of the sloop's course, read from the shared rig
+  // plan (the canvas the renderer draws), well above the hull hit band.
+  const sloopCourse = getShipRigPlan(stats)[0].sails.find((s) => s.kind === 'course');
+  const riggingY = ship.position.y + (sloopCourse.headY + sloopCourse.footY) * 0.5;
   const chain = makeProjectile({
     type: 'chainshot',
     position: { x: 0.5, y: riggingY, z: 1 },
@@ -235,36 +238,50 @@ console.log('\n2. Chainshot shreds rigging ABOVE the hull band; never holes hull
   // wider than the ship's widest timber (the wale, 0.616 W) — so a chain
   // passing a clear metre outboard of the hull still tore canvas. The band is
   // now the SAIL silhouette per mast (yard half-width 0.53 W on the main).
+  // b4.2f re-pin: the courses now spread 1.6-1.8 W, so the canvas OVERHANGS
+  // the wale (0.616 W). The band is each sail's own box from the shared rig
+  // plan: inside the overhang connects, a metre outboard of the leech is sky,
+  // and the air between the deck and the course foot (the helmsman's view
+  // under the canvas) has no sail in it.
   {
-    const wide = new PhysicsSystem();
     const galleonStats = SHIP_STATS.galleon;
-    const far = makeShip('galleon', {
-      position: { x: 0, y: gerstnerHeight(0, 0, 0, WAVE_PARAMS), z: 0 },
-      sailHeight: 1,
-    });
-    const outboard = galleonStats.width * 0.616 + 1.0; // a metre clear of the wale
-    const miss = makeProjectile({
-      type: 'chainshot',
-      position: { x: outboard, y: far.position.y + galleonStats.height + 2.0, z: far.position.z + galleonStats.length * 0.28 },
-    });
-    wide.update(DT, 2, [far], [], [miss], [], [], null);
-    expect('chainshot a metre outboard of the wale tears nothing',
-      miss.alive === true && far.sailIntegrity === 1 && far.chainshottedUntil === 0,
-      `alive=${miss.alive} integrity=${far.sailIntegrity} fouled=${far.chainshottedUntil}`);
+    const fore = getShipRigPlan(galleonStats)[0];
+    const course = fore.sails.find((s) => s.kind === 'course');
+    const leech = Math.max(course.headW, course.footW) * 0.5;
+    const shoot = (label, x, yLocal, wantHit) => {
+      const wide = new PhysicsSystem();
+      const far = makeShip('galleon', {
+        position: { x: 0, y: gerstnerHeight(0, 0, 0, WAVE_PARAMS), z: 0 },
+        sailHeight: 1,
+      });
+      const p = makeProjectile({ type: 'chainshot', position: { x, y: far.position.y + yLocal, z: far.position.z + fore.z } });
+      wide.update(DT, 2, [far], [], [p], [], [], null);
+      const hit = p.alive === false && far.chainshottedUntil > 0;
+      const clean = p.alive === true && far.sailIntegrity === 1 && far.chainshottedUntil === 0;
+      expect(label, wantHit ? hit : clean,
+        `x=${x.toFixed(2)} y=${yLocal.toFixed(2)} alive=${p.alive} integrity=${far.sailIntegrity} fouled=${far.chainshottedUntil}`);
+    };
+    const midY = (course.headY + course.footY) * 0.5;
+    shoot('chainshot a metre outboard of the course leech tears nothing', leech + 1.0, midY, false);
+    shoot('chainshot outboard of the wale but inside the course overhang connects',
+      galleonStats.width * 0.616 + 1.0, midY, true);
+    shoot('chainshot between the deck and the course foot passes under the canvas',
+      0.5, (galleonStats.height + course.footY) * 0.5, false);
+    shoot('chainshot through the fore topsail connects', 0.5,
+      (fore.sails.find((s) => s.kind === 'topsail').headY + fore.sails.find((s) => s.kind === 'topsail').footY) * 0.5, true);
   }
 
   // A furled sail is spars and air: the canvas is rolled on the yard, so a
   // chain goes through instead of "tearing" a sail that is not set.
   {
     const furledPhysics = new PhysicsSystem();
-    const furledStats = SHIP_STATS.sloop;
     const furled = makeShip('sloop', {
       position: { x: 0, y: gerstnerHeight(0, 0, 0, WAVE_PARAMS), z: 0 },
       sailHeight: 0,
     });
     const through = makeProjectile({
       type: 'chainshot',
-      position: { x: 0.5, y: furled.position.y + furledStats.height + 2.0, z: 1 },
+      position: { x: 0.5, y: furled.position.y + (sloopCourse.headY + sloopCourse.footY) * 0.5, z: 1 },
     });
     furledPhysics.update(DT, 2, [furled], [], [through], [], [], null);
     expect('chainshot passes clean through FURLED canvas',

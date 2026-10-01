@@ -1,6 +1,6 @@
 import type { Ship, ShipHole, ShipHoleSource, Player, Projectile, Island, Vec3, HullSections, SeaRock, StormState, ShipType } from '../../shared/types/index.js';
 import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, WORLD, FLOODING, GEYSER, BERTH_ENV_SAFE_MAX_PHASE, BOT_GROUNDING_FORGIVENESS_SECONDS, FIRST_SAIL_ASSIST } from '../../shared/constants/index.js';
-import { getHullContactChain, getHullWaterlineOutline, getMastHeight, getShipRiggingMasts } from '../../shared/hull.js';
+import { getHullContactChain, getHullWaterlineOutline, isPointInRiggingCanvas } from '../../shared/hull.js';
 import { cargoBallastFactor } from '../../shared/cargo.js';
 import { truceSparesContact, truceBlocksBounty } from '../../shared/truce.js';
 import type { GangwayPlan } from '../../shared/interactions.js';
@@ -3963,14 +3963,10 @@ export class PhysicsSystem {
     const set = clamp(ship.sailHeight, 0, 1) * clamp(ship.sailIntegrity, 0, 1);
     if (set <= SAIL_FURLED_BELOW) return false;
     const stats = SHIP_STATS[ship.type];
-    const dy = projectile.position.y - ship.position.y;
-    // Deck to the head of the canvas; a half-hoisted sail hangs lower.
-    if (dy < stats.height || dy > stats.height + getMastHeight(stats) * 0.90 * set) return false;
     const local = this.toShipLocal(projectile.position, ship);
-    for (const mast of getShipRiggingMasts(stats)) {
-      if (Math.abs(local.x) <= mast.halfWidth && Math.abs(local.z - mast.z) <= mast.halfDepth) return true;
-    }
-    return false;
+    // b4.2f: each set sail's own box from the shared rig plan (course,
+    // topsail, spanker), so the band is the canvas the renderer draws.
+    return isPointInRiggingCanvas(stats, { x: local.x, y: projectile.position.y - ship.position.y, z: local.z }, set);
   }
 
   private isInsideShipDeckFootprint(local: { x: number; z: number }, stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS], margin = 0) {
