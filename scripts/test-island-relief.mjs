@@ -45,6 +45,7 @@ function expect(label, ok, detail = '') {
 const islands = new MapGenerator(20260801).generateIslands();
 const byId = (id) => islands.find((i) => i.id === id);
 const Y = (island, lx, lz, opts) => getIslandSurfaceY(island, island.position.x + lx, island.position.z + lz, opts);
+const mixP = (a, b, t) => a + (b - a) * t;
 function withRecords(island, recs, fn) {
   overrideIslandLandforms(island, recs);
   try { return fn(); } finally { overrideIslandLandforms(island, null); }
@@ -268,6 +269,10 @@ expect('roster keys are real island ids', Object.keys(LANDFORM_ROSTER).every((k)
 const B44F_IDS = ['smuggler-s-rest', 'rumrunner-key', 'mermaid-s-folly', 'castaway-reach'];
 const B44F_OFF = process.argv.includes('--mutate=b44f-off');
 if (B44F_OFF) for (const id of B44F_IDS) overrideIslandLandforms(byId(id), []);
+// b4.4g RED proof: --mutate=b44g-off clears the five b4.4g islands' records.
+const B44G_IDS = ['booty-bay', 'skull-cove', 'the-crooked-atoll', 'dead-man-shoals', 'crow-s-perch'];
+const B44G_OFF = process.argv.includes('--mutate=b44g-off');
+if (B44G_OFF) for (const id of B44G_IDS) overrideIslandLandforms(byId(id), []);
 
 // ── Part B: the D-table, report mode ─────────────────────────────────────────
 console.log(`\nPart B: PLAN 3.14 relief table (${ENFORCE ? 'ENFORCED' : 'REPORT mode, enforced in b4.4h'})`);
@@ -721,6 +726,82 @@ for (const r of archRows) expect(`${r.id}: islet sand ring + dry 1:12 cays`, r.a
   expect('castaway-reach: fort headland scarp >= 5 m', fort >= 5, `${fort.toFixed(1)} m`);
   const crPond = holds(cr, rec(cr, 'castaway-pond'));
   expect('castaway-reach: pond rim >= spillY + 0.2 all round', crPond >= 0.2, `${crPond.toFixed(2)} m`);
+
+  // ── Part G: authored relief, the next five islands (b4.4g, islands-01), ENFORCED
+  // (same block: reuses rec / scarpDrop / streamRow). Each D-table row clears
+  // (the archipelagos by their own row) and each island's named intent is
+  // measured on the served surface:
+  //   Booty Bay: the dig-site basin floor >= 8 m under the ringing ridge on
+  //     >= 70% of the ring, the river monotone to the bay, a 5-14 m overlook
+  //     (the 7 m raise on the natural shore slope).
+  //   Skull Cove: both jaw cliffs >= 5 m, two tide-pool shelves at 0.3-0.8 m,
+  //     the inlet arch site.
+  //   The Crooked Atoll: two reef shelves at 0.3-0.8 m (islet rings + cays: Part C).
+  //   Dead Man Shoals: the whale sand bar dry (0.4-1.6 m) from where it
+  //     leaves the islet (30% along) to its tip,
+  //     the gibbet shoal shelf at 0.3-0.8 m, the skerry arch site.
+  //   Crow's Perch: >= 3 terrace treads (>= 55% of the band on a tread), the
+  //     gorge monotone to the sea, a >= 6 m seaward cliff, the roost spur
+  //     standing >= 6 m over the ground 12 m either side.
+  // --mutate=b44g-off (records cleared before Part B) must FAIL this part.
+  console.log(`\nPart G: authored relief for Booty Bay, Skull Cove, The Crooked Atoll, Dead Man Shoals, Crow's Perch (enforced)${B44G_OFF ? ' [mutate=b44g-off]' : ''}`);
+  for (const id of B44G_IDS) {
+    const row = rows.find((r) => r.id === id);
+    expect(`${id} clears its PLAN 3.14 row`, row && row.misses.length === 0, row ? (row.misses.join('; ') || `>35 ${row.p35.toFixed(1)}% >60 ${row.p60.toFixed(2)}% peak ${row.peak.toFixed(1)} kinds ${row.kinds} tiers ${row.tiers}`) : 'no row');
+  }
+  const shelfAt = (isl, rid) => { const r = rec(isl, rid); return r ? Y(isl, r.center[0], r.center[1]) : NaN; };
+  const shelfRow = (isl, rid) => { const y = shelfAt(isl, rid); expect(`${rid}: tide shelf at 0.3-0.8 m`, y >= 0.3 && y <= 0.8, `${y.toFixed(2)} m`); };
+  const bb = byId('booty-bay'), sc = byId('skull-cove'), ca = byId('the-crooked-atoll'), dm = byId('dead-man-shoals'), cp = byId('crow-s-perch');
+  const dig = rec(bb, 'booty-dig-basin');
+  let deep = 0;
+  if (dig) for (let a = 0; a < 32; a++) {
+    const c = Math.cos(a / 32 * Math.PI * 2), s = Math.sin(a / 32 * Math.PI * 2);
+    if (Y(bb, dig.center[0] + c * dig.rimRadius, dig.center[1] + s * dig.rimRadius) - Y(bb, dig.center[0], dig.center[1]) >= 8) deep++;
+  }
+  expect('booty-bay: dig-site basin floor >= 8 m under the ridge on >= 70% of the ring', deep / 32 >= 0.7, `${deep}/32`);
+  streamRow(bb, 'booty-river');
+  const over = scarpDrop(bb, rec(bb, 'booty-overlook'));
+  expect('booty-bay: overlook cliff 5-14 m over the bay', over >= 5 && over <= 14, `${over.toFixed(1)} m`);
+  for (const rid of ['skull-jaw-west', 'skull-jaw-east']) {
+    const d = scarpDrop(sc, rec(sc, rid));
+    expect(`${rid}: jaw cliff >= 5 m`, d >= 5, `${d.toFixed(1)} m`);
+  }
+  shelfRow(sc, 'skull-tidepool-west'); shelfRow(sc, 'skull-tidepool-east');
+  expect('skull-cove: inlet arch site', !!rec(sc, 'skull-inlet-arch'));
+  shelfRow(ca, 'crooked-reef-north'); shelfRow(ca, 'crooked-reef-east');
+  const bar = rec(dm, 'deadman-whale-bar');
+  let barLo = Infinity, barHi = -Infinity;
+  if (bar) for (let t = 0.3; t <= 1.001; t += 0.1) {
+    const y = Y(dm, mixP(bar.path[0][0], bar.path[1][0], t), mixP(bar.path[0][1], bar.path[1][1], t));
+    barLo = Math.min(barLo, y); barHi = Math.max(barHi, y);
+  }
+  expect('deadman-whale-bar: dry sand bar 0.4-1.6 m off the islet', barLo >= 0.4 && barHi <= 1.6, `${barLo.toFixed(2)}-${barHi.toFixed(2)} m`);
+  shelfRow(dm, 'deadman-gibbet-shelf');
+  expect('dead-man-shoals: skerry arch site', !!rec(dm, 'deadman-skerry-arch'));
+  const ter = rec(cp, 'crow-terraces');
+  let tread = 0, tot = 0;
+  const levels = new Set();
+  if (ter) for (let k = 0; k + 1 < ter.path.length; k++) {
+    const [a, b] = [ter.path[k], ter.path[k + 1]], L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    for (let t = 6; t <= L - 6; t += 2) for (let o = -6; o <= 6; o += 2) {
+      const lx = a[0] + (b[0] - a[0]) * t / L + (b[1] - a[1]) / L * o, lz = a[1] + (b[1] - a[1]) * t / L - (b[0] - a[0]) / L * o;
+      const y = Y(cp, lx, lz), q = Math.round(y / ter.stepHeight) * ter.stepHeight;
+      tot++;
+      if (Math.abs(y - q) < 0.05) { tread++; levels.add(q); }
+    }
+  }
+  expect("crow-s-perch: >= 3 terrace treads, >= 55% of the band on a tread", levels.size >= 3 && tot > 0 && tread / tot >= 0.55, `${levels.size} treads, ${tot ? Math.round(100 * tread / tot) : 0}% on a tread`);
+  streamRow(cp, 'crow-gorge');
+  const cliff = scarpDrop(cp, rec(cp, 'crow-sea-cliff'));
+  expect("crow-s-perch: seaward cliff >= 6 m", cliff >= 6, `${cliff.toFixed(1)} m`);
+  const spur = rec(cp, 'crow-roost-spur');
+  let spurMin = Infinity;
+  if (spur) for (let t = 0.2; t <= 0.8; t += 0.2) {
+    const [a, b] = spur.path, L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    const lx = mixP(a[0], b[0], t), lz = mixP(a[1], b[1], t), nx = (b[1] - a[1]) / L, nz = -(b[0] - a[0]) / L;
+    spurMin = Math.min(spurMin, Y(cp, lx, lz) - Math.max(Y(cp, lx + nx * 12, lz + nz * 12), Y(cp, lx - nx * 12, lz - nz * 12)));
+  }
+  expect("crow-s-perch: roost spur >= 6 m over the ground 12 m either side", spurMin >= 6, `${spurMin.toFixed(1)} m`);
 }
 
 console.log(`\n${passes} passed, ${fails} failed`);

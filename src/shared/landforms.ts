@@ -282,6 +282,71 @@ export const LANDFORM_ROSTER: Readonly<Record<string, readonly Landform[]>> = Ob
     { id: 'castaway-east-bluff', kind: 'scarp', path: [[92, -26], [88, 16]], height: 6, face: 2, reach: 22, taper: 8 },
     { id: 'castaway-pond', kind: 'basin', center: [0, 64], radius: 8, spillY: 7, depth: 1.8, flat: 0.45 },
   ],
+
+  // b4.4g: authored relief for the next five islands (islands-01, PLAN 3.14 table).
+  // Booty Bay: the dig-site basin is a ridge-ringed hollow (caldera record:
+  // rim 30 m at 22 m, floor 14 m, breach toward the bay), the river leaves the
+  // breach and runs in a gorge to the bay shore, a 7 m overlook cliff on the
+  // south-east point above the bay, and dunes on the lagoon spit. Every raise
+  // stays clear of the structure stamps (their pads keep their target heights),
+  // and every edge stays >= 2.5 m off the island origin (a landform-edge ring
+  // any closer oversamples the summit fan: test-terrain-grid).
+  'booty-bay': [
+    {
+      id: 'booty-dig-basin', kind: 'caldera', center: [-35, 12], rimRadius: 22, rimY: 30, floorY: 14,
+      rimWidth: 8, outerRun: 16, breach: { angle: -0.46, halfWidth: 4, sillY: 15 },
+    },
+    {
+      id: 'booty-river', kind: 'gorge', path: [[-16, 3], [-6, -10], [14, -14], [40, -22]],
+      bedHeadY: 14, bedMouthY: -0.4, floorWidth: 4, topWidth: 16, wallSlope: 2.2,
+    },
+    { id: 'booty-overlook', kind: 'scarp', path: [[26, -104], [26, -78]], height: 7, face: 2, reach: 24, taper: 8 },
+    { id: 'booty-spit-dunes', kind: 'dune_field', path: [[34, 98], [58, 90]], width: 10, amplitude: 0.9, wavelength: 7 },
+  ],
+  // Skull Cove: the jaw cliffs flank the dock inlet (west lobe raised 7 m on
+  // the inlet side, the east block raised 5 m over its existing face), the
+  // sea-arch site spans the inlet mouth, and two tide-pool shelves sit on the
+  // north shore. The cave network (x 12-28, z ~0) is > 30 m from every record.
+  'skull-cove': [
+    { id: 'skull-jaw-west', kind: 'scarp', path: [[-25, -48], [-19, -30]], height: 7, face: 2, reach: 20, taper: 6 },
+    { id: 'skull-jaw-east', kind: 'scarp', path: [[8, -36], [8, -54]], height: 5, face: 2, reach: 18, taper: 6 },
+    { id: 'skull-inlet-arch', kind: 'arch_site', center: [-6, -56], radius: 8, heading: -1.57 },
+    { id: 'skull-tidepool-west', kind: 'rock_shelf', center: [-20, 50], radius: 5, y: 0.5 },
+    { id: 'skull-tidepool-east', kind: 'rock_shelf', center: [38, 47], radius: 5, y: 0.5 },
+  ],
+  // The Crooked Atoll: two reef shelves at the lagoon edges (walkable tide
+  // shelves 0.4 m over the calm water line) and low dunes on the east islet's
+  // south beach (the shipwreck beach). The islet rings and dry cays (b4.4d)
+  // are untouched: no record comes within 12 m of a cay.
+  'the-crooked-atoll': [
+    { id: 'crooked-reef-north', kind: 'rock_shelf', center: [0, 22], radius: 5, y: 0.4 },
+    { id: 'crooked-reef-east', kind: 'rock_shelf', center: [14, -6], radius: 5, y: 0.4 },
+    { id: 'crooked-wreck-dunes', kind: 'dune_field', path: [[40, 24], [64, 24]], width: 8, amplitude: 0.6, wavelength: 6 },
+  ],
+  // Dead Man Shoals: a sand bar runs off the east islet under the whale
+  // skeleton, the gibbet stands on an offshore shoal rock shelf to the south,
+  // and the skerry arch site sits beside it facing the open sea.
+  'dead-man-shoals': [
+    { id: 'deadman-whale-bar', kind: 'headland', path: [[12, 46], [30, 58]], crestBaseY: 1.3, crestTipY: 1.0, topHalfWidth: 3, sideSlope: 0.3 },
+    { id: 'deadman-gibbet-shelf', kind: 'rock_shelf', center: [-6, -18], radius: 5, y: 0.6 },
+    { id: 'deadman-skerry-arch', kind: 'arch_site', center: [-12, -26], radius: 6, heading: -0.8 },
+  ],
+  // Crow's Perch: stepped terraces (5 m steps) across the cone's south and
+  // south-east flank between the dock side and the summit (south of the cave
+  // collar, which keeps the ground north of z ~ 0 for x < -8 untouched), a gorge from the flank to the
+  // south-west shore past the dock, an 8 m seaward cliff along the east coast,
+  // and the crow-roost spur (a steep ridge pushed toward the north-east sea:
+  // the rope-climb and lookout site). The caves (north-west, x -45..-30) are
+  // clear of every record.
+  'crow-s-perch': [
+    { id: 'crow-terraces', kind: 'terrace_run', path: [[-17, 6], [-2, 4], [16, -12], [29, -29]], width: 20, stepHeight: 5, riser: 0.25, edge: 4 },
+    {
+      id: 'crow-gorge', kind: 'gorge', path: [[-28, 8], [-56, 48], [-84, 84], [-96, 100]],
+      bedHeadY: 14, bedMouthY: -0.4, floorWidth: 4, topWidth: 16, wallSlope: 2.4,
+    },
+    { id: 'crow-sea-cliff', kind: 'scarp', path: [[94, -44], [94, 44]], height: 8, face: 2, reach: 30, taper: 10 },
+    { id: 'crow-roost-spur', kind: 'headland', path: [[60, -60], [88, -88]], crestBaseY: 28, crestTipY: 24, topHalfWidth: 2.5, sideSlope: 2.2 },
+  ],
 });
 
 // ── math (local: utils/index.ts imports this module) ─────────────────────────
