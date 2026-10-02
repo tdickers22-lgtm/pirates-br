@@ -44,7 +44,7 @@ import { releaseShipGeometry } from './ship/geometry.js';
 import { selectShipLod, shipLodKey, SHIP_LOD_BANDS, SHIP_LOD_HYSTERESIS, type ShipLodLevel } from './ship/lod.js';
 import { buildRudder, buildSternCastle } from './ship/stern.js';
 import { buildRig } from './ship/sails.js';
-import { shipMotionOf, wheelFollowAlpha } from './ship/shipMotion.js';
+import { attachLodSailTear, railBreaksOf, railRunFor, setLodSailTear, shipMotionOf, wheelFollowAlpha, type LodSailTear } from './ship/shipMotion.js';
 import { DECK_KIT_SMALL, deckKitSockets, kitDrawCount, type DeckKitPart, mountShipKit, shipKitSockets, SHIP_KIT_FILES, SHIP_KIT_LOD_FILES, type KitSocket, type ShipKitFile, type ShipKitLodFile, type ShipKitSource } from './ship/kit.js';
 import { SAIL_BELLY, SAIL_CLOTH_GRID, makeLodSailCard, sailFillTarget, sailLuff01, sailWind01, setSailClothUniforms, stepSailFill, type SailClothUniforms } from './ship/sailCloth.js';
 import { applyRiggingLod, updateRigging, type Rigging, type RiggingSet } from './ship/rigging.js';
@@ -812,6 +812,7 @@ export class ShipRenderer {
     const slots = lodSailSlots(rigPlan);
     const sailMat = new THREE.MeshStandardMaterial({ color: 0xeadfbf, roughness: 0.8, side: THREE.DoubleSide, map: this.getTeamSailTexture(ship.teamColor) });
     sailMat.name = 'lod2-sail-canvas';
+    attachLodSailTear(sailMat); // b4.3d vm:ships:6: chainshot holes read past 30 m
     // b4.2g: LOD2 sails are a 6x4 bellied card, not a flat board.
     const sails = new THREE.InstancedMesh(makeLodSailCard(SAIL_CLOTH_GRID.lod2[0], SAIL_CLOTH_GRID.lod2[1], W * 0.09), sailMat, slots.length);
     sails.name = 'lod2-sails';
@@ -869,6 +870,7 @@ export class ShipRenderer {
     const sailGeo = makeLodSailCard(SAIL_CLOTH_GRID.lod1[0], SAIL_CLOTH_GRID.lod1[1], W * 0.09);
     const sailMat = new THREE.MeshStandardMaterial({ color: 0xeadfbf, roughness: 0.8, side: THREE.DoubleSide, map: this.getTeamSailTexture(ship.teamColor) });
     sailMat.name = 'lod1-sail-canvas';
+    attachLodSailTear(sailMat); // b4.3d vm:ships:6: chainshot holes read past 30 m
     const sails = new THREE.InstancedMesh(sailGeo, sailMat, slots.length);
     sails.name = 'lod1-sails';
     sails.userData.lod2 = slots;
@@ -958,6 +960,8 @@ export class ShipRenderer {
     mesh.lod2SailScale = THREE.MathUtils.lerp(mesh.lod2SailScale, Math.max(0.18, ship.sailHeight), k);
     sails.visible = ship.sailHeight > 0.06;
     const slots = sails.userData.lod2 as LodSailSlot[];
+    const tear = (sails.material as THREE.Material).userData.lodSailTear as LodSailTear | undefined;
+    setLodSailTear(tear, ship.sailIntegrity ?? 1); // b4.3d vm:ships:6
     this.lodEuler.set(0.055, mesh.lod2SailAngle, 0, 'YXZ');
     this.lodQuat.setFromEuler(this.lodEuler);
     for (let i = 0; i < slots.length; i++) {
@@ -4372,6 +4376,17 @@ void main() {
    *  to prove the uniform is live rather than frozen at its build-time zero. */
   getPlankWetLevel(shipId: string): number | null {
     return this.shipMeshes.get(shipId)?.plankUniforms.uWetY.value ?? null;
+  }
+
+  /** b4.3d vm:ships:6: a ball that struck at the rail line splinters that run
+   *  of the rail (seeded by hull + spot, so every client draws the same break).
+   *  `world` is the server's impact point; returns true if a rail broke. */
+  splinterRail(ship: Ship, world: { x: number; y: number; z: number }): boolean {
+    const mesh = this.shipMeshes.get(ship.id);
+    if (!mesh) return false;
+    mesh.root.updateMatrixWorld(true);
+    const local = mesh.root.worldToLocal(new THREE.Vector3(world.x, world.y, world.z));
+    return railBreaksOf(mesh).strike(mesh.root, local, railRunFor(ship.type), ship.id) !== null;
   }
 
   getShipGroup(shipId: string): THREE.Group | null {
