@@ -185,7 +185,8 @@ for (const [name, b] of rows) {
   if (WALKERS.includes(name) || name === 'gull') continue;
   // An LOD variant inherits its master's pin; decimation moves the single
   // lowest vertex by up to ~0.3 m, which is not a re-authored base.
-  const master = name.endsWith('_far') ? name.slice(0, -4) : name;
+  // `_far` (one-mesh far proxy) and `_lods` (LOD1/LOD2 chain) are both LOD variants.
+  const master = name.replace(/_(far|lods)$/, '');
   const tol = master === name ? PIN_TOL : 0.3;
   if (master in PINNED_BASE) {
     const want = PINNED_BASE[master];
