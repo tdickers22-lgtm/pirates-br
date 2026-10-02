@@ -271,6 +271,7 @@ let calmCrest = -Infinity;
 for (let t = 0; t < 600; t += 1.7) for (let k = 0; k < 8; k++) calmCrest = Math.max(calmCrest, gerstnerHeight(k * 37.1, k * -23.3, t, WAVE_PARAMS, 0));
 const reportFails = [];
 const rows = [];
+const archRows = [];
 for (const island of islands) {
   const R = island.radius, ext = R * 1.15, step = 2;
   const n = Math.floor((2 * ext) / step) + 1;
@@ -391,10 +392,30 @@ for (const island of islands) {
       for (let a = -1; a <= 1; a += 0.25) for (let b = -1; b <= 1; b += 0.25) top = Math.max(top, Y(island, cay.x + a * cay.length, cay.z + b * cay.width));
       return top;
     });
+    // Crown slope (b4.4d): the dry sand crown falls at most 1:12 across its
+    // characteristic radius L = sqrt(length * width), sampled both ways along
+    // the cay's long axis (samples under a structure stamp are skipped).
+    const cayCrown = getIslandCays(island).map((cay) => {
+      const L = Math.sqrt(cay.length * cay.width), c = Y(island, cay.x, cay.z);
+      let worst = 0;
+      for (const sgn of [-1, 1]) for (const f of [0.3, 0.6, 0.9]) {
+        const d = f * L, lx = cay.x + sgn * d * cay.cos, lz = cay.z + sgn * d * cay.sin;
+        // Structure stamps are authoritative (a pad flattened into a cay edge).
+        if ((island.stamps ?? []).some((st) => Math.hypot(island.position.x + lx - st.x, island.position.z + lz - st.z) < st.radius)) continue;
+        worst = Math.max(worst, (c - Y(island, lx, lz)) / d);
+      }
+      return worst;
+    });
     row.isletSand = isletRows.map((v) => Math.round(v * 100));
     row.cayMargin = cayTops.map((v) => +(v - calmCrest).toFixed(2));
-    if (!isletRows.length || isletRows.some((v) => v < 0.5)) misses.push(`islet sand band ${row.isletSand.join('/')}% < 50%`);
-    if (cayTops.some((v) => v < calmCrest + 0.3)) misses.push(`cay top below calm crest + 0.3 (${row.cayMargin.join('/')})`);
+    row.cayCrown = cayCrown.map((v) => +(1 / Math.max(v, 1e-6)).toFixed(1));
+    const archMisses = [];
+    if (!isletRows.length || isletRows.some((v) => v < 0.5)) archMisses.push(`islet sand band ${row.isletSand.join('/')}% < 50%`);
+    if (cayTops.some((v) => v < calmCrest + 0.3)) archMisses.push(`cay top below calm crest + 0.3 (${row.cayMargin.join('/')})`);
+    if (cayTops.some((v) => v < calmCrest + 0.9 - 0.05 || v > calmCrest + 1.4 + 0.05)) archMisses.push(`cay freeboard outside 0.9-1.4 m over the calm crest (${row.cayMargin.join('/')})`);
+    if (cayCrown.some((v) => v > 1 / 12 + 0.01)) archMisses.push(`cay crown steeper than 1:12 (1:${row.cayCrown.join('/1:')})`);
+    misses.push(...archMisses);
+    archRows.push({ id: island.id, archMisses });
   } else {
     if (row.p35 < floors.p35) misses.push(`>35deg ${row.p35.toFixed(1)}% < ${floors.p35}`);
     if (row.p60 < floors.p60) misses.push(`>60deg ${row.p60.toFixed(2)}% < ${floors.p60}`);
@@ -409,11 +430,18 @@ for (const island of islands) {
   rows.push(row);
   if (misses.length) reportFails.push(island.id);
   const tag = misses.length ? (ENFORCE ? '✗ FAIL' : '· below') : '✓';
-  console.log(`  ${tag} ${island.id.padEnd(16)} r${String(R).padStart(3)} ${cls} ${row.style.padEnd(11)} >35 ${row.p35.toFixed(1).padStart(5)}%  >60 ${row.p60.toFixed(2).padStart(5)}%  peak ${row.peak.toFixed(1).padStart(5)}  kinds ${row.kinds} tiers ${row.tiers} flat ${flatWindows}/${windows} dock ${dock === null ? '  -  ' : dock.toFixed(1).padStart(5)} build ${buildMs.toFixed(1)} ms${row.isletSand ? ` islets ${row.isletSand.join('/')}% cays ${row.cayMargin.join('/')}` : ''}`);
+  console.log(`  ${tag} ${island.id.padEnd(16)} r${String(R).padStart(3)} ${cls} ${row.style.padEnd(11)} >35 ${row.p35.toFixed(1).padStart(5)}%  >60 ${row.p60.toFixed(2).padStart(5)}%  peak ${row.peak.toFixed(1).padStart(5)}  kinds ${row.kinds} tiers ${row.tiers} flat ${flatWindows}/${windows} dock ${dock === null ? '  -  ' : dock.toFixed(1).padStart(5)} build ${buildMs.toFixed(1)} ms${row.isletSand ? ` islets ${row.isletSand.join('/')}% cays ${row.cayMargin.join('/')} crown 1:${row.cayCrown.join('/1:')}` : ''}`);
   if (misses.length) console.log(`      ${misses.join('; ')}`);
 }
 console.log(`  calm crest ${calmCrest.toFixed(2)} m; ${reportFails.length}/14 islands below the D-table`);
 if (ENFORCE) for (const id of reportFails) fails++;
+
+// ── Part C: the archipelago row, ENFORCED now (b4.4d, islands-11) ────────────
+// Islet sand band >= 6 m on >= 50% of every islet perimeter, cay tops >= calm
+// crest + 0.3 m with 0.9-1.4 m freeboard, cay crowns no steeper than 1:12.
+console.log('\nPart C: archipelago row (enforced)');
+expect('both archipelagos present (Crooked Atoll, Dead Man Shoals)', ['the-crooked-atoll', 'dead-man-shoals'].every((id) => archRows.some((r) => r.id === id)), archRows.map((r) => r.id).join(', '));
+for (const r of archRows) expect(`${r.id}: islet sand ring + dry 1:12 cays`, r.archMisses.length === 0, r.archMisses.join('; '));
 
 console.log(`\n${passes} passed, ${fails} failed`);
 process.exit(fails ? 1 : 0);

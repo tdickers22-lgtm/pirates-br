@@ -687,7 +687,10 @@ function getIslandRelief(island: Island): IslandRelief {
         z: Math.sin(angle) * dist * p.footprintZ,
         cos: Math.cos(heading), sin: Math.sin(heading),
         length: r * (0.095 + rng() * 0.04), width: r * (0.06 + rng() * 0.025),
-        height: 2.0 + rng() * 0.7,
+        // Crown freeboard 0.9-1.4 m above the calm-sea crest (1.66 m, the
+        // relief gate's measured max), so cays stay dry sand and flood only in
+        // storms (b4.4d, islands-11). Same single draw as before.
+        height: 1.66 + 0.9 + rng() * 0.5,
       });
     }
   }
@@ -1086,6 +1089,10 @@ export function resolveCaveWallCollision(
   };
 }
 
+/** Archipelago islet waterline in disc space: disc value 0.22 (where the old
+ *  archLandFactor sink crossed sea level), as rho = sqrt(-ln d). */
+const ISLET_WATERLINE_RHO = Math.sqrt(-Math.log(0.22));
+
 export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: IslandSurfaceOptions): number {
   const { angle, distRatio } = getIslandDistRatio(island, x, z);
   const { primaryMask, secondaryMask, tertiaryMask } = getIslandShapeTerms(island, angle);
@@ -1238,7 +1245,7 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   // 2D islet discs: a true gaussian around each sub-peak CENTER (not the angular
   // mask), so an archipelago reads as separate islets with open water between —
   // rather than one blob with pie-slice notches.
-  const isletDisc = (hillAngle: number, hillOffset: number, discR: number) => {
+  const isletDiscAt = (hillAngle: number, hillOffset: number, discR: number) => {
     const cx = Math.cos(hillAngle) * hillOffset * profile.footprintX;
     const cz = Math.sin(hillAngle) * hillOffset * profile.footprintZ;
     const ddx = localX - cx;
@@ -1248,13 +1255,25 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   };
   let archLandFactor = 1;
   let crescentBay = 0;
+  // Islet-local frame (archipelago only): the dominant islet's disc value and
+  // its soft-weighted disc radius, so each islet gets its own beach ring below.
+  let isletDisc = 0;
+  let isletRadius = 0;
   if (isArchipelago) {
-    const d1 = isletDisc(profile.primaryHillAngle, profile.primaryHillOffset, 0.46);
+    const d1 = isletDiscAt(profile.primaryHillAngle, profile.primaryHillOffset, 0.46);
     const d2 = profile.secondaryHillScale > 0.05
-      ? isletDisc(profile.secondaryHillAngle, profile.secondaryHillOffset, 0.42) : 0;
+      ? isletDiscAt(profile.secondaryHillAngle, profile.secondaryHillOffset, 0.42) : 0;
     const d3 = profile.tertiaryHillScale > 0
-      ? isletDisc(profile.tertiaryHillAngle, profile.tertiaryHillOffset, 0.38) : 0;
-    archLandFactor = smoothstep(0.1, 0.42, Math.max(d1, d2, d3));
+      ? isletDiscAt(profile.tertiaryHillAngle, profile.tertiaryHillOffset, 0.38) : 0;
+    isletDisc = Math.max(d1, d2, d3);
+    // Power-8 weights blend the radius across the saddle where the dominant
+    // islet switches, so the beach ring never jumps (no seam, no notch).
+    const p1 = d1 ** 8, p2 = d2 ** 8, p3 = d3 ** 8, ps = p1 + p2 + p3;
+    const R = island.radius;
+    isletRadius = ps > 1e-30
+      ? (p1 * Math.max(6, R * 0.46) + p2 * Math.max(6, R * 0.42) + p3 * Math.max(6, R * 0.38)) / ps
+      : Math.max(6, R * 0.46);
+    archLandFactor = smoothstep(0.1, 0.42, isletDisc);
     floor = -3.6;
   } else if (isCrescent) {
     // Horseshoe: carve an open-water bay out of one side (opposite the main
@@ -1367,18 +1386,23 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
     detailedY = seaLift + lerp(relief, steppedRelief, terraceStrength * detailMask);
   }
 
-  for (const cay of reliefFeatures.cays) {
-    const dx = localX - cay.x;
-    const dz = localZ - cay.z;
-    const along = (dx * cay.cos + dz * cay.sin) / cay.length;
-    const across = (-dx * cay.sin + dz * cay.cos) / cay.width;
-    const d2 = along * along + across * across;
-    if (d2 >= 3.24) continue;
-    // A dry sand crown, gently shelving into an underwater apron. This is
-    // actual shared land, so a swimmer can climb onto every visible cay.
-    const cayY = -3.4 + (cay.height + 3.4) * (1 - smoothstep(0.08, 3.24, d2));
-    detailedY = lerp(detailedY, Math.max(detailedY, cayY), reliefWeight);
+  // ── Islet-local beach ring (archipelago, b4.4d / islands-11) ──
+  // The islet cores used to rise straight out of the sea (archLandFactor sank
+  // the beach band with everything else), so islets had no sand at all. Each
+  // islet now gets its own ring in islet-local metres: a 1:4 underwater shelf,
+  // the waterline at disc value ISLET_WATERLINE_D, a 7 m sand band rising
+  // 0.3 -> 1.2 m, then the natural core takes over across a 7-15 m backshore.
+  if (isArchipelago && reliefWeight > 0) {
+    const q = Math.sqrt(-Math.log(Math.max(isletDisc, 1e-12))) * isletRadius;
+    const inland = ISLET_WATERLINE_RHO * isletRadius - q; // metres inland of the islet waterline
+    const beachY = inland <= 0 ? Math.max(-3.2, 0.3 + inland / 4)
+      : inland <= 7 ? 0.3 + inland * (0.9 / 7)
+        : 1.2 + (inland - 7) * 0.06;
+    const beachW = 1 - smoothstep(7, 15, inland);
+    const ringed = lerp(Math.max(detailedY, beachY), beachY, beachW);
+    detailedY = lerp(detailedY, ringed, reliefWeight);
   }
+
   const naturalY = detailedY;
 
   // ── Signed shore drop past the rim (heightfield continues UNDERWATER) ──
@@ -1395,6 +1419,27 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   // landing back on a sloped shelf.
   const cliffY = lerp(naturalY, -5.5, smoothstep(1.0, 1.05, distRatio));
   let surfaceY = coast.beach * beachY + coast.rocky * rockyY + coast.cliff * cliffY;
+
+  for (const cay of reliefFeatures.cays) {
+    const dx = localX - cay.x;
+    const dz = localZ - cay.z;
+    const along = (dx * cay.cos + dz * cay.sin) / cay.length;
+    const across = (-dx * cay.sin + dz * cay.cos) / cay.width;
+    // Applied AFTER the coast blend (b4.4d): cays sit at distRatio 0.66-0.9,
+    // where the beach ease used to pull their crowns down to wet sand.
+    // Metric profile (b4.4d): a dry sand crown sloping 1:12 across one
+    // characteristic radius L, a 1:3 beach face to -0.5 m, then a 1:4 apron.
+    // Actual shared land, so a swimmer can climb onto every visible cay.
+    const L = Math.sqrt(cay.length * cay.width);
+    const s = Math.sqrt(along * along + across * across) * L;
+    const edgeY = cay.height - L / 12;
+    const faceEnd = L + (edgeY + 0.5) * 3;
+    if (s >= faceEnd + 11.6) continue;
+    const cayY = s <= L ? cay.height - s / 12
+      : s <= faceEnd ? edgeY - (s - L) / 3
+        : Math.max(-3.4, -0.5 - (s - faceEnd) / 4);
+    surfaceY = lerp(surfaceY, Math.max(surfaceY, cayY), reliefWeight);
+  }
 
   // ── Authored landforms (b4.4b, D29): scarps, gorges, mesas, basins... on the
   // natural coast-blended surface, before the stamps. Scaled by the cave collar
