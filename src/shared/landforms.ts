@@ -26,7 +26,7 @@ export type LandformPoint = readonly [number, number];
 
 export type LandformKind =
   | 'scarp' | 'valley' | 'gorge' | 'mesa' | 'basin' | 'dune_field'
-  | 'rock_shelf' | 'terrace_run' | 'headland' | 'caldera' | 'meadow';
+  | 'rock_shelf' | 'terrace_run' | 'headland' | 'caldera' | 'meadow' | 'arch_site';
 
 interface LandformBase {
   /** Stable label for gates and reports (e.g. 'castaway-plateau-scarp'). */
@@ -82,6 +82,10 @@ export interface MesaLandform extends LandformBase {
   readonly topY: number;
   readonly face?: number;
   readonly ramps?: readonly MesaRamp[];
+  /** Ladder sites on the cliff ring (island-local headings, radians). Data
+   *  only: the height field keeps the cliff; the climb/kit lanes mount a
+   *  ladder at center + (radius + face / 2) * (cos, sin)(angle). */
+  readonly ladders?: readonly number[];
 }
 
 /** A closed depression. The floor sits `depth` below spillY; a low berm keeps
@@ -166,16 +170,59 @@ export interface MeadowLandform extends LandformBase {
   readonly radius: number;
 }
 
+/** Marker only: a sea-level arch site (b4.4e). Changes no height and is never
+ *  indexed; the cliff/arch kit places the arch mesh here, spanning `radius`
+ *  each side of center across `heading` (the seaward direction, radians). */
+export interface ArchSiteLandform extends LandformBase {
+  readonly kind: 'arch_site';
+  readonly center: LandformPoint;
+  readonly radius: number;
+  readonly heading: number;
+}
+
 export type Landform =
   | ScarpLandform | ValleyLandform | MesaLandform | BasinLandform | DuneFieldLandform
-  | RockShelfLandform | TerraceRunLandform | HeadlandLandform | CalderaLandform | MeadowLandform;
+  | RockShelfLandform | TerraceRunLandform | HeadlandLandform | CalderaLandform | MeadowLandform
+  | ArchSiteLandform;
 
 export const LANDFORM_BUCKET_M = 16;
 export const LANDFORM_MAX_PER_SAMPLE = 4;
 
-/** The authored roster, keyed by island id. Empty until the authoring slices
- *  (b4.4e-h); each one that adds records re-pins the fixed world once. */
-export const LANDFORM_ROSTER: Readonly<Record<string, readonly Landform[]>> = Object.freeze({});
+/** The authored roster, keyed by island id. Each authoring slice (b4.4e-h)
+ *  that adds records re-pins the fixed world once. Island-local metres. */
+export const LANDFORM_ROSTER: Readonly<Record<string, readonly Landform[]>> = Object.freeze({
+  // b4.4e: the archetypes deliver their names (islands-15).
+  // Old Maw Caldera: the crater sits on the open south-west massif, clear of
+  // the north-east cave network (no cave collar inside rim + flank). Rim at
+  // 30 / (30 + 20) = 0.6 of the cone radius, floor 30 m below the crest, one
+  // breach notch to the west-north-west (sill 3 m above the floor: the trail),
+  // and a crater lake (basin; b4.7a draws the pond plane at spillY).
+  'old-maw-caldera': [
+    {
+      id: 'old-maw-crater', kind: 'caldera', center: [-38, -18], rimRadius: 30, rimY: 62, floorY: 32,
+      rimWidth: 10, outerRun: 20, breach: { angle: 2.76, halfWidth: 3.5, sillY: 35 },
+    },
+    { id: 'old-maw-crater-lake', kind: 'basin', center: [-38, -18], radius: 11, spillY: 32, depth: 3, flat: 0.45 },
+  ],
+  // Parley Point: a true mesa. Flat top at 26 m (radius 28 m, ~2,460 m2), a
+  // 3 m cliff face over 10-17 m surrounding ground, two 46 m ramps (one toward
+  // the dock, one north-east; both under 37 deg) and one ladder site on the west face.
+  'parley-point': [
+    {
+      id: 'parley-mesa', kind: 'mesa', center: [5, 0], radius: 28, topY: 26, face: 3,
+      ramps: [{ angle: -2.1, halfWidth: 3, run: 46 }, { angle: 0.7, halfWidth: 3, run: 46 }],
+      ladders: [Math.PI],
+    },
+  ],
+  // Kraken Tooth: two basalt fangs (steep headland spires raised on the two
+  // natural summits at (-32, -32) and (30, 30)) over a low central saddle, and
+  // a sea-level arch site on the north-west shore between them.
+  'kraken-tooth': [
+    { id: 'kraken-fang-west', kind: 'headland', path: [[-32, -32], [-36, -36]], crestBaseY: 52, crestTipY: 48, topHalfWidth: 1.5, sideSlope: 2.4 },
+    { id: 'kraken-fang-east', kind: 'headland', path: [[30, 30], [34, 34]], crestBaseY: 49, crestTipY: 45, topHalfWidth: 1.5, sideSlope: 2.4 },
+    { id: 'kraken-arch', kind: 'arch_site', center: [-67, 67], radius: 7, heading: 2.36 },
+  ],
+});
 
 // ── math (local: utils/index.ts imports this module) ─────────────────────────
 const sstep = (e0: number, e1: number, x: number): number => {
@@ -276,7 +323,7 @@ export function landformBounds(rec: Landform): [number, number, number, number] 
       const pad = rec.rimRadius + (rec.outerRun ?? 30);
       return [rec.center[0] - pad, rec.center[0] + pad, rec.center[1] - pad, rec.center[1] + pad];
     }
-    case 'rock_shelf': case 'meadow': {
+    case 'rock_shelf': case 'meadow': case 'arch_site': {
       const pad = rec.radius;
       return [rec.center[0] - pad, rec.center[0] + pad, rec.center[1] - pad, rec.center[1] + pad];
     }
@@ -299,7 +346,7 @@ export function buildLandformIndex(records: readonly Landform[]): LandformIndex 
   const compiled: Compiled[] = [];
   const cells = new Map<number, number[]>();
   for (const rec of records) {
-    if (rec.kind === 'meadow') continue;
+    if (rec.kind === 'meadow' || rec.kind === 'arch_site') continue;
     const [minX, maxX, minZ, maxZ] = landformBounds(rec);
     const pl = 'path' in rec ? compilePolyline(rec.path) : null;
     const idx = compiled.push({ rec, pl, minX, maxX, minZ, maxZ }) - 1;
@@ -354,6 +401,25 @@ export function getLandformPonds(island: { id: string }): Array<{ id: string; x:
   return getIslandLandforms(island)
     .filter((r): r is BasinLandform => r.kind === 'basin')
     .map((r) => ({ id: r.id, x: r.center[0], z: r.center[1], radius: r.radius, y: r.spillY }));
+}
+
+/** Sea-level arch sites (markers) the cliff/arch kit mounts. */
+export function getLandformArchSites(island: { id: string }): ArchSiteLandform[] {
+  return getIslandLandforms(island).filter((r): r is ArchSiteLandform => r.kind === 'arch_site');
+}
+
+/** Ladder sites on mesa cliff rings: island-local foot position, heading and
+ *  the height the ladder climbs to (the mesa top). */
+export function getLandformLadders(island: { id: string }): Array<{ id: string; x: number; z: number; angle: number; topY: number }> {
+  const out: Array<{ id: string; x: number; z: number; angle: number; topY: number }> = [];
+  for (const r of getIslandLandforms(island)) {
+    if (r.kind !== 'mesa' || !r.ladders) continue;
+    const reach = r.radius + (r.face ?? 2.5) / 2;
+    r.ladders.forEach((a, i) => out.push({
+      id: `${r.id}-ladder-${i}`, x: r.center[0] + Math.cos(a) * reach, z: r.center[1] + Math.sin(a) * reach, angle: a, topY: r.topY,
+    }));
+  }
+  return out;
 }
 
 function evalOne(c: Compiled, lx: number, lz: number, y: number): number {
@@ -473,7 +539,7 @@ function evalOne(c: Compiled, lx: number, lz: number, y: number): number {
       }
       return out;
     }
-    case 'meadow':
+    case 'meadow': case 'arch_site':
       return y;
   }
 }

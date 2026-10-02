@@ -490,5 +490,148 @@ for (const r of archRows) expect(`${r.id}: islet sand ring + dry 1:12 cays`, r.a
   expect('non-bone biomes keep their palette (no bleaching leak)', lushPal.grass.getHex() === 0x00ff00 && lushPal.slopeRock.getHex() === 0x555555, lushIsle.id);
 }
 
+// ── Part E: archetypes deliver their names (b4.4e, islands-15), ENFORCED ─────
+// Measured on the served surface (2 m grid / radial rays), not on the records:
+//   Old Maw: caldera rim at 0.55-0.7 of the cone radius, floor 25-35 m below
+//     the crest, >= 20 m below the crest on >= 70% of the ring, exactly one
+//     breach notch, a crater lake (basin) on the floor.
+//   Parley Point: top >= 1,500 m2 within 1 m of 22-26 m, ring slope > 60 deg on
+//     >= 60% of the perimeter, cliff ring 12-18 m (median), 2 ramps walkable
+//     under 40 deg + 1 ladder site.
+//   Kraken Tooth: two maxima >= 40 m >= 30 m apart joined by a saddle >= 12 m
+//     below the lower tooth; a sea-level arch site on the shore.
+//   Terraces only where a terrace_run is authored: no global soft-quantize
+//     (risers vs treads slope ratio < 1.3 on every record-free island outside the cave collars, where the legacy quantize stays for cave parity).
+// --mutate=archetypes-off (records cleared) and --mutate=terrace-on (the old
+// 0.32-0.6 soft-quantize re-applied in the gate) must FAIL this part.
+{
+  const MUT = (process.argv.find((a) => a.startsWith('--mutate=')) ?? '').slice(9);
+  console.log(`\nPart E: archetypes deliver their names (enforced)${MUT ? ` [mutate=${MUT}]` : ''}`);
+  const om = byId('old-maw-caldera'), pp = byId('parley-point'), kt = byId('kraken-tooth');
+  if (MUT === 'archetypes-off') for (const isl of [om, pp, kt]) overrideIslandLandforms(isl, []);
+  const recOf = (isl, kind) => getIslandLandforms(isl).filter((r) => r.kind === kind);
+  const DEG = 180 / Math.PI;
+
+  // Old Maw caldera
+  {
+    const cal = recOf(om, 'caldera')[0] ?? { center: [-38, -18], rimRadius: 30, rimY: 62, floorY: 32, outerRun: 20 };
+    const [cx, cz] = cal.center, R = cal.rimRadius;
+    const at = (a, d) => Y(om, cx + Math.cos(a) * d, cz + Math.sin(a) * d);
+    const floorRef = []; const crest = []; const N = 72;
+    for (let i = 0; i < N; i++) {
+      const a = i / N * Math.PI * 2;
+      floorRef.push(at(a, R * 0.55));
+      let c = -Infinity; for (let d = R - 6; d <= R + 4; d += 1) c = Math.max(c, at(a, d)); crest.push(c);
+    }
+    const floorMed = [...floorRef].sort((p, q) => p - q)[N >> 1];
+    const deep = crest.filter((c) => c - floorMed >= 20).length / N;
+    const crestMed = [...crest].sort((p, q) => p - q)[N >> 1];
+    let runs = 0; for (let i = 0; i < N; i++) { const lo = crest[i] - floorMed < 8, prev = crest[(i + N - 1) % N] - floorMed < 8; if (lo && !prev) runs++; }
+    const ratio = R / (R + (cal.outerRun ?? 30));
+    const lake = recOf(om, 'basin').find((b) => Math.hypot(b.center[0] - cx, b.center[1] - cz) + b.radius < R - 4);
+    expect('Old Maw: caldera rim at 0.55-0.7 of the cone radius', recOf(om, 'caldera').length === 1 && ratio >= 0.55 && ratio <= 0.7, `rim ${R} m / cone ${R + (cal.outerRun ?? 30)} m = ${ratio.toFixed(2)}`);
+    expect('Old Maw: crater floor >= 20 m below the rim on >= 70% of the ring', deep >= 0.7, `${(deep * 100).toFixed(0)}% (floor ${floorMed.toFixed(1)} m)`);
+    expect('Old Maw: floor 25-35 m below the crest (median)', crestMed - floorMed >= 25 && crestMed - floorMed <= 35, `crest ${crestMed.toFixed(1)} - floor ${floorMed.toFixed(1)} = ${(crestMed - floorMed).toFixed(1)} m`);
+    expect('Old Maw: exactly one breach notch (rim < floor + 8 m)', runs === 1 && deep >= 0.7, `${runs} notch run(s)`);
+    expect('Old Maw: crater lake basin on the floor (spill at the floor)', !!lake && lake.spillY <= floorMed + 0.5 && Y(om, lake.center[0], lake.center[1]) <= lake.spillY - 1, lake ? `spill ${lake.spillY} bottom ${Y(om, lake.center[0], lake.center[1]).toFixed(1)}` : 'no lake');
+  }
+
+  // Parley Point mesa
+  {
+    const mesa = recOf(pp, 'mesa')[0] ?? { center: [5, 0], radius: 28, topY: 26, face: 3, ramps: [], ladders: [] };
+    const [cx, cz] = mesa.center, R = mesa.radius, face = mesa.face ?? 2.5;
+    let top = 0, topMax = -Infinity;
+    for (let x = -R - 10; x <= R + 10; x += 2) for (let z = -R - 10; z <= R + 10; z += 2) topMax = Math.max(topMax, Y(pp, cx + x, cz + z));
+    for (let x = -R - 10; x <= R + 10; x += 2) for (let z = -R - 10; z <= R + 10; z += 2) if (Math.abs(Y(pp, cx + x, cz + z) - topMax) <= 1) top += 4;
+    const N = 72; let steep = 0; const cliffH = [];
+    for (let i = 0; i < N; i++) {
+      const a = i / N * Math.PI * 2; let g = 0;
+      for (let d = R - 3; d <= R + 3; d += 0.5) {
+        const y0 = Y(pp, cx + Math.cos(a) * d, cz + Math.sin(a) * d), y1 = Y(pp, cx + Math.cos(a) * (d + 0.5), cz + Math.sin(a) * (d + 0.5));
+        g = Math.max(g, Math.abs(y1 - y0) / 0.5);
+      }
+      if (Math.atan(g) * DEG > 60) steep++;
+      cliffH.push(topMax - Y(pp, cx + Math.cos(a) * (R + face / 2 + 1.5), cz + Math.sin(a) * (R + face / 2 + 1.5)));
+    }
+    const cliffMed = [...cliffH].sort((p, q) => p - q)[N >> 1];
+    expect('Parley: flat top at 22-26 m, >= 1,500 m2 within 1 m', topMax >= 22 && topMax <= 26.5 && top >= 1500, `top ${topMax.toFixed(1)} m, ${top} m2`);
+    expect('Parley: ring slope > 60 deg on >= 60% of the perimeter', steep / N >= 0.6, `${(steep / N * 100).toFixed(0)}%`);
+    expect('Parley: cliff ring 12-18 m (median)', cliffMed >= 12 && cliffMed <= 18, `${cliffMed.toFixed(1)} m`);
+    const ramps = mesa.ramps ?? [];
+    let worst = 0;
+    for (const r of ramps) for (let d = R - 2; d <= R + r.run; d += 0.5) {
+      const p = (k) => Y(pp, cx + Math.cos(r.angle) * k, cz + Math.sin(r.angle) * k);
+      worst = Math.max(worst, Math.atan(Math.abs(p(d + 0.5) - p(d)) / 0.5) * DEG);
+      if (process.env.RELIEF_DEBUG && Math.atan(Math.abs(p(d + 0.5) - p(d)) / 0.5) * DEG > 38) console.log(`    ramp ${r.angle} d ${d} y ${p(d).toFixed(2)} -> ${p(d + 0.5).toFixed(2)}`);
+    }
+    expect('Parley: 2 ramps walkable under 40 deg + 1 ladder site', ramps.length === 2 && worst < 40 && (mesa.ladders ?? []).length === 1, `${ramps.length} ramps, worst ${worst.toFixed(1)} deg, ${(mesa.ladders ?? []).length} ladder(s)`);
+  }
+
+  // Kraken Tooth: two teeth + saddle (union-find over a 2 m grid, highest first)
+  {
+    const ext = kt.radius * 1.5, step = 2, n = Math.floor((2 * ext) / step) + 1;
+    const H = new Float64Array(n * n);
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) H[i * n + j] = Y(kt, -ext + i * step, -ext + j * step);
+    const order = [...H.keys()].sort((p, q) => H[q] - H[p]);
+    const par = new Int32Array(n * n).fill(-1), peak = new Float64Array(n * n), peakAt = new Int32Array(n * n);
+    const find = (v) => { while (par[v] !== v) { par[v] = par[par[v]]; v = par[v]; } return v; };
+    let best = null;
+    for (const v of order) {
+      par[v] = v; peak[v] = H[v]; peakAt[v] = v;
+      const i = Math.floor(v / n), j = v % n;
+      for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+        const ii = i + di, jj = j + dj; if (ii < 0 || jj < 0 || ii >= n || jj >= n) continue;
+        const u = ii * n + jj; if (par[u] === -1) continue;
+        const a = find(u), b = find(v); if (a === b) continue;
+        const lo = Math.min(peak[a], peak[b]);
+        const pa = peakAt[a], pb = peakAt[b];
+        const sep = Math.hypot(Math.floor(pa / n) - Math.floor(pb / n), (pa % n) - (pb % n)) * step;
+        if (lo >= 40 && sep >= 30 && (!best || lo - H[v] > best.drop)) best = { lo, saddle: H[v], drop: lo - H[v], sep };
+        const hi = peak[a] >= peak[b] ? a : b, other = hi === a ? b : a;
+        par[other] = hi;
+      }
+    }
+    expect('Kraken: two teeth >= 40 m joined by a saddle >= 12 m lower', !!best && best.drop >= 12, best ? `lower tooth ${best.lo.toFixed(1)} m, saddle ${best.saddle.toFixed(1)} m, ${best.sep.toFixed(0)} m apart` : 'no second tooth >= 40 m');
+    const arch = recOf(kt, 'arch_site')[0];
+    const ay = arch ? Y(kt, arch.center[0], arch.center[1]) : NaN;
+    expect('Kraken: a sea-level arch site on the shore (ground -3..1.5 m)', !!arch && ay >= -3 && ay <= 1.5, arch ? `${arch.id} ground ${ay.toFixed(2)} m` : 'none');
+  }
+
+  // Terraces only where authored: riser/tread slope ratio over the relief phase.
+  {
+    const quant = (y, R) => {
+      if (MUT !== 'terrace-on' || y < 1) return y;
+      const sh = Math.max(2.4, R * 0.055), k = Math.floor(y / sh), f = y / sh - k;
+      return (k + 0.6 * (f * f * (3 - 2 * f)) + 0.4 * f) * sh;
+    };
+    let worst = { r: 0, id: '' };
+    for (const island of islands) {
+      if (getIslandLandforms(island).length || island.profile.terrainStyle === 'archipelago') continue;
+      const R = island.radius, sh = Math.max(2.4, R * 0.055);
+      const g = []; const ph = [];
+      for (let a = 0; a < 48; a++) for (let d = R * 0.1; d < R * 0.6; d += 0.5) {
+        const c = Math.cos(a / 48 * Math.PI * 2), s = Math.sin(a / 48 * Math.PI * 2);
+        // Outside every cave collar (the legacy quantize is kept there so cave
+        // roofs and the cave generator's baseRelief stay bit-identical).
+        const wx = island.position.x + c * d, wz = island.position.z + s * d;
+        if ((island.caves ?? []).some((cv) => Math.hypot(wx - cv.position.x, wz - cv.position.z) < (cv.length ?? 10) + 27)) continue;
+        const y0 = quant(Y(island, c * d, s * d), R), y1 = quant(Y(island, c * (d + 0.5), s * (d + 0.5)), R);
+        if (y0 < 3 || Math.abs(y1 - y0) < 0.05) continue;
+        g.push(Math.abs(y1 - y0)); ph.push(y0 / sh);
+      }
+      let rBest = 0;
+      for (let off = 0; off < 1; off += 0.125) {
+        let rs = 0, rn = 0, ts = 0, tn = 0;
+        for (let k = 0; k < g.length; k++) { const f = ((ph[k] + off) % 1 + 1) % 1; if (f > 0.35 && f < 0.65) { rs += g[k]; rn++; } else if (f < 0.15 || f > 0.85) { ts += g[k]; tn++; } }
+        if (rn > 50 && tn > 50) rBest = Math.max(rBest, (rs / rn) / (ts / tn));
+      }
+      if (rBest > worst.r) worst = { r: rBest, id: island.id };
+      if (process.env.RELIEF_DEBUG) console.log(`    terrace ratio ${island.id} ${island.profile.terrainStyle} ${rBest.toFixed(2)}`);
+    }
+    expect('no global terracing: riser/tread slope ratio < 1.3 on every record-free island', worst.r < 1.3, `worst ${worst.id} ${worst.r.toFixed(2)}`);
+  }
+  if (MUT === 'archetypes-off') for (const isl of [om, pp, kt]) overrideIslandLandforms(isl, null);
+}
+
 console.log(`\n${passes} passed, ${fails} failed`);
 process.exit(fails ? 1 : 0);

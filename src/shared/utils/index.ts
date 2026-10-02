@@ -1370,20 +1370,28 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   const lowestAllowed = Math.min(baseY, 5.4);
   let detailedY = Math.max(baseY + hillDetail + cliffBands + mtnCrag + ridgeSpurs, lowestAllowed);
 
-  // Terraced "levels": soft-quantize relief above the sea shelf so hillsides
-  // read as walkable tiers. Strong on plateau/rocky islands, subtle on tropical.
-  const terraceStrength = profile.terrainStyle === 'plateau' ? 0.6
-    : profile.terrainStyle === 'rocky' ? 0.42
-      : profile.terrainStyle === 'mountain' ? 0.32
-        : 0.16;
-  const relief = detailedY - seaLift;
-  if (relief > 0.5) {
-    const stepHeight = Math.max(2.4, island.radius * 0.055);
-    const stepIndex = Math.floor(relief / stepHeight);
-    const stepFrac = relief / stepHeight - stepIndex;
-    const eased = stepFrac * stepFrac * (3 - 2 * stepFrac);
-    const steppedRelief = (stepIndex + eased) * stepHeight;
-    detailedY = seaLift + lerp(relief, steppedRelief, terraceStrength * detailMask);
+  // No global terracing (b4.4e, islands-15): the old per-style soft-quantize
+  // (0.16-0.6 of a radius * 0.055 step) drew concentric contour bands on every
+  // cone. Terraces now exist only where a `terrace_run` landform is authored,
+  // EXCEPT under the cave collar: the quantize is kept at (1 - caveReliefWeight)
+  // so cave roofs/corridors and the `baseRelief` topography the cave generator
+  // reads stay bit-identical (removing it there let test-cave-walk walk out of
+  // a skull-cove wall).
+  const legacyTerrace = 1 - reliefWeight;
+  if (legacyTerrace > 0) {
+    const terraceStrength = profile.terrainStyle === 'plateau' ? 0.6
+      : profile.terrainStyle === 'rocky' ? 0.42
+        : profile.terrainStyle === 'mountain' ? 0.32
+          : 0.16;
+    const relief = detailedY - seaLift;
+    if (relief > 0.5) {
+      const stepHeight = Math.max(2.4, island.radius * 0.055);
+      const stepIndex = Math.floor(relief / stepHeight);
+      const stepFrac = relief / stepHeight - stepIndex;
+      const eased = stepFrac * stepFrac * (3 - 2 * stepFrac);
+      const steppedRelief = (stepIndex + eased) * stepHeight;
+      detailedY = seaLift + lerp(relief, steppedRelief, terraceStrength * detailMask * legacyTerrace);
+    }
   }
 
   // ── Islet-local beach ring (archipelago, b4.4d / islands-11) ──
