@@ -298,6 +298,8 @@ try {
       ['mid-broadside', [w * 0.5 + 38, h + 5, 0], [0, h, 0], BRACE_TO_CAMERA],
       ['mid-broadside-square', [w * 0.5 + 38, h + 5, 0], [0, h, 0], 0],
       ['far-quarter', [w + 90, 16, l + 70], [0, h, 0]],
+      // ~290 m: past the 250 m band, LOD3 with the alpha-tested rig cards (b4.2h); ungraded diagnostic.
+      ['far-290', [w + 215, 34, l + 185], [0, h + 4, 0]],
       // Low stern quarter aimed at the sternpost so the rudder hanging on it is in frame.
       ['stern', [3, h + 1.6, -(l * 0.5 + 9)], [0, h * 0.45, -l * 0.45]],
       ['hull-hole-close', [w * 0.5 + 3.5, h * 0.4, 0], [0, h * 0.25, 0]],
