@@ -180,12 +180,12 @@ export const RATCHET = [
   // lantern
   'ship_lantern:lods',
   // props
-  'barrel:band', 'barrel:lods', 'barrel:textures',
-  'keg:band', 'keg:lods', 'keg:textures',
-  'chest_closed:band', 'chest_closed:lods', 'chest_closed:textures', 'chest_closed:verts',
-  'chest_open:band', 'chest_open:lods', 'chest_open:textures', 'chest_open:verts',
-  'crate:band', 'crate:lods', 'crate:textures', 'crate:verts',
-  'campfire:band', 'campfire:lods', 'campfire:textures', 'campfire:verts',
+  'barrel:lods', 'barrel:textures',
+  'keg:lods', 'keg:textures',
+  'chest_closed:lods', 'chest_closed:textures',
+  'chest_open:lods', 'chest_open:textures',
+  'crate:lods', 'crate:textures',
+  'campfire:lods', 'campfire:textures',
   'bedroll:band', 'bedroll:lods', 'bedroll:textures',
   'lantern_post:band', 'lantern_post:lods', 'lantern_post:textures', 'lantern_post:verts',
   'tent_a:band', 'tent_a:lods', 'tent_a:textures',

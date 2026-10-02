@@ -39,6 +39,13 @@ if os.environ.get("PROPS_FINAL") != "1":
 
 clear_default_scene()
 
+# Props v2 (b4.5c, assets-10): two-segment bevels so every board edge catches a highlight, smooth-shaded
+# bevelled solids (one shared vertex per corner, verts/tris <= 1.3 after export) and real detail:
+# 18 bulged staves with chime + croze-set heads, 4 riveted hoops, nails, a coopered chest lid, a modelled
+# coin hoard and a goblet. LOD0 sits in the props band 2.5-8k (test-asset-tiers); build_lods.py makes
+# the <key>_lods chain.
+BEV_SEGS = 2
+
 
 # ── small builders ───────────────────────────────────────────
 def _finish(bm):
@@ -46,7 +53,7 @@ def _finish(bm):
     return bm
 
 
-def add_box(coll, name, w, d, h, loc, mname, rot=None, bevel=0.012, smooth=False):
+def add_box(coll, name, w, d, h, loc, mname, rot=None, bevel=0.012, smooth=True):
     bm = bm_box(w, d, h)
     M = Matrix.Translation(Vector(loc))
     if rot is not None:
@@ -55,7 +62,7 @@ def add_box(coll, name, w, d, h, loc, mname, rot=None, bevel=0.012, smooth=False
     _finish(bm)
     o = obj_from_bmesh(name, bm, coll, mat(mname), smooth=smooth)
     if bevel:
-        bevel_obj(o, width=bevel)
+        bevel_obj(o, width=bevel, segments=BEV_SEGS)
         apply_modifiers(o)
     return o
 
@@ -70,13 +77,13 @@ def add_cyl(coll, name, r1, r2, depth, loc, mname, segs=8, rot=None,
     _finish(bm)
     o = obj_from_bmesh(name, bm, coll, mat(mname), smooth=smooth)
     if bevel:
-        bevel_obj(o, width=bevel)
+        bevel_obj(o, width=bevel, segments=BEV_SEGS)
         apply_modifiers(o)
     return o
 
 
-def add_rivet(coll, name, loc, normal, r=0.018, depth=0.035, mname="Metal_Iron"):
-    bm = bm_cylinder(r, r * 0.65, depth, segs=5)
+def add_rivet(coll, name, loc, normal, r=0.018, depth=0.035, mname="Metal_Iron", segs=6):
+    bm = bm_cylinder(r, r * 0.65, depth, segs=segs)
     quat = Vector(normal).normalized().to_track_quat('Z', 'Y')
     bmesh.ops.transform(bm, matrix=Matrix.Translation(Vector(loc)) @
                         quat.to_matrix().to_4x4(), verts=bm.verts)
@@ -96,7 +103,7 @@ def chip_corner(bm, co, no):
 
 
 def make_stave(coll, name, radius, height, a0, a1, thick, mname,
-               bulge=0.16, rings=5, splay=0.0, tilt=0.0, z_jit=0.0):
+               bulge=0.16, rings=10, splay=0.0, tilt=0.0, z_jit=0.0):
     """One curved barrel stave (solid, 4-vert cross section per ring).
     splay: extra radial offset at the top (staves lean outward slightly)."""
     bm = bmesh.new()
@@ -109,14 +116,15 @@ def make_stave(coll, name, radius, height, a0, a1, thick, mname,
         aa0 = a0 + tilt * t
         aa1 = a1 + tilt * t
         row = []
-        for a, r in ((aa0, r_out), (aa1, r_out), (aa1, r_in), (aa0, r_in)):
+        am = (aa0 + aa1) / 2
+        for a, r in ((aa0, r_out), (am, r_out), (aa1, r_out), (aa1, r_in), (am, r_in), (aa0, r_in)):
             row.append(bm.verts.new((r * math.cos(a), r * math.sin(a),
                                      height * t + z_jit * t)))
         rows.append(row)
     for i in range(rings):
         A, B = rows[i], rows[i + 1]
-        for j in range(4):
-            k = (j + 1) % 4
+        for j in range(6):
+            k = (j + 1) % 6
             bm.faces.new((A[j], A[k], B[k], B[j]))
     bm.faces.new(tuple(reversed(rows[0])))
     bm.faces.new(tuple(rows[-1]))
@@ -128,8 +136,8 @@ def make_stave(coll, name, radius, height, a0, a1, thick, mname,
 # ── barrel / keg ─────────────────────────────────────────────
 def build_barrel(name, height=1.0, radius=0.38, woods=("Wood_Mid", "Wood_Mid",
                  "Wood_Light", "Wood_Mid", "Wood_Dark"),
-                 band="Metal_Band", bands=(0.20, 0.80), seed=3,
-                 n_staves=12, rivet_every=2):
+                 band="Metal_Band", bands=(0.09, 0.27, 0.73, 0.91), seed=3,
+                 n_staves=18, rivet_every=1, bung=True):
     coll = asset_collection(name)
     rng = random.Random(seed)
     parts = []
@@ -150,28 +158,44 @@ def build_barrel(name, height=1.0, radius=0.38, woods=("Wood_Mid", "Wood_Mid",
     for bi, bt in enumerate(bands):
         bulge = 1.0 + 0.16 * math.sin(bt * math.pi)
         br = radius * bulge + 0.028
-        b = add_cyl(coll, f"{name}_band{bi}", br, br, 0.075,
-                    (0, 0, height * bt), band, segs=14, bevel=0.012)
+        b = add_cyl(coll, f"{name}_band{bi}", br, br, 0.065,
+                    (0, 0, height * bt), band, segs=30, cap=False)
+        bevel_obj(b, width=0.008, segments=BEV_SEGS)
+        sol = b.modifiers.new("Solid", 'SOLIDIFY')
+        sol.thickness = 0.016
+        sol.offset = 1.0
+        b.modifiers.move(len(b.modifiers) - 1, 0)
+        apply_modifiers(b)
         parts.append(b)
         for j in range(0, n_staves, rivet_every):
             a = 2 * math.pi * (j + 0.5) / n_staves
             n = Vector((math.cos(a), math.sin(a), 0))
             band_rivets.append(add_rivet(
                 coll, f"{name}_riv{bi}_{j}",
-                n * (br + 0.008) + Vector((0, 0, height * bt)), n))
+                n * (br + 0.010) + Vector((0, 0, height * bt)), n, r=0.012, depth=0.03, segs=5))
     parts += band_rivets
-    # warped end boards on top
-    top_r = radius * 0.96
-    n_boards = 4
-    bw = 2 * top_r / n_boards
-    for i in range(n_boards):
-        yc = -top_r + bw * (i + 0.5)
-        half_chord = math.sqrt(max(0.01, top_r * top_r - yc * yc))
-        rot = Matrix.Rotation(rng.uniform(-0.05, 0.05), 4, 'X')
-        parts.append(add_box(coll, f"{name}_endboard{i}",
-                             2 * half_chord * 0.98, bw * 0.92, 0.035,
-                             (0, yc, height - 0.02 + rng.uniform(-0.012, 0.012)),
-                             rng.choice(woods), rot=rot, bevel=0.008))
+    # heads set into the croze: the staves stand proud above them as the chime (5 cm), and a dark
+    # croze ring shows the groove the head boards are let into
+    for zi, zc in ((1, height - 0.055), (0, 0.055)):
+        top_r = radius * (1.0 + 0.16 * math.sin(math.pi * zc / height)) - 0.045
+        n_boards = 5
+        bw = 2 * top_r / n_boards
+        for i in range(n_boards):
+            yc = -top_r + bw * (i + 0.5)
+            half_chord = math.sqrt(max(0.01, top_r * top_r - yc * yc))
+            rot = Matrix.Rotation(rng.uniform(-0.03, 0.03), 4, 'X')
+            parts.append(add_box(coll, f"{name}_head{zi}_{i}",
+                                 2 * half_chord * 0.99, bw * 0.95, 0.03,
+                                 (0, yc, zc + rng.uniform(-0.004, 0.004)),
+                                 rng.choice(woods), rot=rot, bevel=0.006))
+        parts.append(add_cyl(coll, f"{name}_croze{zi}", top_r + 0.004, top_r + 0.004, 0.012,
+                             (0, 0, zc + 0.02), "Wood_Dark", segs=36, cap=False))
+        parts[-1].data.flip_normals()   # seen from inside the chime
+    if bung:
+        # bung stave: a tapered plug at the belly, on the stave between two rivet columns
+        n = Vector((1, 0, 0))
+        parts.append(add_rivet(coll, f"{name}_bung", n * (radius * 1.16 + 0.004) + Vector((0, 0, height * 0.5)),
+                               n, r=0.03, depth=0.03, mname="Wood_Dark", segs=12))
     obj = join(parts, name)
     return coll, obj
 
@@ -181,7 +205,7 @@ def build_keg(name="keg"):
                              woods=("Wood_Dark", "Wood_Dark", "Wood_Dark",
                                     "Wood_Mid"),
                              band="Keg_Red", bands=(0.16, 0.5, 0.84),
-                             seed=11, n_staves=11, rivet_every=3)
+                             seed=11, n_staves=16, rivet_every=1, bung=False)
     # fuse coil on top
     rope_pts = []
     for i in range(14):
@@ -189,7 +213,7 @@ def build_keg(name="keg"):
         a = t * math.pi * 3.2
         r = 0.12 * (1 - t * 0.5)
         rope_pts.append(Vector((r * math.cos(a), r * math.sin(a),
-                                0.80 + t * 0.11)))
+                                0.75 + t * 0.11)))
     fuse = []
     for k in range(len(rope_pts) - 1):
         seg = rope_pts[k + 1] - rope_pts[k]
@@ -216,8 +240,8 @@ def build_chest(name, open_lid=False):
     bmesh.ops.transform(bm, matrix=Matrix.Translation((0, 0, Hh / 2)), verts=bm.verts)
     chip_corner(bm, (W / 2 - 0.05, D / 2 - 0.05, 0.06), (1, 1, -1))
     _finish(bm)
-    base = obj_from_bmesh(f"{name}_base", bm, coll, mat("Wood_Dark"))
-    bevel_obj(base, width=0.02)
+    base = obj_from_bmesh(f"{name}_base", bm, coll, mat("Wood_Dark"), smooth=True)
+    bevel_obj(base, width=0.02, segments=BEV_SEGS)
     apply_modifiers(base)
     parts.append(base)
     # horizontal plank overlay strips (front + back + ends)
@@ -243,7 +267,8 @@ def build_chest(name, open_lid=False):
     for v in bm.verts:
         if v.co.z < 0:
             v.co.z = 0
-    lid_rot = (Matrix.Rotation(math.radians(-52), 4, 'X') if open_lid
+    # +70 deg about the back hinge swings the front edge UP and back (v1 used -52 and sank the lid into the box)
+    lid_rot = (Matrix.Rotation(math.radians(70), 4, 'X') if open_lid
                else Matrix.Identity(4))
     pivot = Vector((0, -D / 2, Hh))
     lid_M = Matrix.Translation(pivot) @ lid_rot @ Matrix.Translation(Vector((0, D / 2, 0)))
@@ -251,11 +276,28 @@ def build_chest(name, open_lid=False):
     _finish(bm)
     lid = obj_from_bmesh(f"{name}_lid", bm, coll, mat("Wood_Dark"), smooth=False)
     parts.append(lid)
+    # coopered lid: 7 bevelled slats laid round the arch like barrel staves, proud of the core
+    n_sl = 7
+    for i in range(n_sl):
+        a = math.pi * (i + 0.5) / n_sl
+        span = math.pi / n_sl
+        rr = D / 2 + 0.008
+        chord = 2 * rr * math.sin(span / 2) * 0.97
+        sl = bm_box(W * 0.985, chord, 0.020)
+        M = (lid_M @ Matrix.Translation((0, rr * math.cos(a), rr * math.sin(a))) @
+             Matrix.Rotation(a - math.pi / 2, 4, 'X') @
+             Matrix.Rotation(rng.uniform(-0.01, 0.01), 4, 'Z'))
+        bmesh.ops.transform(sl, matrix=M, verts=sl.verts)
+        _finish(sl)
+        o = obj_from_bmesh(f"{name}_slat{i}", sl, coll, mat("Wood_Dark" if i % 3 else "Wood_Mid"), smooth=True)
+        bevel_obj(o, width=0.007, segments=BEV_SEGS)
+        apply_modifiers(o)
+        parts.append(o)
     # iron straps: vertical on base + arc over lid (follow lid transform)
     def strap_arc(xo):
         bmm = bmesh.new()
-        segsA = 9
-        w2, th = 0.045, 0.022
+        segsA = 18
+        w2, th = 0.045, 0.034
         rows = []
         for i in range(segsA + 1):
             a = math.pi * i / segsA
@@ -284,6 +326,13 @@ def build_chest(name, open_lid=False):
                              Hh + 0.015, (xo, 0, (Hh + 0.015) / 2 - 0.01),
                              "Metal_Iron", bevel=0.008))
         parts.append(strap_arc(xo))
+        # rivets over the strap arc (they follow the lid when it is open)
+        for k in range(1, 6):
+            a = math.pi * k / 6
+            rr = D / 2 + 0.036
+            pt = lid_M @ Vector((xo, rr * math.cos(a), rr * math.sin(a)))
+            nn = (lid_M.to_3x3() @ Vector((0, math.cos(a), math.sin(a)))).normalized()
+            rivets.append(add_rivet(coll, f"{name}_rarc{xo:.1f}{k}", pt, nn, r=0.014, depth=0.02))
         # rivets down the front + back of the vertical strap
         for sy in (-1, 1):
             for z in (Hh * 0.2, Hh * 0.5, Hh * 0.8):
@@ -300,19 +349,36 @@ def build_chest(name, open_lid=False):
         hM = Matrix.Translation(pivot) @ lid_rot @ Matrix.Translation(-pivot) @ hM
     bmesh.ops.transform(hasp_bm, matrix=hM, verts=hasp_bm.verts)
     _finish(hasp_bm)
-    hasp = obj_from_bmesh(f"{name}_hasp", hasp_bm, coll, mat("Metal_Iron"))
-    bevel_obj(hasp, width=0.008)
+    hasp = obj_from_bmesh(f"{name}_hasp", hasp_bm, coll, mat("Metal_Iron"), smooth=True)
+    bevel_obj(hasp, width=0.008, segments=BEV_SEGS)
     apply_modifiers(hasp)
     parts.append(hasp)
+    # padlock: a bevelled iron body under a round shackle through the staple (hangs open on the open chest)
+    lock_z = Hh * 0.62 if not open_lid else Hh * 0.58
+    parts.append(add_box(coll, f"{name}_padlock", 0.09, 0.035, 0.08,
+                         (0, D / 2 + 0.07, lock_z), "Metal_Iron", bevel=0.01))
+    sh = bmesh.new()
+    bmesh.ops.create_circle(sh, cap_ends=False, segments=16, radius=0.032)
+    bmesh.ops.transform(sh, matrix=Matrix.Translation((0, D / 2 + 0.07, lock_z + 0.045)) @
+                        Matrix.Rotation(math.pi / 2, 4, 'Y'), verts=sh.verts)
+    sho = obj_from_bmesh(f"{name}_shackle", sh, coll, mat("Metal_Iron"), smooth=True)
+    sk = sho.modifiers.new("Skin", 'SKIN')
+    for v in sho.data.skin_vertices[0].data:
+        v.radius = (0.008, 0.008)
+    sub = sho.modifiers.new("Sub", 'SUBSURF')
+    sub.levels = 1
+    apply_modifiers(sho)
+    parts.append(sho)
     # rope side handles
     for sx in (-1, 1):
         parts.append(add_cyl(coll, f"{name}_handle{sx}", 0.022, 0.022, 0.16,
                              (sx * (W / 2 + 0.02), 0, Hh * 0.62), "Rope",
                              segs=6, rot=Matrix.Rotation(math.pi / 2, 4, 'X')))
     if open_lid:
-        # coin heap: faceted gold mound + scattered coins
+        # coin hoard: a low gold mound as the fill, 170 modelled coins laid over it (each tilted to the
+        # mound's slope), a few spilled over the rim, and a goblet standing in the heap
         bm = bm_icosphere(0.33, 2)
-        bmesh.ops.scale(bm, vec=Vector((1.25, 0.8, 0.5)), verts=bm.verts)
+        bmesh.ops.scale(bm, vec=Vector((1.25, 0.8, 0.42)), verts=bm.verts)
         bmesh.ops.transform(bm, matrix=Matrix.Translation((0, 0.03, Hh + 0.02)),
                             verts=bm.verts)
         _finish(bm)
@@ -320,15 +386,65 @@ def build_chest(name, open_lid=False):
         displace_noise(o, strength=0.12, scale=0.14, seed=9)
         apply_modifiers(o)
         parts.append(o)
-        for i in range(7):
-            a = rng.uniform(0, 2 * math.pi)
-            r = rng.uniform(0.12, 0.40)
-            x, y = r * math.cos(a) * 1.1, r * math.sin(a) * 0.6
-            z = Hh + 0.10 if r < 0.18 else Hh + 0.03
-            parts.append(add_cyl(coll, f"{name}_coin{i}", 0.045, 0.045, 0.012,
-                                 (x, y + 0.03, z), "Gold", segs=7,
-                                 rot=Matrix.Rotation(rng.uniform(-0.5, 0.5), 4, 'X'),
-                                 smooth=False))
+        def mound(x, y):
+            q = (x / 0.41) ** 2 + ((y - 0.03) / 0.27) ** 2
+            return Hh + 0.02 + 0.15 * max(0.0, 1.0 - q) ** 0.8
+        coin_bms = bmesh.new()
+        n_coin = 0
+        while n_coin < 170:
+            x = rng.uniform(-0.44, 0.44)
+            y = rng.uniform(-0.26, 0.29)
+            if (x / 0.44) ** 2 + ((y - 0.015) / 0.28) ** 2 > 1.0:
+                continue
+            z = mound(x, y)
+            gx = (mound(x + 0.01, y) - mound(x - 0.01, y)) / 0.02
+            gy = (mound(x, y + 0.01) - mound(x, y - 0.01)) / 0.02
+            nrm = Vector((-gx, -gy, 1.0)).normalized()
+            nrm = (nrm + Vector((rng.uniform(-0.35, 0.35), rng.uniform(-0.35, 0.35), 0))).normalized()
+            c = bm_cylinder(0.03, 0.03, 0.006, segs=6)
+            q = nrm.to_track_quat('Z', 'Y')
+            bmesh.ops.transform(c, matrix=Matrix.Translation((x, y, z + 0.004)) @ q.to_matrix().to_4x4() @
+                                Matrix.Rotation(rng.uniform(0, math.pi), 4, 'Z'), verts=c.verts)
+            mesh_tmp = bpy.data.meshes.new("coin_tmp")
+            c.to_mesh(mesh_tmp)
+            c.free()
+            coin_bms.from_mesh(mesh_tmp)
+            bpy.data.meshes.remove(mesh_tmp)
+            n_coin += 1
+        for i in range(8):   # spilled over the front rim and onto the ground
+            x = rng.uniform(-0.40, 0.40)
+            y, z = (D / 2 + rng.uniform(0.03, 0.07), 0.004) if i < 6 else (D / 2 - 0.02, Hh + 0.01)
+            c = bm_cylinder(0.03, 0.03, 0.006, segs=6)
+            bmesh.ops.transform(c, matrix=Matrix.Translation((x, y, z)) @
+                                Matrix.Rotation(rng.uniform(-0.2, 0.2), 4, 'X'), verts=c.verts)
+            mesh_tmp = bpy.data.meshes.new("coin_tmp")
+            c.to_mesh(mesh_tmp)
+            c.free()
+            coin_bms.from_mesh(mesh_tmp)
+            bpy.data.meshes.remove(mesh_tmp)
+        _finish(coin_bms)
+        parts.append(obj_from_bmesh(f"{name}_coins", coin_bms, coll, mat("Gold"), smooth=False))
+        # goblet: lathed foot, knopped stem and bowl
+        prof = [(0.0, 0.0), (0.045, 0.0), (0.05, 0.008), (0.02, 0.02), (0.012, 0.05), (0.022, 0.065),
+                (0.012, 0.08), (0.02, 0.095), (0.045, 0.12), (0.055, 0.17), (0.05, 0.172), (0.04, 0.125),
+                (0.0, 0.11)]
+        gb = bmesh.new()
+        segG = 16
+        ringsG = []
+        for k in range(segG):
+            a = 2 * math.pi * k / segG
+            ringsG.append([gb.verts.new((r * math.cos(a), r * math.sin(a), z)) for r, z in prof])
+        for k in range(segG):
+            A, B = ringsG[k], ringsG[(k + 1) % segG]
+            for j in range(len(prof) - 1):
+                if prof[j][0] == 0.0 and prof[j + 1][0] == 0.0:
+                    continue
+                gb.faces.new((A[j], B[j], B[j + 1], A[j + 1]))
+        bmesh.ops.remove_doubles(gb, verts=gb.verts, dist=1e-5)
+        bmesh.ops.transform(gb, matrix=Matrix.Translation((0.30, 0.0, mound(0.30, 0.0) - 0.05)) @
+                            Matrix.Rotation(0.18, 4, 'Y'), verts=gb.verts)
+        _finish(gb)
+        parts.append(obj_from_bmesh(f"{name}_goblet", gb, coll, mat("Gold"), smooth=True))
     obj = join(parts, name)
     return coll, obj
 
@@ -358,8 +474,8 @@ def build_crate(name="crate"):
                                 verts=bm.verts)
             _finish(bm)
             o = obj_from_bmesh(f"{name}_p{face}{i}", bm, coll,
-                               mat(woods[(face + i) % 4]))
-            bevel_obj(o, width=0.008)
+                               mat(woods[(face + i) % 4]), smooth=True)
+            bevel_obj(o, width=0.008, segments=BEV_SEGS)
             apply_modifiers(o)
             parts.append(o)
     # top: 3 planks with gaps, one askew
@@ -381,10 +497,25 @@ def build_crate(name="crate"):
             bmesh.ops.transform(bm, matrix=Matrix.Translation(
                 (sx * S / 2, sy * S / 2, S / 2)), verts=bm.verts)
             _finish(bm)
-            o = obj_from_bmesh(f"{name}_bat{sx}{sy}", bm, coll, mat("Wood_Dark"))
-            bevel_obj(o, width=0.012)
+            o = obj_from_bmesh(f"{name}_bat{sx}{sy}", bm, coll, mat("Wood_Dark"), smooth=True)
+            bevel_obj(o, width=0.012, segments=BEV_SEGS)
             apply_modifiers(o)
             parts.append(o)
+    # nails: two per board end, driven through the battens on both faces of each corner
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            for i in range(3):
+                for k, dz in enumerate((-0.035, 0.035)):
+                    z = plank_h * (i + 0.5) + dz
+                    parts.append(add_rivet(coll, f"{name}_nx{sx}{sy}{i}{k}", (sx * (S / 2 + 0.046), sy * (S / 2 - 0.022), z),
+                                           (sx, 0, 0), r=0.009, depth=0.012))
+                    parts.append(add_rivet(coll, f"{name}_ny{sx}{sy}{i}{k}", (sx * (S / 2 - 0.022), sy * (S / 2 + 0.046), z),
+                                           (0, sy, 0), r=0.009, depth=0.012))
+    for i in range(3):   # lid boards nailed at both ends
+        y = -S / 2 + (S / 3) * (i + 0.5)
+        for sx in (-1, 1):
+            parts.append(add_rivet(coll, f"{name}_nt{i}{sx}", (sx * S * 0.42, y, S + 0.006), (0, 0, 1),
+                                   r=0.009, depth=0.012))
     obj = join(parts, name)
     return coll, obj
 
@@ -393,7 +524,10 @@ def build_crate(name="crate"):
 def split_log(coll, name, r, length, mname, seed=0):
     """Charred split log: half-cylinder with flat split face, faceted."""
     rng = random.Random(seed)
-    bm = bm_cylinder(r, r * 0.82, length, segs=8)
+    bm = bm_cylinder(r, r * 0.82, length, segs=14)
+    bmesh.ops.subdivide_edges(bm, edges=[e for e in bm.edges
+                                         if abs(e.verts[0].co.z - e.verts[1].co.z) > length * 0.5],
+                              cuts=5)
     off = rng.uniform(-0.2, 0.3) * r
     res = bmesh.ops.bisect_plane(
         bm, geom=bm.verts[:] + bm.edges[:] + bm.faces[:],
@@ -405,7 +539,7 @@ def split_log(coll, name, r, length, mname, seed=0):
     _finish(bm)
     o = obj_from_bmesh(name, bm, coll, mat(mname), smooth=False)
     displace_noise(o, strength=0.02, scale=0.25, seed=seed + 3)
-    bevel_obj(o, width=0.01)
+    bevel_obj(o, width=0.01, segments=BEV_SEGS)
     apply_modifiers(o)
     return o
 
@@ -419,7 +553,7 @@ def build_campfire(name="campfire"):
     for k in range(n_st):
         a = 2 * math.pi * k / n_st + rng.uniform(-0.12, 0.12)
         r = rng.uniform(0.11, 0.17)
-        bm = bm_icosphere(r, 2)
+        bm = bm_icosphere(r, 3)
         bmesh.ops.scale(bm, vec=Vector((rng.uniform(1.0, 1.35),
                                         rng.uniform(0.85, 1.1),
                                         rng.uniform(0.6, 0.8))), verts=bm.verts)
@@ -430,7 +564,7 @@ def build_campfire(name="campfire"):
         _finish(bm)
         o = obj_from_bmesh(f"{name}_stone{k}", bm, coll,
                            mat("Rock_Grey" if k % 3 else "Rock_Dark"),
-                           smooth=False)
+                           smooth=True)
         displace_noise(o, strength=0.035, scale=0.3, seed=k)
         apply_modifiers(o)
         parts.append(o)
@@ -459,9 +593,9 @@ def build_campfire(name="campfire"):
     displace_noise(bed, strength=0.03, scale=0.12, seed=5)
     apply_modifiers(bed)
     parts.append(bed)
-    for i in range(6):
+    for i in range(12):
         a = rng.uniform(0, 2 * math.pi)
-        r = rng.uniform(0.02, 0.16)
+        r = rng.uniform(0.02, 0.19)
         bm = bm_icosphere(rng.uniform(0.03, 0.05), 1)
         bmesh.ops.transform(bm, matrix=Matrix.Translation(
             (r * math.cos(a), r * math.sin(a), 0.085)), verts=bm.verts)
