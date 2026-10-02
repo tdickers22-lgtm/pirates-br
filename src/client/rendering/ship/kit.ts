@@ -241,6 +241,10 @@ export interface ShipKitSource {
 }
 
 export const KIT_SHARED = 'hwShared';
+/** userData key of a hinged bucket (b4.3d): ship/shipMotion.ts re-poses its instances. */
+export const KIT_HINGE = 'kitHinge';
+/** Instance i = pre[i] x rotX(angle) x post[i] (pre = socket x node frame, post = mesh in node). */
+export interface KitHinge { node: string; mesh: THREE.InstancedMesh; pre: THREE.Matrix4[]; post: THREE.Matrix4[] }
 
 /**
  * Mount the kit at `sockets` under `parent` as one InstancedMesh per kit mesh
@@ -266,13 +270,14 @@ export function mountShipKit(
       });
     }
   }
-  const buckets = new Map<string, { geo: THREE.BufferGeometry; mat: THREE.Material | THREE.Material[]; mats: THREE.Matrix4[]; name: string }>();
+  const buckets = new Map<string, { geo: THREE.BufferGeometry; mat: THREE.Material | THREE.Material[]; mats: THREE.Matrix4[]; name: string; pre?: THREE.Matrix4[]; post?: THREE.Matrix4[] }>();
   const sockM = new THREE.Matrix4(), nodeM = new THREE.Matrix4(), meshM = new THREE.Matrix4(), hinge = new THREE.Matrix4();
   const place = (scene: THREE.Object3D, nodeName: string, base: THREE.Matrix4, hingeX: number | undefined, lodScene: THREE.Object3D | null) => {
     const node = scene.getObjectByName(nodeName);
     if (!node) return;
     node.updateMatrix();
     nodeM.copy(node.matrix);
+    const pre = hingeX !== undefined ? nodeM.clone().premultiply(base) : null;
     if (hingeX) nodeM.multiply(hinge.makeRotationX(hingeX));
     nodeM.premultiply(base);
     // The LOD sibling supplies the geometry; the LOD0 node supplies the frame
@@ -295,6 +300,10 @@ export function mountShipKit(
         buckets.set(key, b);
       }
       b.mats.push(meshM.clone());
+      if (pre) {
+        (b.pre ??= []).push(pre);
+        (b.post ??= []).push(new THREE.Matrix4().multiplyMatrices(nodeInv, mesh.matrixWorld));
+      }
     });
   };
   for (const s of sockets) {
@@ -326,6 +335,7 @@ export function mountShipKit(
     im.castShadow = true;
     im.receiveShadow = true;
     im.userData[KIT_SHARED] = true; // library-owned geometry: clear() must not dispose it
+    if (b.pre && b.post && b.pre.length === b.mats.length) im.userData[KIT_HINGE] = { node: b.name, mesh: im, pre: b.pre, post: b.post } satisfies KitHinge;
     root.add(im);
   }
   return root;

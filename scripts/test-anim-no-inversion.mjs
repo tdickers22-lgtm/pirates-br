@@ -1048,7 +1048,144 @@ console.log('\nb3.3e sail belly vs the apparent wind (the contract the b4 cloth 
     `worst ${worst.toFixed(3)}`);
 }
 
+// ── b4.3d SHIP OBJECT MOTION (animations-12, vm:ships:5): the gun jumps back
+// along -barrel and is run out again, the muzzle kicks up, the gunport lid is
+// open on the fire edge, the capstan turns with the cable only (raise and drop
+// opposite, still at rest), the wheel lags the rudder by 0.1-0.2 s.
+// Negative controls: HEAD's frozen gun and HEAD's capstan formula
+// (`anchored && p > 0 ? 3.6 + p * 4.8 : 0.08` rad/s) must fail the same predicates.
+console.log('\nb4.3d ship object motion: cannon recoil, gunport lids, capstan, wheel lag');
+{
+  const SM = await import('../src/client/rendering/ship/shipMotion.ts');
+  const KIT = await import('../src/client/rendering/ship/kit.ts');
+  // [recoil] the deck gun as ShipRenderer builds it, both broadsides, three trains.
+  function gunRig(side, yawDeg) {
+    const ship = new THREE.Object3D(); ship.rotation.y = 0.7; ship.position.set(12, 0, -40);
+    const root = new THREE.Object3D(); root.position.set(side * 2.1, 2.3, 1.5); root.rotation.y = side > 0 ? 0 : Math.PI; ship.add(root);
+    const yawPivot = new THREE.Object3D(); root.add(yawPivot);
+    const pitchPivot = new THREE.Object3D(); pitchPivot.position.set(0, 0.18, 0); yawPivot.add(pitchPivot);
+    return { ship, gun: { root, yawPivot, pitchPivot }, yaw: yawDeg * DEG, pitch: 0.08 };
+  }
+  const muzzleOf = (g) => { g.ship.updateMatrixWorld(true); return V(1.4, 0, 0).applyMatrix4(g.gun.pitchPivot.matrixWorld); };
+  const originOf = (g) => { g.ship.updateMatrixWorld(true); return V(0, 0, 0).applyMatrix4(g.gun.pitchPivot.matrixWorld); };
+  const barrelOf = (g) => { g.ship.updateMatrixWorld(true); return V(1, 0, 0).transformDirection(g.gun.pitchPivot.matrixWorld); };
+  // drive(g, aim) returns displacement . barrel and muzzle rise at the sample times after the shot.
+  function drive(g, aimFn, samples) {
+    const motion = new SM.ShipMotion();
+    const dt = 0.01; let t = 10; const cds = [0];
+    for (let i = 0; i < 60; i++) { t += dt; motion.update(cds, () => true, t, dt); aimFn(motion, g, dt); }
+    const p0 = originOf(g), m0 = muzzleOf(g), b0 = barrelOf(g);
+    cds[0] = SHIP.CANNON_RELOAD; t += dt; motion.update(cds, () => true, t, dt); aimFn(motion, g, dt);
+    const out = {}; let since = 0;
+    for (const s of samples) {
+      while (since < s - 1e-9) { t += dt; since += dt; cds[0] = Math.max(0, cds[0] - dt); motion.update(cds, () => true, t, dt); aimFn(motion, g, dt); }
+      out[s] = { along: originOf(g).sub(p0).dot(b0), rise: muzzleOf(g).y - m0.y, lid: motion.lidAngle(0) };
+    }
+    return out;
+  }
+  const shipped = (m, g) => m.aimGun(0, g.gun, g.yaw, g.pitch, 1);
+  const headFrozen = (m, g) => { g.gun.yawPivot.rotation.y = g.yaw; g.gun.pitchPivot.rotation.z = g.pitch; };
+  const inverted = (m, g) => { m.aimGun(0, g.gun, g.yaw, g.pitch, 1); const r = SM.cannonRecoil(m.guns[0].sinceFire); g.gun.root.position.copy(m.guns[0].rest).add(V(Math.cos(g.gun.yawPivot.rotation.y) * r.back * 2, 0, -Math.sin(g.gun.yawPivot.rotation.y) * r.back * 2).applyQuaternion(g.gun.root.quaternion)); };
+  const recoilOk = (r) => r[0.08].along < -0.4 && r[0.08].along > -0.6 && r[0.08].rise > 0;
+  let worst80 = -Infinity, worstPeak = Infinity, worstRise = Infinity, worstEnd = 0, worstMid = Infinity, worstLid = -Infinity;
+  for (const side of [1, -1]) {
+    for (const yawDeg of [-25, 0, 25]) {
+      const r = drive(gunRig(side, yawDeg), shipped, [0.04, 0.08, 0.68, 1.3, 1.6]);
+      worst80 = Math.max(worst80, r[0.08].along); worstPeak = Math.min(worstPeak, r[0.08].along);
+      worstRise = Math.min(worstRise, r[0.08].rise); worstEnd = Math.max(worstEnd, Math.abs(r[1.6].along));
+      worstMid = Math.min(worstMid, -r[0.68].along); worstLid = Math.max(worstLid, r[0.04].lid);
+    }
+  }
+  expect('[recoil] carriage displacement . barrel < -0.4 m at 80 ms (both sides, train -25/0/+25 deg)', worst80 < -0.4,
+    `worst ${worst80.toFixed(3)} m`);
+  expect('[recoil] peak travel within the 0.45-0.6 m breeching band', worstPeak >= -0.6 && worst80 <= -0.45,
+    `${worst80.toFixed(3)}..${worstPeak.toFixed(3)} m`);
+  expect('[recoil] the muzzle kicks UP (3 deg barrel kick lifts the muzzle at 80 ms)', worstRise > 0.04 && SM.RECOIL_KICK_RAD > 2.5 * DEG && SM.RECOIL_KICK_RAD < 3.5 * DEG,
+    `muzzle +${worstRise.toFixed(3)} m, kick ${(SM.RECOIL_KICK_RAD / DEG).toFixed(2)} deg`);
+  expect('[recoil] run out over ~1.2 s: still back at 0.68 s, home by 1.6 s', worstMid > 0.1 && worstEnd < 0.005,
+    `mid ${worstMid.toFixed(3)} m, end ${worstEnd.toFixed(4)} m`);
+  expect('[lid] the gunport lid is open on the fire edge (and stays open through the recoil)', Math.abs(worstLid - KIT.GUNPORT_LID_OPEN) < 1e-9,
+    `lid ${worstLid.toFixed(3)} rad`);
+  const head = drive(gunRig(1, 0), headFrozen, [0.08]);
+  const inv = drive(gunRig(1, 0), inverted, [0.04, 0.08]);
+  expect('[recoil] negative controls fail the predicate (HEAD frozen gun, recoil along +barrel)', !recoilOk(head) && !recoilOk(inv),
+    `HEAD ${head[0.08].along.toFixed(3)} m, inverted ${inv[0.08].along.toFixed(3)} m`);
+
+  // [lid] the kit instances: shut on a quiet hull, open while manned, open on
+  // the shot, shut again after the hold; the open pose is the kit's own mount.
+  const lidGeo = new THREE.BoxGeometry(0.6, 0.5, 0.05).translate(0, -0.25, 0); // hangs from the hinge
+  const scene = new THREE.Group();
+  const port = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.6, 0.05)); port.name = 'gunport'; scene.add(port);
+  const lidNode = new THREE.Mesh(lidGeo); lidNode.name = 'gunport_lid'; lidNode.position.set(0, 0.28, 0.02); scene.add(lidNode);
+  const srcStub = { has: () => true, source: () => ({ scene }) };
+  const ports = KIT.shipKitSockets('brigantine').filter((s) => s.part === 'gunport');
+  const kitRoot = KIT.mountShipKit(ports, srcStub, null);
+  const lidIm = kitRoot?.getObjectByName('kit-gunport_lid');
+  const mounted = lidIm ? Array.from({ length: lidIm.count }, (_, i) => { const m = new THREE.Matrix4(); lidIm.getMatrixAt(i, m); return m; }) : [];
+  const motion = new SM.ShipMotion(); motion.bindLids([kitRoot]);
+  const lidCentre = (i) => { const m = new THREE.Matrix4(); lidIm.getMatrixAt(i, m); return V(0, -0.25, 0).applyMatrix4(m); };
+  const outOf = (i) => V(...ports[i].out);
+  const cds = ports.map(() => 0); let t = 50; const dt = 1 / 60; let manned = -1;
+  const run = (secs) => { for (let k = 0; k < Math.round(secs / dt); k++) { t += dt; motion.update(cds, (i) => i === manned, t, dt); } };
+  run(1);
+  const shut = lidCentre(0);
+  const quietShut = ports.every((_, i) => motion.lidAngle(i) === 0);
+  manned = 1; run(0.4);
+  const mannedOpen = motion.lidAngle(1) === KIT.GUNPORT_LID_OPEN && motion.lidAngle(0) === 0;
+  cds[0] = SHIP.CANNON_RELOAD; t += dt; motion.update(cds, (i) => i === manned, t, dt); // gun 0 fires unmanned (a bot's last shot)
+  const m0 = new THREE.Matrix4(); lidIm?.getMatrixAt(0, m0);
+  const openAtEdge = motion.lidAngle(0) === KIT.GUNPORT_LID_OPEN && mounted.length > 0 && m0.elements.every((e, k) => Math.abs(e - mounted[0].elements[k]) < 1e-6);
+  const swing = lidCentre(0).sub(shut).dot(outOf(0));
+  manned = -1; run(SM.LID_HOLD_S + SM.LID_CLOSE_S + 0.3);
+  const closedAgain = motion.lidAngle(0) === 0 && motion.lidAngle(1) === 0;
+  expect('[lid] kit lid instances carry hinge frames (one per gunport)', !!lidIm && lidIm.userData[KIT.KIT_HINGE]?.pre.length === ports.length && ports.length >= 2,
+    `${ports.length} ports`);
+  expect('[lid] shut on a quiet hull, open within 0.4 s on a manned gun', quietShut && mannedOpen);
+  expect('[lid] open on the fire edge = the kit mount pose, swung OUTBOARD', openAtEdge && swing > 0.1, `outboard swing ${swing.toFixed(3)} m`);
+  expect(`[lid] shut again after ${SM.LID_HOLD_S} s unmanned`, closedAgain);
+
+  // [capstan] cable-driven: still at rest, + on the raise, - on the drop.
+  function capstanRun(stepFn) {
+    let anchored = false, p = 0; const om = { rest: [], drop: [], settled: [], raise: [], done: [] };
+    const dt = 1 / 60; let tick = 0;
+    const go = (secs, key, f) => { for (let k = 0; k < Math.round(secs / dt); k++) { f?.(k * dt); om[key].push(stepFn(anchored, p, dt) / dt); } };
+    go(2, 'rest');
+    anchored = true; go(1.0, 'drop');
+    go(3, 'settled');
+    go(3.2, 'raise', (s) => { tick += dt; if (tick >= 0.05) { tick = 0; p = Math.min(1, s / 3.2); } }); // 20 Hz server ticks
+    anchored = false; p = 0; go(3, 'done');
+    return om;
+  }
+  const mean = (a) => a.reduce((x, y) => x + y, 0) / Math.max(1, a.length);
+  const maxAbsTail = (a) => Math.max(...a.slice(-30).map(Math.abs));
+  const ok = (om) => maxAbsTail(om.rest) < 1e-6 && Math.sign(mean(om.raise)) === -Math.sign(mean(om.drop)) && mean(om.raise) > 0
+    && maxAbsTail(om.settled) < 1e-3 && maxAbsTail(om.done) < 1e-3;
+  const cap = new SM.CapstanMotion();
+  const shippedCap = capstanRun((a, p, dt) => cap.step(a, p, dt));
+  const headCap = capstanRun((a, p, dt) => dt * (a && p > 0 ? 3.6 + p * 4.8 : 0.08));
+  expect('[capstan] 0 at rest (before the drop, after it settles, after the raise)', maxAbsTail(shippedCap.rest) < 1e-6 && maxAbsTail(shippedCap.settled) < 1e-3 && maxAbsTail(shippedCap.done) < 1e-3,
+    `rest ${maxAbsTail(shippedCap.rest).toExponential(1)}, settled ${maxAbsTail(shippedCap.settled).toExponential(1)}, done ${maxAbsTail(shippedCap.done).toExponential(1)} rad/s`);
+  expect('[capstan] sign(raise) = -sign(drop), raise turns +Y (the pinned hardware sign)', mean(shippedCap.raise) > 0 && mean(shippedCap.drop) < 0,
+    `raise ${mean(shippedCap.raise).toFixed(2)} rad/s, drop ${mean(shippedCap.drop).toFixed(2)} rad/s`);
+  const turnsRaise = mean(shippedCap.raise) * 3.2 / (2 * Math.PI);
+  expect('[capstan] the drop spins fastest at the let-go and decays (pays out the raise turns)', Math.abs(shippedCap.drop[12]) > 1.4 * Math.abs(shippedCap.drop[54]) && turnsRaise > 2 && turnsRaise < 4,
+    `drop ${shippedCap.drop[12].toFixed(1)} (0.2 s) -> ${shippedCap.drop[54].toFixed(1)} (0.9 s) rad/s, raise ${turnsRaise.toFixed(2)} turns`);
+  expect('[capstan] negative control: HEAD formula (idle creep, drop same sign as raise) fails', !ok(headCap) && ok(shippedCap),
+    `HEAD rest ${maxAbsTail(headCap.rest).toFixed(3)} rad/s, HEAD drop ${mean(headCap.drop).toFixed(3)} rad/s`);
+
+  // [wheel] 63% of a rudder step in 0.1-0.2 s at 60 fps.
+  let w = 0, tw = 0; while (w < 1 - Math.exp(-1) && tw < 2) { w += (1 - w) * SM.wheelFollowAlpha(1 / 60); tw += 1 / 60; }
+  expect('[wheel] the wheel lags the rudder by 0.1-0.2 s (inertia without hiding the helm)', tw >= 0.1 - 1e-9 && tw <= 0.2 + 1 / 60,
+    `63% in ${(tw * 1000).toFixed(0)} ms (tau ${SM.WHEEL_TAU_S} s)`);
+
+  // [wiring] the renderer calls it.
+  const sr = src('src/client/rendering/ShipRenderer.ts');
+  expect('[wiring] ShipRenderer drives recoil, lids, capstan and wheel through ship/shipMotion.ts',
+    /objMotion\.update\(ship\.cannonCooldowns/.test(sr) && /objMotion\.aimGun\(/.test(sr) && /capstan\.step\(ship\.anchored/.test(sr)
+    && /wheelFollowAlpha\(dt\)/.test(sr) && /bindLids\(\[root, lod1, lod2\]\)/.test(sr) && !/anchorCapstan\.rotation\.y \+= dt \* 0\.08/.test(sr));
+}
+
 const ms = performance.now() - t0;
 console.log(`\n${checks - failures}/${checks} checks, ${ms.toFixed(0)} ms`);
 if (failures) { console.error(`FAIL: ${failures} inversion check(s)`); process.exit(1); }
-console.log('PASS: nothing inverted (wheel, flag, foliage, heel, head pitch, new-skeleton knees/elbows/head on 3 bodies, low-tier e2e, viewmodel recoil/ribbon/draw, deck roll, head bob, landing dip, spyglass sway, stick/touch look + invert-Y, sail belly)');
+console.log('PASS: nothing inverted (wheel, flag, foliage, heel, head pitch, new-skeleton knees/elbows/head on 3 bodies, low-tier e2e, viewmodel recoil/ribbon/draw, deck roll, head bob, landing dip, spyglass sway, stick/touch look + invert-Y, sail belly, ship recoil/lids/capstan/wheel)');
