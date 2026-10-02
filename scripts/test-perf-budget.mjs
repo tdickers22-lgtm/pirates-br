@@ -128,6 +128,15 @@ const MUTATE_DROP_SCENE = process.env.PIRATES_BR_MUTATE_DROP_SCENE ?? '';
  *  (or --mutate-shadow) puts the shadow proxy in 'lod0' mode, so every caster
  *  renders its LOD0 (near) geometry into the depth map whatever it displays:
  *  LOD0 casting everywhere. The share row and the policy-saving row must FAIL. */
+/** MUTATION KNOB for the island HLOD (b4.4a): `--mutate-hlod` (or
+ *  PIRATES_BR_MUTATE_HLOD=1) opens every session with `?hlod=off`, which builds
+ *  every island without sectors or cross-piece merging (the pre-HLOD world).
+ *  The tightened dock-vista / island-interior / device rows must FAIL under it. */
+const MUTATE_HLOD = process.env.PIRATES_BR_MUTATE_HLOD === '1' || process.argv.includes('--mutate-hlod');
+/** Iteration filter, never a verdict: PIRATES_PERF_SCENES=dock-vista,island-interior
+ *  measures only those rows; every other row counts as UNGRADED, so the
+ *  "all scenes graded" line fails and a filtered run can never pass. */
+const SCENE_FILTER = process.env.PIRATES_PERF_SCENES ? process.env.PIRATES_PERF_SCENES.split(',') : null;
 const MUTATE_SHADOW_LOD0 = process.env.PIRATES_BR_MUTATE_SHADOW_LOD0 === '1' || process.argv.includes('--mutate-shadow');
 
 /**
@@ -316,8 +325,9 @@ async function measureTier(browser, quality, { wantWreck }) {
   const results = {};
   const query = profile
     // fps=uncapped: the phone pacer (30 fps) must not thin the capture window.
-    ? sessionQuery(deviceQuery(['debug', 'fps=uncapped'], MUTATE_DEVICE_TIER))
-    : sessionQuery(['debug', `quality=${quality}`]);
+    ? sessionQuery([...deviceQuery(['debug', 'fps=uncapped'], MUTATE_DEVICE_TIER), ...(MUTATE_HLOD ? ['hlod=off'] : [])])
+    : sessionQuery(['debug', `quality=${quality}`, ...(MUTATE_HLOD ? ['hlod=off'] : [])]);
+  if (MUTATE_HLOD) console.log(`  [${quality}] [MUTATED: ?hlod=off, islands built without HLOD sectors]`);
   if (profile) console.log(`  [${quality}] ${profile.label}${MUTATE_DEVICE_TIER ? `  [MUTATED: ?quality=${MUTATE_DEVICE_TIER}]` : ''}`);
   try {
     await page.goto(
@@ -359,6 +369,11 @@ async function measureTier(browser, quality, { wantWreck }) {
     let graded = 0;
     const skipped = [];
     for (const budget of BUDGETS[quality]) {
+      if (SCENE_FILTER && !SCENE_FILTER.includes(budget.scene)) {
+        console.log(`  – ${budget.scene}: FILTERED by PIRATES_PERF_SCENES (ungraded)`);
+        skipped.push(budget.scene);
+        continue;
+      }
       if (!plan[budget.scene]) {
         console.log(`  – ${budget.scene}: no placement in this world, skipped`);
         skipped.push(budget.scene);

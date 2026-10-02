@@ -173,6 +173,10 @@ export const TALLY_DRAW_SOURCES = () => {
       const n = c.name;
       if (!n) continue;
       if (n === 'island-micro-root') return 'island-micro';
+      // b4.4a HLOD: a sector's merged tiers, rolled up by tier rather than by sector.
+      if (n.startsWith('island-hlod-near')) return 'island-hlod-near';
+      if (n.startsWith('island-hlod-mid')) return 'island-hlod-mid';
+      if (n.startsWith('island-hlod-landmarks')) return 'island-hlod-landmarks';
       if (n.startsWith('island-') && n !== 'island-detail-root') return n;
       if (n.startsWith('decor-')) return 'island-decor';
       if (n.startsWith('waterfall-')) return 'waterfall';
