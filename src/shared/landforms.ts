@@ -222,6 +222,66 @@ export const LANDFORM_ROSTER: Readonly<Record<string, readonly Landform[]>> = Ob
     { id: 'kraken-fang-east', kind: 'headland', path: [[30, 30], [34, 34]], crestBaseY: 49, crestTipY: 45, topHalfWidth: 1.5, sideSlope: 2.4 },
     { id: 'kraken-arch', kind: 'arch_site', center: [-67, 67], radius: 7, heading: 2.36 },
   ],
+
+  // b4.4f: authored relief for four dome islands (islands-01, PLAN 3.14 table).
+  // Smuggler's Rest: a limestone scarp splits the tavern beach (south, -z)
+  // from the jungle interior (raised side +z; the path ends taper into the two
+  // walk-up ramps, the cache pad at (4, -22) sits east of the face), a stream
+  // valley from an interior spring out to the north-east grotto cove, and a
+  // dune field on the white-sand west arc.
+  'smuggler-s-rest': [
+    { id: 'smuggler-scarp', kind: 'scarp', path: [[-50, -34], [-6, -32]], height: 10, face: 2, reach: 36, taper: 10 },
+    {
+      id: 'smuggler-spring-valley', kind: 'valley', path: [[-6, 22], [20, 34], [52, 52]],
+      bedHeadY: 11, bedMouthY: -0.5, floorWidth: 3, topWidth: 16, wallSlope: 1.2,
+    },
+    { id: 'smuggler-dunes', kind: 'dune_field', path: [[-88, -18], [-88, 18]], width: 12, amplitude: 1.2, wavelength: 8 },
+  ],
+  // Rumrunner Key: a 7 m windward bluff on the east shore (inland side raised,
+  // the face drops to the seaward bench), a freshwater pond behind the west
+  // dunes, and the still-grove stream past the rum still pad (4, -21) to the
+  // south shore. The lee mangrove fringe is flora (b4.6).
+  'rumrunner-key': [
+    { id: 'rumrunner-bluff', kind: 'scarp', path: [[37, -28], [37, 28]], height: 7, face: 2, reach: 30, taper: 8 },
+    { id: 'rumrunner-pond', kind: 'basin', center: [-30, 0], radius: 7, spillY: 5, depth: 1.5, flat: 0.45 },
+    { id: 'rumrunner-dunes', kind: 'dune_field', path: [[-44, -16], [-44, 16]], width: 8, amplitude: 1.0, wavelength: 7 },
+    {
+      id: 'rumrunner-still-stream', kind: 'valley', path: [[14, -12], [14, -30], [8, -58]],
+      bedHeadY: 7.5, bedMouthY: -0.3, floorWidth: 2.5, topWidth: 12, wallSlope: 1.1,
+    },
+  ],
+  // Mermaid's Folly: a 6 m scarp lifts the summit ridge over the dock slope,
+  // a stream valley runs from the ridge into the lagoon, a tide-pool shelf sits
+  // below the shrine (stamp at (-9, 58) stays authoritative), and the sea-arch
+  // site spans the bay mouth (the arch mesh is the cliff kit's, b4.5).
+  'mermaid-s-folly': [
+    { id: 'mermaid-ridge-scarp', kind: 'scarp', path: [[-16, -36], [30, -36]], height: 6, face: 2, reach: 30, taper: 10 },
+    {
+      id: 'mermaid-lagoon-stream', kind: 'valley', path: [[30, -16], [12, 14], [2, 30]],
+      bedHeadY: 9, bedMouthY: -0.4, floorWidth: 2.5, topWidth: 14, wallSlope: 1.1,
+    },
+    { id: 'mermaid-shrine-shelf', kind: 'rock_shelf', center: [-20, 66], radius: 6, y: 0.5 },
+    { id: 'mermaid-bay-arch', kind: 'arch_site', center: [-6, 60], radius: 8, heading: 1.57 },
+  ],
+  // Castaway Reach: a central plateau east of the cave network (mesa top 26 m
+  // over 11-13 m ground: a 14-15 m cliff; one ramp toward the dock, one ladder
+  // site on the west face), the river off the plateau foot (the falls drop off
+  // the cliff into its head) to the south-east shore, the fort headland (the
+  // ground north of the fort pad is cut 7 m: the fort stands on a scarp), a
+  // 6 m seaward bluff on the east shore, and a pond in the northern lowland.
+  'castaway-reach': [
+    {
+      id: 'castaway-plateau', kind: 'mesa', center: [30, -8], radius: 18, topY: 26, face: 3,
+      ramps: [{ angle: 0.83, halfWidth: 3, run: 44 }], ladders: [Math.PI],
+    },
+    {
+      id: 'castaway-river', kind: 'gorge', path: [[46, -14], [70, -30], [96, -46]],
+      bedHeadY: 7, bedMouthY: -0.4, floorWidth: 4, topWidth: 18, wallSlope: 2.4,
+    },
+    { id: 'castaway-fort-scarp', kind: 'scarp', path: [[50, 30], [2, 30]], height: 7, face: 2, reach: 16, taper: 8, mode: 'cut' },
+    { id: 'castaway-east-bluff', kind: 'scarp', path: [[92, -26], [88, 16]], height: 6, face: 2, reach: 22, taper: 8 },
+    { id: 'castaway-pond', kind: 'basin', center: [0, 64], radius: 8, spillY: 7, depth: 1.8, flat: 0.45 },
+  ],
 });
 
 // ── math (local: utils/index.ts imports this module) ─────────────────────────

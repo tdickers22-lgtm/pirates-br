@@ -263,6 +263,12 @@ expect('roster keys are real island ids', Object.keys(LANDFORM_ROSTER).every((k)
   expect('evaluation is deterministic', !!a && a.every((v, i) => v === b[i]));
 }
 
+// b4.4f RED proof: --mutate=b44f-off clears the four b4.4f islands' records
+// before Part B, so their rows (and Part F) fall back to the dome surface.
+const B44F_IDS = ['smuggler-s-rest', 'rumrunner-key', 'mermaid-s-folly', 'castaway-reach'];
+const B44F_OFF = process.argv.includes('--mutate=b44f-off');
+if (B44F_OFF) for (const id of B44F_IDS) overrideIslandLandforms(byId(id), []);
+
 // ── Part B: the D-table, report mode ─────────────────────────────────────────
 console.log(`\nPart B: PLAN 3.14 relief table (${ENFORCE ? 'ENFORCED' : 'REPORT mode, enforced in b4.4h'})`);
 const STEP_KINDS = new Set(['scarp', 'mesa', 'terrace_run', 'caldera', 'headland']);
@@ -631,6 +637,90 @@ for (const r of archRows) expect(`${r.id}: islet sand ring + dry 1:12 cays`, r.a
     expect('no global terracing: riser/tread slope ratio < 1.3 on every record-free island', worst.r < 1.3, `worst ${worst.id} ${worst.r.toFixed(2)}`);
   }
   if (MUT === 'archetypes-off') for (const isl of [om, pp, kt]) overrideIslandLandforms(isl, null);
+}
+
+// ── Part F: authored relief, first four dome islands (b4.4f, islands-01), ENFORCED
+// Their Part B rows clear the D-table (the report-mode rule applied to these
+// four now), and each island's named intent is measured on the served surface:
+//   Smuggler's Rest: an 8-12 m scarp between the tavern beach and the interior,
+//     a spring stream monotone to the sea, a dune field on the west arc.
+//   Rumrunner Key: a 6-10 m windward bluff, a pond that holds water, the
+//     still-grove stream monotone to the sea, dunes.
+//   Mermaid's Folly: a stream monotone into the lagoon, a tide-pool shelf at
+//     0.3-0.8 m below the shrine, a bay-mouth arch site.
+//   Castaway Reach: a plateau cliff >= 12 m (median ring drop), the river
+//     monotone to the sea, the fort scarp >= 5 m, a pond that holds water.
+// --mutate=b44f-off (records cleared before Part B) must FAIL this part.
+{
+  console.log(`\nPart F: authored relief for Smuggler's Rest, Rumrunner Key, Mermaid's Folly, Castaway Reach (enforced)${B44F_OFF ? ' [mutate=b44f-off]' : ''}`);
+  for (const id of B44F_IDS) {
+    const row = rows.find((r) => r.id === id);
+    expect(`${id} clears the PLAN 3.14 D-table row`, row && row.misses.length === 0, row ? (row.misses.join('; ') || `>35 ${row.p35.toFixed(1)}% >60 ${row.p60.toFixed(2)}% peak ${row.peak.toFixed(1)} kinds ${row.kinds} tiers ${row.tiers}`) : 'no row');
+  }
+  const rec = (isl, rid) => getIslandLandforms(isl).find((r) => r.id === rid);
+  // Measured step across a straight scarp: +-4 m either side of its midpoint.
+  const scarpDrop = (isl, r) => {
+    if (!r) return 0;
+    const [a, b] = [r.path[0], r.path[r.path.length - 1]];
+    const mx = (a[0] + b[0]) / 2, mz = (a[1] + b[1]) / 2, dx = b[0] - a[0], dz = b[1] - a[1], L = Math.hypot(dx, dz);
+    return Math.abs(Y(isl, mx - dz / L * 4, mz + dx / L * 4) - Y(isl, mx + dz / L * 4, mz - dx / L * 4));
+  };
+  // Stream bed along the centreline: worst rise toward the mouth, mouth height.
+  const bed = (isl, r) => {
+    if (!r) return { rise: Infinity, mouth: Infinity, depth: 0 };
+    let prev = Infinity, rise = 0, depth = 0, last = Infinity;
+    for (let k = 0; k + 1 < r.path.length; k++) {
+      const [a, b] = [r.path[k], r.path[k + 1]], L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      for (let t = 0; t <= L; t += 1) {
+        const lx = a[0] + (b[0] - a[0]) * t / L, lz = a[1] + (b[1] - a[1]) * t / L, y = Y(isl, lx, lz);
+        if (y > 0.3) rise = Math.max(rise, y - prev);
+        prev = Math.min(prev, y); last = y;
+        const n = [(b[1] - a[1]) / L, -(b[0] - a[0]) / L];
+        depth = Math.max(depth, Math.min(Y(isl, lx + n[0] * r.topWidth / 2, lz + n[1] * r.topWidth / 2), Y(isl, lx - n[0] * r.topWidth / 2, lz - n[1] * r.topWidth / 2)) - y);
+      }
+    }
+    return { rise, mouth: last, depth };
+  };
+  // Pond holds: every rim ray (radius + 1.5 m) stays >= spillY + 0.2.
+  const holds = (isl, r) => {
+    if (!r) return -Infinity;
+    let lo = Infinity;
+    for (let a = 0; a < 48; a++) lo = Math.min(lo, Y(isl, r.center[0] + Math.cos(a / 48 * Math.PI * 2) * (r.radius + 1.5), r.center[1] + Math.sin(a / 48 * Math.PI * 2) * (r.radius + 1.5)));
+    return lo - r.spillY;
+  };
+  const streamRow = (isl, rid) => {
+    const b = bed(isl, rec(isl, rid));
+    expect(`${rid}: bed monotone to the sea (rise <= 0.05 m, mouth <= 0.3 m), cut >= 1.5 m`, b.rise <= 0.05 && b.mouth <= 0.3 && b.depth >= 1.5, `rise ${b.rise.toFixed(2)} m, mouth ${b.mouth.toFixed(2)} m, deepest cut ${b.depth.toFixed(1)} m`);
+  };
+  const sm = byId('smuggler-s-rest'), rk = byId('rumrunner-key'), mf = byId('mermaid-s-folly'), cr = byId('castaway-reach');
+  const smDrop = scarpDrop(sm, rec(sm, 'smuggler-scarp'));
+  expect("smuggler-s-rest: tavern-beach scarp 8-12 m", smDrop >= 8 && smDrop <= 12, `${smDrop.toFixed(1)} m`);
+  streamRow(sm, 'smuggler-spring-valley');
+  expect('smuggler-s-rest: dune field on the west arc', !!rec(sm, 'smuggler-dunes'));
+  const rkDrop = scarpDrop(rk, rec(rk, 'rumrunner-bluff'));
+  expect('rumrunner-key: windward bluff 6-10 m', rkDrop >= 6 && rkDrop <= 10, `${rkDrop.toFixed(1)} m`);
+  const rkPond = holds(rk, rec(rk, 'rumrunner-pond'));
+  expect('rumrunner-key: pond rim >= spillY + 0.2 all round', rkPond >= 0.2, `${rkPond.toFixed(2)} m`);
+  streamRow(rk, 'rumrunner-still-stream');
+  streamRow(mf, 'mermaid-lagoon-stream');
+  const shelf = rec(mf, 'mermaid-shrine-shelf');
+  const shelfY = shelf ? Y(mf, shelf.center[0], shelf.center[1]) : NaN;
+  expect("mermaid-s-folly: tide-pool shelf at 0.3-0.8 m", shelfY >= 0.3 && shelfY <= 0.8, `${shelfY.toFixed(2)} m`);
+  expect("mermaid-s-folly: bay-mouth arch site", getIslandLandforms(mf).some((r) => r.kind === 'arch_site'));
+  const mesa = rec(cr, 'castaway-plateau');
+  const ring = [];
+  if (mesa) for (let a = 0; a < 32; a++) {
+    const c = Math.cos(a / 32 * Math.PI * 2), s = Math.sin(a / 32 * Math.PI * 2);
+    ring.push(Y(cr, mesa.center[0] + c * (mesa.radius - 4), mesa.center[1] + s * (mesa.radius - 4)) - Y(cr, mesa.center[0] + c * (mesa.radius + 4), mesa.center[1] + s * (mesa.radius + 4)));
+  }
+  ring.sort((p, q) => p - q);
+  const med = ring.length ? ring[ring.length >> 1] : 0;
+  expect('castaway-reach: plateau cliff median ring drop >= 12 m', med >= 12, `${med.toFixed(1)} m`);
+  streamRow(cr, 'castaway-river');
+  const fort = scarpDrop(cr, rec(cr, 'castaway-fort-scarp'));
+  expect('castaway-reach: fort headland scarp >= 5 m', fort >= 5, `${fort.toFixed(1)} m`);
+  const crPond = holds(cr, rec(cr, 'castaway-pond'));
+  expect('castaway-reach: pond rim >= spillY + 0.2 all round', crPond >= 0.2, `${crPond.toFixed(2)} m`);
 }
 
 console.log(`\n${passes} passed, ${fails} failed`);
