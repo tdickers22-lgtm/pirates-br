@@ -320,6 +320,7 @@ async function measureTier(browser, quality, { wantWreck }) {
     ? await newDeviceContext(browser, profile)
     : await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 1 });
   const page = await context.newPage();
+  let hlodReported = false;
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   const results = {};
@@ -385,6 +386,26 @@ async function measureTier(browser, quality, { wantWreck }) {
       // settle: true — see the header. A count taken mid-reveal is a lie.
       const r = await measureScene(page, plan[budget.scene], { warmupMs: 2500, captureMs: 3000, settle: true });
       const sources = await page.evaluate(TALLY_DRAW_SOURCES).catch(() => []);
+      if (!hlodReported) {
+        // b4.4a: what the island HLOD built this session, summed over islands
+        // (sectors, merged pieces, lifted lights, baked far tris, refusals).
+        hlodReported = true;
+        const hs = await page.evaluate(() => {
+          const sum = { islands: 0, sectors: 0, pieces: 0, near: 0, mid: 0, landmarks: 0, lights: 0, farTris: 0, refused: {} };
+          window.__piratesBR?.renderer?.scene?.traverse((o) => {
+            const st = o.userData?.hlodStats;
+            if (!st) return;
+            sum.islands += 1;
+            for (const k of ['sectors', 'pieces', 'near', 'mid', 'landmarks', 'lights', 'farTris']) sum[k] += st[k] ?? 0;
+            for (const [k, v] of Object.entries(st.refused ?? {})) sum.refused[k] = (sum.refused[k] ?? 0) + v;
+          });
+          return sum;
+        }).catch(() => null);
+        if (hs) {
+          const top = Object.entries(hs.refused).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([k, v]) => `${k}=${v}`).join('  ');
+          console.log(`      hlod: ${hs.islands} islands, ${hs.sectors} sectors, ${hs.pieces} pieces (near ${hs.near}, mid ${hs.mid}, landmarks ${hs.landmarks}), ${hs.lights} lights lifted, far ${hs.farTris} tris; refused: ${top || 'none'}`);
+        }
+      }
       results[budget.scene] = { draws: Math.round(r.draws), tris: Math.round(r.tris), peakDraws: r.peakDraws, programs: r.programs, sources };
       report(quality, budget, results[budget.scene], r);
       const shadowShare = SHADOW_PASS_MAX_SHARE[quality];

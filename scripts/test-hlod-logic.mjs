@@ -121,6 +121,8 @@ const camAt = (x, y, z) => {
   root.add(lantern);
   const tagged = piece(4); tagged.name = 'decor-tagged'; tagged.userData.someSystem = 1; tagged.position.set(-40, 0, 0);
   root.add(tagged);
+  const glbProp = piece(2); glbProp.name = 'prop-lantern_post'; glbProp.userData.assetFamily = 'props'; glbProp.position.set(20, 0, 30);
+  root.add(glbProp);
   for (let i = 0; i < 12; i++) {
     const p = piece(1, 0x445566); const a = (i / 12) * Math.PI * 2;
     p.position.set(Math.cos(a) * 60, 0, Math.sin(a) * 60);
@@ -140,6 +142,7 @@ const camAt = (x, y, z) => {
   check(lantern.parent !== root && lantern.parent?.parent?.name?.startsWith('island-hlod-sector'), 'lantern piece joined a sector');
   check(stats.refused['decor-tagged:userData.someSystem'] === 1 && tagged.parent === root, 'userData piece refused, counted, left in place');
   check(stats.landmarks === 1, 'the 12 m piece is a landmark');
+  check(glbProp.parent !== root && !stats.refused['prop-lantern_post:userData.assetFamily'], 'an AssetLibrary prop (userData.assetFamily only) joins a sector');
   const sw = root.children[0];
   check(sw?.name === 'island-hlod-far-switch', `far switch is the detail root's FIRST child (got ${sw?.name})`);
   check(terrain.parent?.name === 'island-hlod-terrain-full', 'terrain sits behind the switch');

@@ -47,6 +47,7 @@ export const MID_KEEP_SIZE = 3.6;
 /** Pieces at least this big are landmarks: never sectorised, always drawn with the island. */
 export const FAR_KEEP_SIZE = 9;
 
+const HARMLESS_USERDATA: ReadonlySet<string> = new Set(['assetFamily']);
 const KEEP_NAMES = new Set(['island-terrain', 'island-shore-skirt', 'island-micro-root']);
 
 let resolvedBands: HlodBands | null = null;
@@ -164,8 +165,13 @@ function refusal(piece: THREE.Object3D, skip: ReadonlySet<THREE.Object3D>): stri
     if ((o as THREE.Light).isLight && !(o as THREE.PointLight).isPointLight) why = 'light';
     else if ((o as THREE.InstancedMesh).isInstancedMesh) why = 'instanced';
     else if ((o as THREE.SkinnedMesh).isSkinnedMesh) why = 'skinned';
-    else if (o.userData && Object.keys(o.userData).length > 0) why = `userData.${Object.keys(o.userData)[0]}`;
-    else if (o !== piece && ADDRESSED_NAMES.has(o.name)) why = 'addressed-child';
+    else {
+      // `assetFamily` is AssetLibrary's memory-accounting tag; the budget reads
+      // it off the TEXTURE (kept by the merge), so it never pins a piece.
+      const keys = o.userData ? Object.keys(o.userData).filter((k) => !HARMLESS_USERDATA.has(k)) : [];
+      if (keys.length > 0) why = `userData.${keys[0]}`;
+      else if (o !== piece && ADDRESSED_NAMES.has(o.name)) why = 'addressed-child';
+    }
   });
   return why;
 }
