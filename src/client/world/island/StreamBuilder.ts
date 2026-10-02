@@ -163,11 +163,20 @@ function sweepStream(
     for (const a of ACROSS) {
       const side = a < 0 ? 0 : 1;
       const wa = bank.w[side];
-      let aer = THREE.MathUtils.clamp(grade * 3.2, 0, 0.85) + bend * 0.35 * (0.5 + 0.5 * Math.abs(a)) + 0.08;
+      let aer = THREE.MathUtils.clamp(grade * 3.2, 0, 0.85) + bend * 0.35 * (0.5 + 0.5 * Math.abs(a));
+      let rockFoam = 0;
       for (const r of rocks) {
         const ds = (u - r.u) * s.length, da = (a - r.a) * wa;
-        aer += 0.75 * Math.exp(-(ds * ds + da * da) / 2.2);
+        rockFoam += 0.75 * Math.exp(-(ds * ds + da * da) / 2.2);
       }
+      aer += rockFoam;
+      // b4.7a3: calm reaches read as clear water, not a white ribbon. The fall
+      // program's flow foam has a ~0.3 floor from its streak noise alone (live
+      // run 4: Smuggler's valley drew as one solid white strip from 40 m), so
+      // a calm reach leans on the still-water branch (slow drifting rafts,
+      // mostly clear) and only rapids and the water round a rock run white.
+      const calm = (1 - THREE.MathUtils.smoothstep(grade, 0.02, 0.09)) * (1 - Math.min(1, rockFoam * 1.6));
+      const still = 0.7 * calm * (1 - delta);
       aer = Math.min(1, aer + delta * 0.25);
       const alpha = last ? 0 : 1 - delta * 0.55;
       const vx = p.x - p.dz * a * wa, vz = p.z + p.dx * a * wa;
@@ -178,7 +187,7 @@ function sweepStream(
       // 1.13, Rumrunner/Smuggler 0.64, all on the head row). The spring wells
       // out of the ground instead, so the head row lies on it.
       if (head) vy = Math.min(vy, ground(vx, vz) + 0.03);
-      row.push(sink.vert(vx, vy, vz, a, u * s.length, aer, 0, 6, (bank.w[0] + bank.w[1]) / 2, alpha));
+      row.push(sink.vert(vx, vy, vz, a, u * s.length, aer, still, 6, (bank.w[0] + bank.w[1]) / 2, alpha));
     }
     if (prevRow) for (let j = 0; j + 1 < row.length; j++) sink.quad(prevRow[j], prevRow[j + 1], row[j + 1], row[j]);
     prevRow = row;
