@@ -832,6 +832,17 @@ export function buildCaves(ctx: IslandBuildCtx) {
           registerBudgetLight(torchLight);
           caveGroup.add(torchLight);
         }
+        // Mouth sconce on the opposite wall (liveplay-11): the entrance reads
+        // as a lit threshold, not a dark box. Mesh only (emissive flame), no
+        // new light, so the light count and material links are unchanged.
+        const mouthSeat = siteDecor(-torchSide * decorMinLx, -Math.min(1.6, cLen * 0.18), ch * 0.55);
+        if (mouthSeat) {
+          const mouthTorch = new THREE.Mesh(torchKit.geometry, torchKit.material);
+          mouthTorch.name = 'cave-mouth-torch';
+          mouthTorch.position.set(-torchSide * decorMinLx, mouthSeat.y - 0.82, mouthSeat.z);
+          mouthTorch.rotation.y = -torch.rotation.y;
+          caveGroup.add(mouthTorch);
+        }
       }
       // Sparse glowing crystals deeper in — cool emissive veins with a faint
       // light each, so the tunnel reads as lit but moody, not a flat box.
