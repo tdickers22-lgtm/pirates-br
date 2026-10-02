@@ -44,11 +44,12 @@ import { releaseShipGeometry } from './ship/geometry.js';
 import { selectShipLod, shipLodKey, SHIP_LOD_BANDS, SHIP_LOD_HYSTERESIS, type ShipLodLevel } from './ship/lod.js';
 import { buildRudder, buildSternCastle } from './ship/stern.js';
 import { buildRig } from './ship/sails.js';
+import { deckKitSockets, kitDrawCount, mountShipKit, shipKitSockets, SHIP_KIT_FILES, type KitSocket, type ShipKitFile, type ShipKitSource } from './ship/kit.js';
 import { SAIL_BELLY, SAIL_CLOTH_GRID, makeLodSailCard, sailFillTarget, sailLuff01, sailWind01, setSailClothUniforms, stepSailFill, type SailClothUniforms } from './ship/sailCloth.js';
 import { applyRiggingLod, updateRigging, type Rigging, type RiggingSet } from './ship/rigging.js';
 import { buildWakeSurface, writeWakeSurface, setArmsVisible, makeWakeFrame, ARM_FACTOR_FLOOR, buildWaterlineCollar, seatWaterlineCollar, type WakeSurface, type WakeFrame } from './ship/wake.js';
 import { makeLoftedSlabGeometry, makeSheerRunGeometry, sheerHalfWidthAt, sheerZRange, makeHullStrakeGeometry, makeSplineHullGeometry, makeStairRampGeometry, makeWaterlineFoamTexture, mergeStaticMeshes, bakeVertexColorMerge, NO_MERGE_EXCLUDE } from './ship/geometry.js';
-import { applyFlagWave, FLAG_DROP, FLAG_FLY, flagPhaseFromId, flagTexture, makeBarrel, makeCylinderBetween, makeFigurehead, makeHatchGrating, makeLanternFixture, makeRopeCoil } from './ship/dressing.js';
+import { applyFlagWave, FLAG_DROP, FLAG_FLY, flagPhaseFromId, flagTexture, makeBarrel, makeCylinderBetween, makeHatchGrating, makeLanternFixture, makeRopeCoil } from './ship/dressing.js';
 import type { FlagUniforms, ShipFlag } from './ship/dressing.js';
 import {
   BILGE_BOARD_LEN_F, bilgeBoardInboardFaceAt, holdCeilingHalfAt, holdLockerTopY, HOLD_FLOOR_Y, HOLD_HALF_LENGTH_F, holdHalfWidthAt, makeHoldCargoStacks, makeShipInterior,
@@ -364,6 +365,9 @@ interface ShipMeshGroup {
   /** b3.4e: the GLB hardware mounted on this hull, or null while the procedural
    *  fallback is still up (the library had not loaded the four files yet). */
   hardware: ShipHardwareMount | null;
+  /** b4.3c: the Blender ship kit mounted on spline sockets, null until both kit files stream in. */
+  kit: THREE.Group | null;
+  kitSockets: KitSocket[];
   /** Helm rim radius for this hull class (the wheel GLB is fitted to it). */
   wheelRimR: number;
   /** Shared warm-amber glass materials whose emissiveIntensity ramps with night. */
@@ -437,6 +441,45 @@ export class ShipRenderer {
   /** Meshes per hardware file (near / far), counted once: the late mount's price. */
   private readonly hardwareMeshCount = new Map<string, number>();
   setHardwareSource(src: ShipHardwareSource | null): void { this.hardwareSource = src; }
+  /** b4.3c: the ship kit's library (AssetLibrary in the browser); streamed on first need. */
+  private kitSource: (ShipKitSource & { ensure?(name: ShipKitFile): Promise<void> }) | null = null;
+  private kitRequested = false;
+  private kitPrice: number | undefined;
+  setKitSource(src: (ShipKitSource & { ensure?(name: ShipKitFile): Promise<void> }) | null): void { this.kitSource = src; }
+
+  private kitReady(): boolean {
+    const src = this.kitSource;
+    if (!src) return false;
+    if (SHIP_KIT_FILES.every((f) => src.has(f))) return true;
+    if (!this.kitRequested && src.ensure) {
+      this.kitRequested = true;
+      for (const f of SHIP_KIT_FILES) void src.ensure(f).catch(() => { /* hull stays bare of kit */ });
+    }
+    return false;
+  }
+
+  /** Mount the kit on one hull: the hull parts under the detail root (LOD0
+   *  band), the rudder under its stock so it turns with Ship.rudderAngle. */
+  private mountKit(mesh: ShipMeshGroup): void {
+    const src = this.kitSource;
+    if (!src) return;
+    const glass = mesh.lanternGlassMats[0] ?? null;
+    const root = mountShipKit(mesh.kitSockets.filter((s) => s.part !== 'rudder'), src, glass);
+    if (!root) return;
+    mesh.detailRoot.add(root);
+    const rudder = mesh.kitSockets.find((s) => s.part === 'rudder');
+    if (rudder) {
+      const p = mesh.rudderPivot.position;
+      const local: KitSocket = { ...rudder, pos: [rudder.pos[0] - p.x, rudder.pos[1] - p.y, rudder.pos[2] - p.z] };
+      const blade = mountShipKit([local], src, glass);
+      if (blade) {
+        mesh.rudderPivot.add(blade);
+        const old = mesh.rudderPivot.getObjectByName('rudder-blade');
+        if (old) old.visible = false;
+      }
+    }
+    mesh.kit = root;
+  }
   /** One reused frame record for every hull's wake — filled in place each
    *  update so driving twelve wakes allocates nothing. */
   private wakeFrame: WakeFrame = makeWakeFrame();
@@ -465,15 +508,6 @@ export class ShipRenderer {
     polygonOffset: true,
     polygonOffsetFactor: -2,
     polygonOffsetUnits: -2,
-  });
-  /** Shared breach-decal materials. Holes are spawned at runtime now (one per
-   *  ShipHole entity, wherever the shot landed), so these live on the renderer
-   *  instead of being rebuilt inside every hull. */
-  private readonly holeMat = new THREE.MeshStandardMaterial({
-    color: 0x07080a, roughness: 1, metalness: 0,
-    emissive: 0x06243a, emissiveIntensity: 0.35,
-    side: THREE.DoubleSide,
-    polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
   });
   /** b2.3d: the torn edge is ONE vertex-coloured mesh per breach face (char
    *  lip, broken-plank wall, bent plank ends, splinters): one draw, one program. */
@@ -536,7 +570,7 @@ export class ShipRenderer {
     // Browser only (`location`): node gates import this file without a library.
     if (!this.hardwareSource && typeof location !== 'undefined') {
       void import('../assets/AssetLibrary.js')
-        .then((m) => { this.hardwareSource ??= m.assets; })
+        .then((m) => { this.hardwareSource ??= m.assets; this.kitSource ??= m.assets; })
         .catch(() => { /* procedural hardware stays */ });
     }
     this.darkWoodTex = woodTexture(256, 128, 'dark');
@@ -1272,18 +1306,8 @@ export class ShipRenderer {
     bowsprit.userData.rigSpar = 'bowsprit';
     group.add(bowsprit);
 
-    const figureheadMat = new THREE.MeshStandardMaterial({
-      color: 0xc49235,
-      roughness: 0.54,
-      metalness: 0.45,
-      emissive: 0x2a1500,
-      emissiveIntensity: 0.08,
-    });
-    // Per-type carved figurehead at the stem, team accent on the fins/tail/eyes.
-    const figurehead = makeFigurehead(ship.type, figureheadMat, teamAccentMat);
-    figurehead.position.set(0, H * 0.72, L * 0.55);
-    figurehead.rotation.x = -0.12;
-    group.add(figurehead);
+    // b4.3c: the carved figurehead is the Blender kit's, mounted on the stem
+    // socket from the spline (ship/kit.ts) once the kit has streamed in.
 
     // Transom panel nests within the lofted stern (the loft's own raked cap
     // carries the shape below) instead of the old full-beam slab. On the
@@ -2077,33 +2101,8 @@ export class ShipRenderer {
         lashing.position.set(-0.16, 0.05, 0);
         cg.add(lashing);
 
-        const sideSign = side === 0 ? 1 : -1;
-        // Gunports anchored to the REAL loft surface so they neither bury into
-        // the tumblehome nor float off the bow taper.
-        const portSurf = hullSurfacePointAt(profile, cz, H * 0.58);
-        const gunportFrame = new THREE.Mesh(
-          new THREE.BoxGeometry(0.09, 0.7, 0.85),
-          oakMat,
-        );
-        gunportFrame.position.set(sideSign * (portSurf.x + 0.045), H * 0.58, cz);
-        gunportFrame.rotation.z = sideSign * Math.atan2(portSurf.ny, portSurf.nx) * 0.6;
-        gunportFrame.castShadow = true;
-        group.add(gunportFrame);
-        const gunportOpening = new THREE.Mesh(
-          new THREE.BoxGeometry(0.095, 0.46, 0.62),
-          this.holeMat,
-        );
-        gunportOpening.position.set(sideSign * (portSurf.x + 0.058), H * 0.59, cz);
-        gunportOpening.rotation.z = gunportFrame.rotation.z;
-        gunportOpening.castShadow = false;
-        group.add(gunportOpening);
-        // Hinged gunport door, flapped open
-        const doorSurf = hullSurfacePointAt(profile, cz, H * 0.86);
-        const gunportDoor = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.46, 0.62), oakMat);
-        gunportDoor.position.set(sideSign * (doorSurf.x + 0.06), H * 0.86, cz);
-        gunportDoor.rotation.z = sideSign * 0.5;
-        gunportDoor.castShadow = true;
-        group.add(gunportDoor);
+        // b4.3c: the gunport frame + hinged lid are the kit's, on spline
+        // sockets over each gun (ship/kit.ts shipKitSockets).
 
         // Merge rigid geometry per pivot: barrel hardware bakes into ~2 meshes
         // that still swing with the pitch pivot, carriage into a few under root.
@@ -2250,18 +2249,11 @@ export class ShipRenderer {
       const rumSpot = pickSpot([[W * 0.36, mainMastLocalZ + 1.5], [W * 0.3, mainMastLocalZ + 1.9]]);
       decorSpots.push({ x: rumSpot[0], z: rumSpot[1], lid: 0x6a2808 });
     }
-    for (const spot of decorSpots) {
-      const lidMat = this.sharedMat(`decor-lid-${spot.lid}`, { color: spot.lid, roughness: 0.8 });
-      const barrel = makeBarrel(barrelWoodMat, barrelHoopMat, lidMat);
-      barrel.position.set(spot.x, H + 0.5, spot.z);
-      // Deterministic yaw from the barrel's own berth, NOT Math.random. It was
-      // cosmetic noise either way, but a decor barrel merges into the static
-      // bake, so a per-ship random made two sloops' merged planking differ by a
-      // few hundred rotated vertices and the shared-geometry cache (perf-15)
-      // could not be used for the class. Caught by __shipMergeVerify.
-      barrel.rotation.y = (Math.abs(Math.sin(spot.x * 12.9898 + spot.z * 78.233)) % 1) * Math.PI * 2;
-      group.add(barrel);
-    }
+    // b4.3c: decor barrels are the kit's staved barrel (ship_kit_b) on the
+    // deck slab; deterministic yaw from the berth (perf-15, see above).
+    const kitDeckSpots = decorSpots.map((spot) => ({
+      x: spot.x, z: spot.z, yaw: (Math.abs(Math.sin(spot.x * 12.9898 + spot.z * 78.233)) % 1) * Math.PI * 2,
+    }));
 
     // Mooring line flaked down near the stern quarter
     const sternRope = makeRopeCoil(ropeCoilMat, 0.24, 0.052, 7, 2.9, this.lodPhone ? 4 : 6);
@@ -2594,6 +2586,8 @@ export class ShipRenderer {
       anchorChain,
       anchorCapstan,
       hardware: null,
+      kit: null,
+      kitSockets: [...shipKitSockets(ship.type), ...deckKitSockets(ship.type, kitDeckSpots)],
       wheelRimR: rimR,
       lanternGlassMats,
       nightLight,
@@ -3484,6 +3478,15 @@ void main() {
         }
       }
       if (mesh.hardware && detailNear) this.updateHardwareLod(mesh, distSq);
+      // b4.3c: the ship kit mounts the same way (a late first appearance that
+      // pays the shared first-draw allowance), once both files are in.
+      if (!mesh.kit && detailNear && this.kitReady()) {
+        const price = this.kitPrice ??= kitDrawCount(mountShipKit(mesh.kitSockets, this.kitSource!, null));
+        if (price <= firstDrawRemaining() || firstDrawFrameUntouched()) {
+          spendFirstDraw(price);
+          this.mountKit(mesh);
+        }
+      }
       const extrapolation = Math.min(0.14, snapshotAge + dt * 0.5);
       // Local storm sea-state feeds the SAME boosted Gerstner field the ocean
       // surface uses, so hulls keep riding the visible water inside a storm.

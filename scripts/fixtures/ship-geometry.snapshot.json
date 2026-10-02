@@ -2,9 +2,9 @@
   "note": "Baseline for scripts/test-ship-geometry-hash.mjs. Rebuild ONLY inside a slice that intends the geometry change, and name the moved families in the commit.",
   "hulls": {
     "sloop": {
-      "digest": "f6f48741",
-      "meshCount": 92,
-      "vertTotal": 111559,
+      "digest": "b4ca3f26",
+      "meshCount": 86,
+      "vertTotal": 108804,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 2,
@@ -21,17 +21,17 @@
           ]
         },
         "MeshStandardMaterial": {
-          "meshes": 51,
-          "verts": 29206,
-          "tris": 10366,
-          "hash": "3e2cc2a1",
+          "meshes": 46,
+          "verts": 27279,
+          "tris": 9586,
+          "hash": "d3a31518",
           "box": [
             -4.11,
             0.447,
             -6.077,
             4.11,
             16.14,
-            6.962
+            4.433
           ]
         },
         "hold-bilge-board": {
@@ -133,12 +133,12 @@
           ]
         },
         "ship-barrel-wood": {
-          "meshes": 5,
-          "verts": 1920,
-          "tris": 640,
-          "hash": "9a3c9395",
+          "meshes": 4,
+          "verts": 1536,
+          "tris": 512,
+          "hash": "7435b035",
           "box": [
-            -1.93,
+            -1.573,
             2.28,
             -1.82,
             1.78,
@@ -316,16 +316,16 @@
         },
         "ship-team-accent": {
           "meshes": 1,
-          "verts": 468,
-          "tris": 156,
-          "hash": "5efaf2e0",
+          "verts": 24,
+          "tris": 12,
+          "hash": "f65287f5",
           "box": [
             -1.5,
-            1.276,
+            1.705,
             -6.073,
             1.5,
             1.903,
-            6.895
+            -6.003
           ]
         },
         "waterline-foam": {
@@ -345,9 +345,9 @@
       }
     },
     "brigantine": {
-      "digest": "b4a4889a",
-      "meshCount": 118,
-      "vertTotal": 132572,
+      "digest": "01c3ec46",
+      "meshCount": 111,
+      "vertTotal": 127260,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 4,
@@ -364,17 +364,17 @@
           ]
         },
         "MeshStandardMaterial": {
-          "meshes": 65,
-          "verts": 40769,
-          "tris": 14376,
-          "hash": "6a8a3615",
+          "meshes": 59,
+          "verts": 36621,
+          "tris": 12932,
+          "hash": "249e76f1",
           "box": [
             -5.11,
             0.447,
             -8.097,
             5.11,
             19.54,
-            9.001
+            5.315
           ]
         },
         "hold-bilge-board": {
@@ -476,17 +476,17 @@
           ]
         },
         "ship-barrel-wood": {
-          "meshes": 5,
-          "verts": 2304,
-          "tris": 768,
-          "hash": "9d9e5a4d",
+          "meshes": 4,
+          "verts": 1536,
+          "tris": 512,
+          "hash": "c86893b1",
           "box": [
             -2.573,
             2.88,
             -2.438,
-            2.896,
+            2.574,
             3.66,
-            5.396
+            5.245
           ]
         },
         "ship-brass": {
@@ -659,16 +659,16 @@
         },
         "ship-team-accent": {
           "meshes": 1,
-          "verts": 420,
-          "tris": 140,
-          "hash": "669af2c1",
+          "verts": 24,
+          "tris": 12,
+          "hash": "0facffb5",
           "box": [
             -2.1,
-            1.526,
+            2.17,
             -8.071,
             2.1,
-            2.596,
-            8.898
+            2.422,
+            -8.001
           ]
         },
         "waterline-foam": {
@@ -688,9 +688,9 @@
       }
     },
     "galleon": {
-      "digest": "4f12460f",
-      "meshCount": 152,
-      "vertTotal": 161772,
+      "digest": "b8d8337e",
+      "meshCount": 145,
+      "vertTotal": 156016,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 8,
@@ -707,17 +707,17 @@
           ]
         },
         "MeshStandardMaterial": {
-          "meshes": 90,
-          "verts": 59701,
-          "tris": 21138,
-          "hash": "7223c8c1",
+          "meshes": 84,
+          "verts": 55409,
+          "tris": 19646,
+          "hash": "7ea09b2c",
           "box": [
             -6.61,
             0.447,
             -11.127,
             6.61,
             24.48,
-            12.659
+            6.626
           ]
         },
         "hold-bilge-board": {
@@ -819,17 +819,17 @@
           ]
         },
         "ship-barrel-wood": {
-          "meshes": 5,
-          "verts": 2304,
-          "tris": 768,
-          "hash": "c0de9e79",
+          "meshes": 4,
+          "verts": 1536,
+          "tris": 512,
+          "hash": "32e8e2e5",
           "box": [
             -4.079,
             3.58,
             -3.85,
             4.076,
             4.36,
-            6.718
+            6.57
           ]
         },
         "ship-brass": {
@@ -1002,16 +1002,16 @@
         },
         "ship-team-accent": {
           "meshes": 1,
-          "verts": 720,
-          "tris": 240,
-          "hash": "78f68110",
+          "verts": 24,
+          "tris": 12,
+          "hash": "073c6991",
           "box": [
             -3,
-            2.3,
+            2.713,
             -11.067,
             3,
             3.027,
-            12.63
+            -10.997
           ]
         },
         "waterline-foam": {
