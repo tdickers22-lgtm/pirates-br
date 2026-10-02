@@ -244,7 +244,9 @@ export function ensureMeshGround(ctx: IslandBuildCtx): MeshGround | null {
   const { island, group } = ctx;
   const terrain = group.getObjectByName('island-terrain');
   if (!(terrain instanceof THREE.Mesh)) return null;
-  const geometry = terrain.geometry as THREE.BufferGeometry;
+  // b4.4c: the drawn index may hold the coarse LOD list; seat on the full grid.
+  const lod = terrain.userData.terrainLod as { fullGeometry?: THREE.BufferGeometry } | undefined;
+  const geometry = (lod?.fullGeometry ?? terrain.geometry) as THREE.BufferGeometry;
   let ground = built.get(geometry);
   if (!ground) {
     ground = new MeshGround(geometry);

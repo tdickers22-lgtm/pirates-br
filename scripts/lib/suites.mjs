@@ -446,6 +446,7 @@ export const LOGIC = [
   // watertight stitch and the baked vertex AO. MUTATE=analytic|tier|nostitch
   // proves each half can fail.
   tsx('test-terrain-grid.mjs'),
+  tsx('test-terrain-lod.mjs'),
   // GRID-01 slice c (w7.2): one apron for the walk floor, the swim seabed and
   // the terrain raycast. MUTATE=footprint|seabed|raylimit restores each of the
   // three old cut-offs and each turns it red.

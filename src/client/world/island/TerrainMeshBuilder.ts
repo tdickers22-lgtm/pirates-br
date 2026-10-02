@@ -9,6 +9,8 @@
 import * as THREE from 'three';
 import { getIslandCoastWeights } from '../../../shared/utils/index.js';
 import { buildTerrainGrid, coastWobble, setIslandGround } from '../../../shared/terrainGrid.js';
+import { buildTerrainLodChunks } from '../../../shared/terrainLod.js';
+import { TerrainLodSwitch } from './TerrainLod.js';
 import type { Island } from '../../../shared/types/index.js';
 import {
   buildCaveCutout, caveCutoutGlsl, caveCutoutUniforms, type CaveCutout,
@@ -790,6 +792,10 @@ export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
   terrainMat.shadowSide = THREE.BackSide;
   terrain.receiveShadow = true;
   group.add(terrain);
+  // b4.4c: near chunks draw the walkable grid, the rest a coarse list over the
+  // same vertices (one draw, watertight in any mix; raycasts keep the full grid).
+  const terrainLod = buildTerrainLodChunks(terrainPositions, terrainIndices, ringStart, ringSegments, totalRings);
+  if (terrainLod) new TerrainLodSwitch(terrain, terrainLod);
 
   // Underwater plinth: the terrain cap itself now follows the heightfield
   // below the waterline (shore rings above), so this skirt is fully
