@@ -45,7 +45,7 @@ import { selectShipLod, shipLodKey, SHIP_LOD_BANDS, SHIP_LOD_HYSTERESIS, type Sh
 import { buildRudder, buildSternCastle } from './ship/stern.js';
 import { buildRig } from './ship/sails.js';
 import { SAIL_BELLY, SAIL_CLOTH_GRID, makeLodSailCard, sailFillTarget, sailLuff01, sailWind01, setSailClothUniforms, stepSailFill, type SailClothUniforms } from './ship/sailCloth.js';
-import { updateRigging, type Rigging } from './ship/rigging.js';
+import { applyRiggingLod, updateRigging, type Rigging, type RiggingSet } from './ship/rigging.js';
 import { buildWakeSurface, writeWakeSurface, setArmsVisible, makeWakeFrame, ARM_FACTOR_FLOOR, buildWaterlineCollar, seatWaterlineCollar, type WakeSurface, type WakeFrame } from './ship/wake.js';
 import { makeLoftedSlabGeometry, makeSheerRunGeometry, sheerHalfWidthAt, sheerZRange, makeHullStrakeGeometry, makeSplineHullGeometry, makeStairRampGeometry, makeWaterlineFoamTexture, mergeStaticMeshes, bakeVertexColorMerge, NO_MERGE_EXCLUDE } from './ship/geometry.js';
 import { applyFlagWave, FLAG_DROP, FLAG_FLY, flagPhaseFromId, flagTexture, makeBarrel, makeCylinderBetween, makeFigurehead, makeHatchGrating, makeLanternFixture, makeRopeCoil } from './ship/dressing.js';
@@ -350,6 +350,8 @@ interface ShipMeshGroup {
   trimPivots: THREE.Group[];
   /** Instanced rope + ratline rigging; the yard-attached runs follow the trim. */
   rigging: Rigging | null;
+  /** b4.2h: rope + ratline + far-card draws, in ship-rig-root (LOD0-LOD2 ropes, LOD3 cards). */
+  rigSet: RiggingSet | null;
   cannonMeshes: CannonMeshGroup[];
   lanterns: THREE.PointLight[];
   wheel: THREE.Object3D;
@@ -1266,6 +1268,8 @@ export class ShipRenderer {
     bowsprit.rotation.z = -0.04;
     bowsprit.position.set(0, H + 0.48, L * 0.61);
     bowsprit.castShadow = true;
+    // b4.2h: the head stays are made fast ON this spar (ship/sails.ts).
+    bowsprit.userData.rigSpar = 'bowsprit';
     group.add(bowsprit);
 
     const figureheadMat = new THREE.MeshStandardMaterial({
@@ -1877,9 +1881,10 @@ export class ShipRenderer {
 
     // ── Masts, yards, sails, crow's nest + ladder, rope stations, jib and the
     // instanced rigging: built by ship/sails.ts buildRig (b4.2a), same order.
-    const { sails, furledSails, pennants, trimPivots, nestFloorMesh, mastStartZ, ropeRig } = buildRig({
+    const { sails, furledSails, pennants, trimPivots, nestFloorMesh, mastStartZ, ropeRig, rigSet } = buildRig({
       group, ship, stats, profile, H, L, W, darkMat, deckMat, sailMat, upgradeVisuals,
       quality: this.quality,
+      phone: this.lodPhone,
       darkWoodTex: this.darkWoodTex,
       teamSailTexture: (teamColor) => this.getTeamSailTexture(teamColor),
       addSwiftSailTrim: (sail, w, h, targets, staySail) => this.addSwiftSailTrim(sail, w, h, targets, staySail),
@@ -2535,6 +2540,13 @@ export class ShipRenderer {
       detailRoot.add(group.children[0]);
     }
     group.add(detailRoot);
+    // b4.2h: the rigging is drawn past the detail band (ratlines to 60 m,
+    // running rigging to 150 m, a card per mast past 250 m), so it lives in
+    // its own root beside the level roots, not inside the LOD0 detail root.
+    const rigRoot = new THREE.Group();
+    rigRoot.name = 'ship-rig-root';
+    if (rigSet) rigRoot.add(rigSet.rope.mesh, rigSet.ratline.mesh, rigSet.far);
+    group.add(rigRoot);
 
     const proxyRoot = this.buildShipFar(ship, stats);
     proxyRoot.visible = false;
@@ -2572,6 +2584,7 @@ export class ShipRenderer {
       holeVis: new Map<number, HoleVis>(),
       trimPivots,
       rigging: ropeRig,
+      rigSet,
       cannonMeshes: cannonGroups,
       lanterns,
       wheel: wheelGroup,
@@ -3455,6 +3468,7 @@ void main() {
       mesh.lod1Root.visible = !detailNear && mesh.lodLevel <= 1;
       mesh.lod2Root.visible = !detailNear && mesh.lodLevel === 2;
       mesh.proxyRoot.visible = !detailNear && mesh.lodLevel === 3;
+      applyRiggingLod(mesh.rigSet, cameraPosition && !localCrewShip ? Math.sqrt(distSq) : 0, !detailNear && mesh.lodLevel === 3);
       // b3.4e: the queue-window fallback gives way once the library has the
       // hardware; after that only the near/far sibling swap runs.
       // The world set lands on ONE frame, and every hull in view mounts then:
@@ -3604,6 +3618,14 @@ void main() {
         // LOD1 keeps the near wake (the arms fade to nothing at the outer
         // edge of LOD1, as they did at the old detail edge); beyond it
         // armFade 0 is a continuation, not a cut.
+        // b4.2h: past the detail band the yards are not animated; swing the
+        // (hidden) trim pivots with the LOD sails so the running rigging
+        // drawn to 150 m stays made fast to where the yards are drawn.
+        if (mesh.rigSet && mesh.lodLevel <= 2) {
+          const yaw = THREE.MathUtils.clamp(mesh.lod2SailAngle, -1.15, 1.15);
+          for (let p = 0; p < mesh.trimPivots.length; p++) mesh.trimPivots[p].rotation.y = yaw;
+          updateRigging(mesh.rigging);
+        }
         const lod1Wake = mesh.lodLevel <= 1;
         if (lod1Wake) {
           // LOD1 keeps the breaches readable (hole-vis on the root, no inboard).
@@ -4290,6 +4312,11 @@ void main() {
    *  updateRigging directly with it to measure the re-seat in isolation. */
   __rigging(shipId: string): Rigging | null {
     return this.shipMeshes.get(shipId)?.rigging ?? null;
+  }
+
+  /** b4.2h: the three rigging draws of a hull (scripts/test-ship-rigging.mjs). */
+  __rigSet(shipId: string): RiggingSet | null {
+    return this.shipMeshes.get(shipId)?.rigSet ?? null;
   }
 
   /** Hull-local Y of the sea on a given hull this frame — the wet line the

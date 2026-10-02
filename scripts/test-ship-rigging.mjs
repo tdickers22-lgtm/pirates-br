@@ -87,9 +87,10 @@ for (const type of ['sloop', 'brigantine', 'galleon']) {
   frame(sr, [ship], 0, new THREE.Vector3(CAM.x, CAM.y, CAM.z));
 
   const group = sr.getShipGroup(ship.id);
-  const detail = group.children.find((c) => c.name === 'ship-detail-root') ?? group;
+  // b4.2h: the rope families live in their own ship-rig-root (drawn from LOD0
+  // out to 250 m), so the census walks the whole hull group.
   const rigs = [];
-  detail.traverse((o) => { if (o.isInstancedMesh && o.name === 'ship-rigging') rigs.push(o); });
+  group.traverse((o) => { if (o.isInstancedMesh && o.name === 'ship-rigging') rigs.push(o); });
   console.log(`\n[${type}] ${rigs.length} rigging draws, ${rigs.reduce((a, r) => a + r.count, 0)} rope segments`);
 
   expect(`${type}: rigging is drawable geometry, not hairlines`,
@@ -315,6 +316,141 @@ console.log('\nRIG PROPORTIONS (ships-02, b4.2f)');
       op().every((v) => v === 1) && helmCourses.every((c) => !c.material.transparent), `opacity ${op().join(',')}`);
   }
   census.clear();
+  globalThis.__shipNoMerge = false;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// b4.2h RIGGING V2 (ships-09). Spec numbers live HERE: >= 60 / 110 / 170 rope
+// segments at LOD0 (sloop / brigantine / galleon); every rope end on a spar
+// (mast, yard, bowsprit cylinder from the scene), a deadeye, a block or a pin
+// within 1 cm, and every declared fitting is a drawn instance; ratlines end on
+// a shroud; no segment inside the hull spline below the sheer; every slack line
+// sags 1-3 % of its chord (at rest AND braced 57 deg); <= 3 instanced rigging
+// draws; LOD families: ratlines gone past 60 m, running rigging past 150 m, one
+// alpha-tested card per mast (no blending) past 250 m.
+console.log('\nRIGGING V2 (ships-09, b4.2h)');
+{
+  const hull = await import('../src/shared/hull.ts');
+  const MIN_SEGS = { sloop: 60, brigantine: 110, galleon: 170 };
+  globalThis.__shipNoMerge = true;
+  const v2 = new ShipRenderer();
+  v2.init(new THREE.Scene(), 'balanced');
+  const camAt = (d) => new THREE.Vector3(0, 6, d);
+  for (const type of ['sloop', 'brigantine', 'galleon']) {
+    const stats = SHIP_STATS[type];
+    const H = stats.height, L = stats.length;
+    const ship = fixtureShip(type);
+    ship.id = `${type}-v2`;
+    v2.buildShip(ship);
+    frame(v2, [ship], 0, camAt(CAM.z));
+    const group = v2.getShipGroup(ship.id);
+    group.updateMatrixWorld(true);
+    const set = v2.__rigSet?.(ship.id) ?? null;
+    const fams = [];
+    group.traverse((o) => { if (o.isInstancedMesh && /^ship-rigging/.test(o.name)) fams.push(o); });
+    expect(`${type}: <= 3 instanced rigging draws (${fams.map((f) => f.name).join(', ')})`, !!set && fams.length >= 2 && fams.length <= 3);
+    if (!set) { expect(`${type}: rigging v2 set exposed (__rigSet)`, false); continue; }
+    const runsOf = (rig) => rig?.runs ?? [];
+    const segs = [set.rope, set.ratline].reduce((s, r) => s + runsOf(r).reduce((a, m) => a + m.segs, 0), 0);
+    const nFam = (f) => runsOf(set.rope).filter((r) => r.family === f).length;
+    console.log(`\n[${type}] ${segs} rope segments: ${nFam('standing')} standing + ${nFam('running')} running runs, ${runsOf(set.ratline).length} ratlines, ${set.rope.hardware.length} fittings`);
+    expect(`${type}: >= ${MIN_SEGS[type]} rope segments at LOD0 (${segs})`, segs >= MIN_SEGS[type]);
+    expect(`${type}: standing, running and ratline families all present`, nFam('standing') > 0 && nFam('running') > 0 && runsOf(set.ratline).length > 0);
+    const chain = (rig, run) => {
+      const pts = [];
+      for (let i = 0; i < run.segs; i++) { const [p, q] = instanceEnds(rig.mesh, run.first + i); if (i === 0) pts.push(p); pts.push(q); }
+      return pts;
+    };
+    // Spars from the scene (never from the rig code): masts, yards, bowsprit.
+    const spars = [];
+    group.traverse((o) => {
+      if (!o.isMesh || o.geometry?.type !== 'CylinderGeometry') return;
+      if (/^mast-\d$/.test(o.name) || o.userData.rigSpar === 'bowsprit' || (o.parent?.name === 'yard-trim-pivot' && o.parent.children.find((c) => c.isMesh) === o)) spars.push(o);
+    });
+    const toWorld = (p) => group.localToWorld(p.clone());
+    const onSpar = (p) => spars.some((s) => {
+      const q = s.worldToLocal(toWorld(p));
+      const { radiusTop, radiusBottom, height } = s.geometry.parameters;
+      if (Math.abs(q.y) > height / 2 + 0.01) return false;
+      const r = radiusBottom + (radiusTop - radiusBottom) * (q.y / height + 0.5);
+      return Math.hypot(q.x, q.z) <= r + 0.01;
+    });
+    const hw = set.rope.hardware;
+    let hwDrawn = 0;
+    for (let i = 0; i < hw.length; i++) { const [p, q] = instanceEnds(set.rope.mesh, i); if (p.add(q).multiplyScalar(0.5).distanceTo(hw[i].at) < 1e-3) hwDrawn += 1; }
+    expect(`${type}: every declared fitting is a drawn instance (${hwDrawn}/${hw.length}: ${['deadeye', 'block', 'pin'].map((k) => `${hw.filter((h) => h.kind === k).length} ${k}s`).join(', ')})`, hw.length > 0 && hwDrawn === hw.length);
+    const scenePins = [];
+    group.traverse((o) => { if (o.isMesh && (o.name === 'belaying-pin' || o.name === 'brace-cleat')) scenePins.push(new THREE.Box3().setFromObject(o).expandByScalar(0.01)); });
+    const onFitting = (p, kind) => hw.some((h) => h.kind === kind && p.distanceTo(h.at) <= Math.max(h.rx, h.rz ?? h.rx, h.len / 2) + 0.01)
+      || (kind === 'pin' && scenePins.some((b) => b.containsPoint(toWorld(p))));
+    const onEnd = (p, kind) => (kind === 'spar' ? onSpar(p) : !!kind && onFitting(p, kind));
+    const bad = [];
+    for (const run of runsOf(set.rope)) {
+      const pts = chain(set.rope, run);
+      if (!onEnd(pts[0], run.aKind)) bad.push(`${run.label}:a(${run.aKind})`);
+      if (!onEnd(pts[pts.length - 1], run.bKind)) bad.push(`${run.label}:b(${run.bKind})`);
+    }
+    expect(`${type}: every rope end on a spar, deadeye, block or pin within 1 cm (${bad.length} off)`, bad.length === 0, bad.slice(0, 6).join(' '));
+    // Ratlines end on a shroud (a standing chain) within 1 cm.
+    const shroudSegs = [];
+    for (const run of runsOf(set.rope)) if (run.family === 'standing') { const pts = chain(set.rope, run); for (let i = 1; i < pts.length; i++) shroudSegs.push(new THREE.Line3(pts[i - 1], pts[i])); }
+    const _c = new THREE.Vector3();
+    const onShroud = (p) => shroudSegs.some((l) => l.closestPointToPoint(p, true, _c).distanceTo(p) <= 0.01);
+    let ratOff = 0;
+    for (const run of runsOf(set.ratline)) { const pts = chain(set.ratline, run); if (!onShroud(pts[0]) || !onShroud(pts[pts.length - 1])) ratOff += 1; }
+    expect(`${type}: every ratline ends on a shroud within 1 cm (${ratOff} off)`, runsOf(set.ratline).length > 0 && ratOff === 0);
+    // No segment inside the hull spline below the sheer.
+    const profile = v2.shipMeshes.get(ship.id).hullProfile;
+    let inside = 0;
+    for (const rig of [set.rope, set.ratline]) {
+      for (let i = hw.length * (rig === set.rope ? 1 : 0); i < rig.mesh.count; i++) {
+        const [p, q] = instanceEnds(rig.mesh, i);
+        for (let t = 0; t <= 1.0001; t += 0.25) {
+          const s = p.clone().lerp(q, t);
+          if (s.y >= H - 0.01 || Math.abs(s.z) > L * 0.5) continue;
+          if (Math.abs(s.x) < hull.hullSurfacePointAt(profile, s.z, s.y).x - 0.01) { inside += 1; break; }
+        }
+      }
+    }
+    expect(`${type}: no rope segment inside the hull spline (${inside})`, inside === 0);
+    const sagBand = (label) => {
+      const slack = runsOf(set.rope).filter((r) => r.sag > 0);
+      const out = [];
+      for (const run of slack) {
+        const pts = chain(set.rope, run);
+        const ln = new THREE.Line3(pts[0], pts[pts.length - 1]);
+        const len = ln.distance();
+        let dev = 0;
+        for (const p of pts) dev = Math.max(dev, ln.closestPointToPoint(p, true, _c).distanceTo(p));
+        const f = dev / len;
+        if (run.segs < 4 || f < 0.01 || f > 0.03) out.push(`${run.label} ${(100 * f).toFixed(2)}% (${run.segs} segs)`);
+      }
+      expect(`${type}: ${slack.length} slack lines sag 1-3 % of the chord ${label} (${out.length} off)`, slack.length >= 4 && out.length === 0, out.slice(0, 5).join(' '));
+    };
+    sagBand('at rest');
+    ship.sailAngle = 1.0;
+    for (let f = 0; f < 240; f++) frame(v2, [ship], 1 + f / 60, camAt(CAM.z));
+    sagBand('braced 57 deg');
+    ship.sailAngle = 0;
+    // LOD families through the renderer: camera abeam at the given range.
+    const lodAt = (d) => { for (let f = 0; f < 30; f++) frame(v2, [ship], 6 + f / 60, camAt(d)); };
+    const fullCount = set.rope.mesh.count;
+    lodAt(45);
+    const near = { rat: set.ratline.mesh.visible, n: set.rope.mesh.count, rope: set.rope.mesh.visible, far: set.far.visible };
+    lodAt(100);
+    const mid = { rat: set.ratline.mesh.visible, n: set.rope.mesh.count, rope: set.rope.mesh.visible, far: set.far.visible };
+    lodAt(200);
+    const out = { n: set.rope.mesh.count, rope: set.rope.mesh.visible, far: set.far.visible };
+    lodAt(320);
+    const far = { rope: set.rope.mesh.visible, rat: set.ratline.mesh.visible, far: set.far.visible };
+    expect(`${type}: 45 m draws ratlines + running rigging`, near.rat && near.rope && near.n === fullCount && !near.far);
+    expect(`${type}: 100 m drops the ratlines, keeps running rigging`, !mid.rat && mid.rope && mid.n === fullCount && !mid.far);
+    expect(`${type}: 200 m keeps standing rigging only (${out.n}/${fullCount} instances)`, out.rope && out.n === set.rope.standingEnd && out.n < fullCount && !out.far);
+    expect(`${type}: 320 m is one alpha card per mast (${set.far.count} cards), no rope draws`,
+      !far.rope && !far.rat && far.far && set.far.count === stats.mastCount && set.far.material.alphaTest > 0 && !set.far.material.transparent);
+    lodAt(CAM.z);
+  }
+  v2.clear();
   globalThis.__shipNoMerge = false;
 }
 

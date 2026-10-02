@@ -9,7 +9,7 @@ import type { RenderQuality } from '../Renderer.js';
 import { attachSailCloth, makeSailClothGeometry, sailClothGrid } from './sailCloth.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { makeCylinderBetween, makeRopeCoil } from './dressing.js';
-import { buildRigging, type RopeRun, type Rigging } from './rigging.js';
+import { buildRigging, buildRigFarCards, planRopes, type RigPlanMast, type RopeRun, type Rigging, type RiggingSet } from './rigging.js';
 
 // Square-sail cloth is GPU cloth (ship/sailCloth.ts, b4.2g): a flat grid
 // whose belly, flutter, hoist folds and tear holes are computed in the vertex
@@ -28,6 +28,8 @@ export interface RigContext {
   sailMat: THREE.MeshStandardMaterial;
   upgradeVisuals: Record<ShipUpgradeType, THREE.Object3D[]>;
   quality: RenderQuality;
+  /** b4.2h: phone build (ShipRenderer.setLodPhone): the lite rope plan. */
+  phone?: boolean;
   darkWoodTex: THREE.Texture;
   teamSailTexture: (teamColor: number) => THREE.Texture;
   addSwiftSailTrim: (sail: THREE.Mesh, width: number, height: number, targets: THREE.Object3D[], staySail?: boolean) => void;
@@ -43,6 +45,9 @@ export interface RigBuild {
   mastStartZ: number;
   ropeRig: Rigging | null;
   ratlineRig: Rigging | null;
+  /** b4.2h: rope + ratline + far cards; NOT added to the group (ShipRenderer
+   *  parents it to ship-rig-root, drawn LOD0-LOD2, cards at LOD3). */
+  rigSet: RiggingSet | null;
 }
 
 /** The whole rig of one hull, moved out of ShipRenderer.buildShip (b4.2a):
@@ -53,7 +58,7 @@ export interface RigBuild {
  *  rigging draws. Adds to `group` in exactly the order the inline block did,
  *  so test-ship-geometry-hash is unchanged. */
 export function buildRig(ctx: RigContext): RigBuild {
-  const { group, ship, stats, profile, H, L, W, darkMat, deckMat, sailMat, upgradeVisuals, quality, darkWoodTex, teamSailTexture, addSwiftSailTrim } = ctx;
+  const { group, ship, stats, profile, H, L, darkMat, deckMat, sailMat, upgradeVisuals, quality, darkWoodTex, teamSailTexture, addSwiftSailTrim } = ctx;
   const sails: THREE.Mesh[] = [];
   const furledSails: THREE.Mesh[] = [];
   const pennants: THREE.Mesh[] = [];
@@ -75,12 +80,17 @@ export function buildRig(ctx: RigContext): RigBuild {
   const ropeRuns: RopeRun[] = [];
   const ratlineRuns: RopeRun[] = [];
   const yardHalfSpanForMast: number[] = [];
+  // b4.2h: the per-class rope plan (ship/rigging.ts planRopes) reads these.
+  const mastR = 0.075 + (ship.type === 'galleon' ? 0.045 : ship.type === 'brigantine' ? 0.025 : 0);
+  const planMasts: RigPlanMast[] = [];
+  let mainTrimPivotForPlan: THREE.Group | null = null;
 
   for (let m = 0; m < mastCount; m++) {
     const mastPlan = rigPlan[m];
     const mastZ = mastPlan.z;
     const mastH = mastPlan.height;
-    const mastR = 0.075 + (ship.type === 'galleon' ? 0.045 : ship.type === 'brigantine' ? 0.025 : 0);
+    const planMast: RigPlanMast = { z: mastZ, height: mastH, mastR, nestY: null, yards: [] };
+    planMasts.push(planMast);
 
     const mast = new THREE.Mesh(
       new THREE.CylinderGeometry(mastR * 0.8, mastR * 1.4, mastH, 16),
@@ -116,6 +126,7 @@ export function buildRig(ctx: RigContext): RigBuild {
     // Keep in sync with getCrowNestStandingY (the standing spot).
     if (m === 0 && mastH > 6) {
       const nestY = getCrowNestStandingY(stats) - 0.12;
+      planMast.nestY = nestY;
       // A genuine lookout platform, not a dinner plate: floor r = 1.0 carries
       // the server's 0.9 m walkable disc (PhysicsSystem CROW_NEST_WALK_RADIUS)
       // with the rail hoop just outboard at 1.06, so a pacing lookout stops at
@@ -148,25 +159,7 @@ export function buildRig(ctx: RigContext): RigBuild {
       }
     }
 
-    const addRigLine = (a: THREE.Vector3, b: THREE.Vector3) => {
-      ratlineRuns.push({ a, b });
-    };
-    for (const sx of [-1, 1] as const) {
-      const topA = new THREE.Vector3(sx * mastR * 1.8, H + mastH * 0.78, mastZ - L * 0.025);
-      const topB = new THREE.Vector3(sx * mastR * 1.8, H + mastH * 0.72, mastZ + L * 0.025);
-      const baseA = new THREE.Vector3(sx * W * 0.43, H + 0.42, mastZ - L * 0.09);
-      const baseB = new THREE.Vector3(sx * W * 0.43, H + 0.42, mastZ + L * 0.08);
-      addRigLine(topA, baseA);
-      addRigLine(topB, baseB);
-      const rungCount = 6;
-      for (let rung = 1; rung < rungCount; rung++) {
-        const tRung = rung / rungCount;
-        addRigLine(
-          new THREE.Vector3().lerpVectors(topA, baseA, tRung),
-          new THREE.Vector3().lerpVectors(topB, baseB, tRung),
-        );
-      }
-    }
+    // Shrouds, deadeyes, ratlines and backstays: planRopes (b4.2h).
 
     for (const plan of mastPlan.sails) {
       if (plan.kind === 'spanker') continue;
@@ -193,14 +186,8 @@ export function buildRig(ctx: RigContext): RigBuild {
       // a cylinder laid along the pivot's x axis at its origin, so the yardarm
       // is (±yardW·0.48, 0, 0) in that frame.
       yardHalfSpanForMast[trimPivots.length - 1] = yardW * 0.48;
-      for (const sx of [-1, 1]) {
-        ropeRuns.push({
-          a: new THREE.Vector3(sx * W * 0.44, H + 0.15, mastZ - L * 0.04),
-          b: new THREE.Vector3(sx * yardW * 0.48, plan.headY, mastZ),
-          pivot: trimPivot,
-          bLocal: new THREE.Vector3(sx * yardW * 0.48, 0, 0),
-        });
-      }
+      // b4.2h: lifts now run UP to a block on the mast (planRopes).
+      planMast.yards.push({ pivot: trimPivot, halfSpan: yardW * 0.48, headY: plan.headY, kind: plan.kind });
 
       // Square-rigged sail — hangs from the yardarm. PlaneGeometry's default frame is
       // exactly what we want: width along X (matches yardarm direction), height along Y
@@ -430,6 +417,7 @@ export function buildRig(ctx: RigContext): RigBuild {
         mainYardHalfSpan = yardHalfSpanForMast[i] ?? 0;
       }
     }
+    mainTrimPivotForPlan = mainTrimPivot;
     for (const ropeStation of getSailRopeStationLocals(stats)) {
       // Clamp the rack onto the REAL deck at this station — the hull
       // narrows toward the mast, and the shared approximation can land a
@@ -443,6 +431,7 @@ export function buildRig(ctx: RigContext): RigBuild {
       group.add(rack);
       for (const pinOff of [-0.3, 0, 0.3]) {
         const pin = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.035, 0.34, 6), brassMat);
+        pin.name = 'belaying-pin';
         pin.position.set(rackX + pinOff, H + 0.68, ropeStation.z);
         group.add(pin);
       }
@@ -461,9 +450,16 @@ export function buildRig(ctx: RigContext): RigBuild {
       // sail it moves (taut both ends, no floating tail, no text tag).
       // Halyard: pin rail up to a block ON THE MAST, not on the yard, so it
       // is static by design — hauling it hoists the sail, it does not brace.
+      // Made fast ON the drawn mast nearest the shared main-mast z (the
+      // shared z and the drawn mast can differ by a few dm).
+      const mainZ = getMainMastLocalZ(stats);
+      const pm = planMasts.reduce((best, mm) => (Math.abs(mm.z - mainZ) < Math.abs(best.z - mainZ) ? mm : best), planMasts[0]);
+      const halyardY = H + Math.min(mastHForHalyard, pm.height) * 0.55;
+      const hr = mastR * (1.4 - 0.6 * ((halyardY - H) / pm.height)) * 0.9;
       ropeRuns.push({
         a: new THREE.Vector3(rackX, H + 0.72, ropeStation.z),
-        b: new THREE.Vector3(rackX * 0.1, H + mastHForHalyard * 0.55, getMainMastLocalZ(stats)),
+        b: new THREE.Vector3(Math.sign(rackX) * hr, halyardY, pm.z),
+        family: 'running', aKind: 'pin', bKind: 'spar', label: 'station-halyard',
       });
     }
     // Brace stations: cleat + coil at the quarterdeck rails, brace rope
@@ -474,6 +470,7 @@ export function buildRig(ctx: RigContext): RigBuild {
       const bx = Math.sign(brace.x) * Math.min(Math.abs(brace.x), Math.max(0.9, deckEdge - 0.5));
       const cleat = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.12, 0.14), markerMat);
       cleat.position.set(bx, H + 0.74, brace.z);
+      cleat.name = 'brace-cleat';
       cleat.castShadow = true;
       group.add(cleat);
       const braceCoil = makeRopeCoil(ropeStationMat, 0.18, 0.06, brace.z * 3 + 2, 2.3);
@@ -492,6 +489,7 @@ export function buildRig(ctx: RigContext): RigBuild {
           : new THREE.Vector3(braceSide * L * 0.2, H + mastHForHalyard * 0.6, getMainMastLocalZ(stats)),
         pivot: mainTrimPivot ?? undefined,
         bLocal: mainTrimPivot ? new THREE.Vector3(braceSide * mainYardHalfSpan, 0, 0) : undefined,
+        family: 'running', sag: mainTrimPivot ? 0.02 : 0, aKind: 'pin', bKind: 'spar', label: 'station-brace',
       });
     }
   }
@@ -541,33 +539,59 @@ export function buildRig(ctx: RigContext): RigBuild {
   group.add(furledJib);
   furledSails.push(furledJib);
 
-  // Fore-stay rigging (bowsprit to foremast)
+  // Head stays (b4.2h): from points ON the bowsprit's axis (read from the
+  // spar ShipRenderer built, tagged userData.rigSpar) up the foremast.
   const foreMastZ = mastStartZ;
+  const bowsprit = group.children.find((o) => o.userData.rigSpar === 'bowsprit') as THREE.Mesh | undefined;
+  const sprit = (alongFromTip: number): THREE.Vector3 => {
+    if (!bowsprit) return new THREE.Vector3(0, H + 0.55, L * 0.76 - alongFromTip);
+    bowsprit.updateMatrix();
+    const half = ((bowsprit.geometry as THREE.CylinderGeometry).parameters?.height ?? L * 0.33) * 0.5;
+    const p = new THREE.Vector3(0, half - alongFromTip, 0).applyMatrix4(bowsprit.matrix);
+    const q = new THREE.Vector3(0, -half + alongFromTip, 0).applyMatrix4(bowsprit.matrix);
+    return p.z > q.z ? p : q;
+  };
+  const foreR = (y: number) => mastR * (1.4 - 0.6 * THREE.MathUtils.clamp((y - H) / rigPlan[0].height, 0, 1)) * 0.9;
   ropeRuns.push({
-    a: new THREE.Vector3(0, H + 0.55, L * 0.76),
-    b: new THREE.Vector3(0, foreStayHeadY, foreMastZ),
+    a: sprit(0.12), b: new THREE.Vector3(0, foreStayHeadY, foreMastZ + foreR(foreStayHeadY)),
+    family: 'standing', aKind: 'spar', bKind: 'spar', label: 'forestay',
   });
   // Side stays land ON the bowsprit shaft just behind the tip — never in open air
   for (const sx of [-1, 1] as const) {
     ropeRuns.push({
-      a: new THREE.Vector3(sx * 0.06, H + 0.53, L * 0.72),
-      b: new THREE.Vector3(0, foreStayHeadY - 0.4, foreMastZ),
+      a: sprit(L * 0.04), b: new THREE.Vector3(sx * foreR(foreStayHeadY - 0.4), foreStayHeadY - 0.4, foreMastZ),
+      family: 'standing', aKind: 'spar', bKind: 'spar', label: 'head-stay',
     });
   }
+  const foreTopY = (planMasts[0]?.nestY ?? (H + rigPlan[0].height)) - 0.45;
+  ropeRuns.push({
+    a: sprit(0.05), b: new THREE.Vector3(0, foreTopY, foreMastZ + foreR(foreTopY)),
+    family: 'standing', aKind: 'spar', bKind: 'spar', label: 'fore-topmast-stay',
+  });
+  const plan = planRopes({
+    profile, H, L, type: ship.type, ratlineStep: ctx.phone ? 1.14 : quality === 'low' ? 0.76 : 0.38,
+    masts: planMasts, bracedPivot: mainTrimPivotForPlan,
+  });
+  ropeRuns.push(...plan.ropes);
+  ratlineRuns.push(...plan.ratlines);
 
   // Flush all collected rigging into two INSTANCED draw calls. Three radial
   // sides on the low tier, five elsewhere: ~290 triangles per hull on low,
   // ~480 on balanced — under a tenth of a percent of the wide-shot budget,
   // and the draw-call count is identical to the two LineSegments it replaces.
-  const ropeSides = quality === 'low' ? 3 : 5;
+  // Phones (b4.2h): two radial sides (a flat ribbon, 4 tris) and only the
+  // deadeyes and blocks among the fittings, to hold the phone own-hull cap.
+  const ropeSides = ctx.phone ? 2 : quality === 'low' ? 3 : 5;
+  if (ctx.phone) plan.hardware = plan.hardware.filter((f) => f.kind === 'deadeye' || f.kind === 'block');
   const ropeRigMat = new THREE.MeshStandardMaterial({ color: 0x6a5030, roughness: 1 });
   ropeRigMat.name = 'ship-rigging-rope';
   const ratlineRigMat = new THREE.MeshStandardMaterial({ color: 0x4b3520, roughness: 1 });
   ratlineRigMat.name = 'ship-rigging-ratline';
-  const ropeRig = buildRigging(ropeRuns, ropeRigMat, 0.028, ropeSides);
+  const ropeRig = buildRigging(ropeRuns, ropeRigMat, 0.028, ropeSides, plan.hardware);
   const ratlineRig = buildRigging(ratlineRuns, ratlineRigMat, 0.018, ropeSides);
-  if (ropeRig) group.add(ropeRig.mesh);
-  if (ratlineRig) group.add(ratlineRig.mesh);
+  const rigSet: RiggingSet | null = ropeRig && ratlineRig
+    ? { rope: ropeRig, ratline: ratlineRig, far: buildRigFarCards(plan.cards, 0x4b3520) }
+    : null;
 
-  return { sails, furledSails, pennants, trimPivots, nestFloorMesh, mastCount, mastStartZ, ropeRig, ratlineRig };
+  return { sails, furledSails, pennants, trimPivots, nestFloorMesh, mastCount, mastStartZ, ropeRig, ratlineRig, rigSet };
 }
