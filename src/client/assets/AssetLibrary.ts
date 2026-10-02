@@ -67,6 +67,19 @@ export const ASSET_NAMES = [
   // Streamed on demand (SHIP_KIT_ASSET_NAMES); the _lods siblings carry the
   // per-node LOD1/LOD2 geometry the 30-250 m hull roots mount.
   'ship_kit_a', 'ship_kit_b', 'ship_kit_a_lods', 'ship_kit_b_lods',
+  // Cliff kit (b4.6a/b, build_cliff_kit.py): placed by src/server/world/placement/cliffKit.ts as
+  // island.kitPieces and drawn by CliffKitBuilder. WORLD tier, loaded before the countdown: the
+  // convex-hull colliders (hullCollide.ts) exist from tick 0, so the draw must too. The _lods
+  // siblings carry <key>_LOD1/_LOD2/_far nodes; InstanceLod swaps to the _far node.
+  'cliff_face_a', 'cliff_face_b', 'cliff_face_c', 'cliff_overhang_a', 'cliff_overhang_b', 'rock_shelf_a',
+  'rock_shelf_b', 'sea_arch_a', 'sea_arch_b', 'basalt_columns_a', 'scree_fan_a', 'searock_d', 'searock_e',
+  'searock_f', 'searock_g', 'strata_slab_a', 'strata_slab_b', 'strata_slab_c', 'spire_a', 'spire_b',
+  'spire_c', 'reef_a', 'reef_b', 'reef_c',
+  'cliff_face_a_lods', 'cliff_face_b_lods', 'cliff_face_c_lods', 'cliff_overhang_a_lods',
+  'cliff_overhang_b_lods', 'rock_shelf_a_lods', 'rock_shelf_b_lods', 'sea_arch_a_lods', 'sea_arch_b_lods',
+  'basalt_columns_a_lods', 'scree_fan_a_lods', 'searock_d_lods', 'searock_e_lods', 'searock_f_lods',
+  'searock_g_lods', 'strata_slab_a_lods', 'strata_slab_b_lods', 'strata_slab_c_lods', 'spire_a_lods',
+  'spire_b_lods', 'spire_c_lods', 'reef_a_lods', 'reef_b_lods', 'reef_c_lods',
 ] as const;
 
 export type AssetName = (typeof ASSET_NAMES)[number];
@@ -933,10 +946,18 @@ export class AssetLibrary {
     return this.mergeKey(`${name as (typeof FAR_ASSET_NAMES)[number]}_far`);
   }
 
-  private mergeKey(name: AssetKey): MergedAsset | null {
-    const cached = this.merged.get(name);
+  /** One named node of a loaded asset, merged and collapsed exactly like `mergedGeometry`
+   *  (b4.6d: the `<key>_far` node inside a cliff kit `<key>_lods.glb`). Null when missing. */
+  mergedNodeGeometry(name: AssetName, node: string): MergedAsset | null {
+    return this.mergeKey(name, node);
+  }
+
+  private mergeKey(name: AssetKey, nodeName?: string): MergedAsset | null {
+    const cacheKey = (nodeName ? `${name}#${nodeName}` : name) as AssetKey;
+    const cached = this.merged.get(cacheKey);
     if (cached) return cached;
-    const src = this.scenes.get(name);
+    const root = this.scenes.get(name);
+    const src = nodeName ? root?.getObjectByName(nodeName) : root;
     // A lazy LOD0 armed for release may already hold empty arrays: no merge.
     if (!src || this.cpuReleased.has(name) || this.lazyCpuArmed.has(name)) return null;
 
@@ -1001,7 +1022,7 @@ export class AssetLibrary {
     trackUpload(finalGeom);
     for (const m of orderedMats) this.sharedResources.add(m);
     if (collapsed) this.sharedResources.add(collapsed);
-    this.merged.set(name, result);
+    this.merged.set(cacheKey, result);
     return result;
   }
 }
