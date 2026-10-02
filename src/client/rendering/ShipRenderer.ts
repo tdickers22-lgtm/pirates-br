@@ -44,6 +44,7 @@ import { releaseShipGeometry } from './ship/geometry.js';
 import { selectShipLod, shipLodKey, SHIP_LOD_BANDS, SHIP_LOD_HYSTERESIS, type ShipLodLevel } from './ship/lod.js';
 import { buildRudder, buildSternCastle } from './ship/stern.js';
 import { buildRig } from './ship/sails.js';
+import { shipMotionOf, wheelFollowAlpha } from './ship/shipMotion.js';
 import { DECK_KIT_SMALL, deckKitSockets, kitDrawCount, type DeckKitPart, mountShipKit, shipKitSockets, SHIP_KIT_FILES, SHIP_KIT_LOD_FILES, type KitSocket, type ShipKitFile, type ShipKitLodFile, type ShipKitSource } from './ship/kit.js';
 import { SAIL_BELLY, SAIL_CLOTH_GRID, makeLodSailCard, sailFillTarget, sailLuff01, sailWind01, setSailClothUniforms, stepSailFill, type SailClothUniforms } from './ship/sailCloth.js';
 import { applyRiggingLod, updateRigging, type Rigging, type RiggingSet } from './ship/rigging.js';
@@ -488,6 +489,7 @@ export class ShipRenderer {
       }
     }
     mesh.kit = root;
+    shipMotionOf(mesh).bindLids([root, lod1, lod2]); // b4.3d: gunport lids open on the guns
   }
   /** One reused frame record for every hull's wake — filled in place each
    *  update so driving twelve wakes allocates nothing. */
@@ -3693,7 +3695,7 @@ void main() {
       // commanding: three quarter-turns lock to lock (ships-12).
       const rudderAngle = Number.isFinite(ship.rudderAngle) ? (ship.rudderAngle ?? 0) : 0;
       const rudder01 = THREE.MathUtils.clamp(rudderAngle / SHIP.RUDDER_MAX_ANGLE, -1, 1);
-      const helmAlpha = 1 - Math.exp(-9 * dt);
+      const helmAlpha = wheelFollowAlpha(dt); // b4.3d: WHEEL_TAU_S lag behind the rudder
       mesh.wheel.rotation.z = THREE.MathUtils.lerp(
         mesh.wheel.rotation.z, helmWheelRotZ(rudder01), helmAlpha,
       );
@@ -3702,11 +3704,8 @@ void main() {
 
       const anchorRaiseProgress = THREE.MathUtils.clamp(ship.anchorRaiseProgress ?? 0, 0, 1);
       const anchorDrop = ship.anchored ? 1 - anchorRaiseProgress : 0;
-      if (ship.anchored && anchorRaiseProgress > 0) {
-        mesh.anchorCapstan.rotation.y += dt * (3.6 + anchorRaiseProgress * 4.8);
-      } else {
-        mesh.anchorCapstan.rotation.y += dt * 0.08;
-      }
+      // b4.3d: the drum turns with the cable only (+Y raise, fast reverse on the drop, still at rest).
+      mesh.anchorCapstan.rotation.y += shipMotionOf(mesh).capstan.step(ship.anchored, anchorRaiseProgress, dt);
       const anchorAlpha = 1 - Math.exp(-10 * dt);
       // A DROPPED ANCHOR IS IN THE WATER. The descent was a fixed 2.75 m from
       // H + 0.34, which on the galleon (H 3.5) left the stock a metre ABOVE the
@@ -3901,6 +3900,8 @@ void main() {
 
       const cannonsPerSide = Math.max(1, SHIP_STATS[ship.type].cannonCount / 2);
       const shipOperators = cannonOperators.get(ship.id);
+      const objMotion = shipMotionOf(mesh); // b4.3d: fire edges -> recoil + gunport lids
+      objMotion.update(ship.cannonCooldowns, (i) => !!shipOperators?.[i], t, dt);
       for (let index = 0; index < mesh.cannonMeshes.length; index++) {
         const cannon = mesh.cannonMeshes[index];
         const operator = shipOperators?.[index];
@@ -3917,8 +3918,7 @@ void main() {
         const desiredYaw = operator ? angleWrap(operator.rotation.x - broadsideYaw) : 0;
         const desiredPitch = operator ? operator.rotation.y : 0;
         const cannonAlpha = 1 - Math.exp(-18 * dt);
-        cannon.yawPivot.rotation.y += angleWrap(desiredYaw - cannon.yawPivot.rotation.y) * cannonAlpha;
-        cannon.pitchPivot.rotation.z = THREE.MathUtils.lerp(cannon.pitchPivot.rotation.z, desiredPitch, cannonAlpha);
+        objMotion.aimGun(index, cannon, desiredYaw, desiredPitch, cannonAlpha);
       }
 
       // Ship lanterns: warm glass emissive ramps day→night (setNightFactor). At
