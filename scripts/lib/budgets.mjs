@@ -101,11 +101,10 @@ export const DEVICE_ROWS_IPAD = [
 const HLOD = 'b4.4a (island HLOD sector batching: the dock vista and deck views are island-decor, sea-rock, loot tells and per-island meshes)';
 const PROGRAMS = 'b4.4a + the program census owner (merge the unnamed physical/basic variants and the three named splits; phones to 70, then the 66 table figure)';
 export const PERF_DEVIATIONS = {
-  'phone.dock-vista.draws': { upTo: 425, measured: 406, owner: HLOD, since: '2026-09-30' },
-  'phone.dock-vista.tris': { upTo: 420_000, measured: 403_000, owner: HLOD, since: '2026-09-30' },
-  'phone.deck-aft.draws': { upTo: 505, measured: 483, owner: HLOD, since: '2026-09-30' },
+  'phone.dock-vista.draws': { upTo: 405, measured: 392, owner: HLOD, since: '2026-09-30' },
+  'phone.dock-vista.tris': { upTo: 412_000, measured: 401_000, owner: HLOD, since: '2026-09-30' },
+  'phone.deck-aft.draws': { upTo: 485, measured: 468, owner: HLOD, since: '2026-09-30' },
   'ipad.dock-vista.draws': { upTo: 355, measured: 338, owner: HLOD, since: '2026-09-30' },
-  'low.island-interior.draws': { upTo: 550, measured: 528, owner: HLOD, since: '2026-09-30' },
   'low.deck-aft.draws': { upTo: 540, measured: 515, owner: HLOD, since: '2026-09-30' },
   'phone.dock-vista.programs': { upTo: 80, measured: 77, owner: PROGRAMS, since: '2026-09-30' },
   'phone.island-interior.programs': { upTo: 80, measured: 77, owner: PROGRAMS, since: '2026-09-30' },
@@ -219,7 +218,8 @@ export const PERF_BUDGETS = {
   // (its props sit inside the 300 m full-detail radius), so it is the two
   // far-prop scenes that guard the ramp, not the vista.
   balanced: [
-    { scene: 'dock-vista', label: 'wide island vista (balanced tier)', measured: 864, draws: 970, tris: 1_430_000 },
+    // b4.4a (2026-10-02, HLOD a4 on the 3101/8091 stack, seed 20260801): 787 draws / 837k tris.
+    { scene: 'dock-vista', label: 'wide island vista (balanced tier)', measured: 787, draws: 870, tris: 950_000 },
     { scene: 'open-sea', label: 'open water (balanced tier)', measured: 442, draws: 495, tris: 395_000 },
     { scene: 'cave-interior', label: 'cave interior (balanced tier)', measured: 1374, draws: 1540, tris: 1_835_000 },
   ],

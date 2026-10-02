@@ -47,7 +47,9 @@ export const MID_KEEP_SIZE = 3.6;
 /** Pieces at least this big are landmarks: never sectorised, always drawn with the island. */
 export const FAR_KEEP_SIZE = 9;
 
-const HARMLESS_USERDATA: ReadonlySet<string> = new Set(['assetFamily']);
+// assetFamily: AssetLibrary's memory tag. name: GLTFLoader copies every glTF node name into
+// userData.name (three r160), which pinned 105 GLB props (crag, lantern post, campfire, bedroll).
+const HARMLESS_USERDATA: ReadonlySet<string> = new Set(['assetFamily', 'name']);
 const KEEP_NAMES = new Set(['island-terrain', 'island-shore-skirt', 'island-micro-root']);
 
 let resolvedBands: HlodBands | null = null;
