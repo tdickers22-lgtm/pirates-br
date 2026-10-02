@@ -290,6 +290,10 @@ export const LOGIC = [
   quick(tsx('test-hlod-logic.mjs')),
   // b4.4b landform layer core (islands-01): evaluator + hook enforced, PLAN 3.14 relief table in report mode.
   quick(tsx('test-island-relief.mjs')),
+  // b4.4h bot reachability (islands-01, vm:islands:2): 1 m walk graph + real PhysicsSystem
+  // bot on all 14 islands, >= 90% of walkable land from the landing beach; Part C detail
+  // POIs (parley table on the mesa, mine head on the outer slope, Old Maw rim trail). ~5 s.
+  tsx('test-bot-island-reach.mjs'),
   tsx('test-interaction-arbiter.mjs'),
   // HUD-01/hud-12: prompt ⊆ grant on a 0.25 m deck grid, all three hulls (w1.6).
   tsx('test-interact-parity.mjs'),
