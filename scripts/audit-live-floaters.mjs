@@ -21,6 +21,7 @@
 //
 //   node scripts/audit-live-floaters.mjs [outDir]
 //     PIRATES_BR_FLOAT_LIMIT=0.25   gap (m) that counts as a floater
+//     PIRATES_BR_FLOAT_SURFACE=lod  measure against the live coarse LOD index instead of the full grid
 import { chromium } from 'playwright';
 import { browserArgs } from './lib/browser-args.mjs';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -35,6 +36,10 @@ const BASE_URL = (process.env.PIRATES_BR_URL ?? 'http://127.0.0.1:3000').replace
 const OUT = process.argv[2] ?? 'test-results/live-floaters';
 mkdirSync(OUT, { recursive: true });
 const LIMIT = Number(process.env.PIRATES_BR_FLOAT_LIMIT ?? 0.25);
+// full (default): the near-band full terrain grid. lod: whatever index the
+// terrain render LOD holds right now (coarse chunks beyond the near band);
+// kept to reproduce the pre-fix reading, not a grade.
+const SURFACE = process.env.PIRATES_BR_FLOAT_SURFACE === 'lod' ? 'lod' : 'full';
 
 const browser = await chromium.launch({
   args: browserArgs(['--ignore-gpu-blocklist']),
@@ -84,7 +89,7 @@ await page.waitForFunction(
 await page.evaluate(() => window.__piratesBR.settleLod?.(2));
 await page.waitForTimeout(1200);
 
-const report = await page.evaluate((limit) => {
+const report = await page.evaluate(({ limit, surface }) => {
   const g = window.__piratesBR;
   const THREE = g.renderer.THREE ?? null;
 
@@ -92,10 +97,19 @@ const report = await page.evaluate((limit) => {
    *  Uniform XZ bucket grid → barycentric lookup; returns the highest triangle
    *  covering (x, z), which is the ground a prop would rest on. */
   function makeMeshSampler(mesh) {
-    const geo = mesh.geometry;
+    // b4.4c/c1 TERRAIN RENDER LOD: island-terrain's live index is a COARSE
+    // chunk list beyond the near band (writeTerrainLodIndex into a fixed-
+    // capacity buffer, drawRange = what is current, stale triangles past it).
+    // Reading geometry.index measured every far island against its coarse
+    // chords (46 "floaters" on 10 islands at 8b5efd1b, gaps up to 5 m), not
+    // the ground a player standing beside the prop sees. The near-band truth
+    // is the full grid the LOD keeps (TerrainLodSwitch.fullGeometry), the same
+    // surface GroundTruth seats props on and every raycast walks.
+    const geo = (surface === 'lod' ? null : mesh.userData?.terrainLod?.fullGeometry) ?? mesh.geometry;
     const p = geo.attributes.position.array;
     const index = geo.index ? geo.index.array : null;
-    const triCount = index ? index.length / 3 : p.length / 9;
+    const drawn = geo.drawRange && Number.isFinite(geo.drawRange.count) ? geo.drawRange.count : Infinity;
+    const triCount = Math.floor(Math.min(index ? index.length : p.length / 3, drawn) / 3);
     const CELL = 6;
     const buckets = new Map();
     const key = (ix, iz) => `${ix}|${iz}`;
@@ -363,7 +377,7 @@ const report = await page.evaluate((limit) => {
     });
   }
   return out;
-}, LIMIT);
+}, { limit: LIMIT, surface: SURFACE });
 
 let printed = 0;
 for (const isl of report.islands) {
