@@ -1,7 +1,8 @@
 # Island vegetation set: leafy bush, berry bush, flowering shrub, a proper
 # 3D fern, a flourishing flower bed, and tall wildflowers. Individual folded
 # leaves, branched stems and tapered pinnae replace the old foliage blobs.
-# Close-range instanced asset budget: 3,000 triangles, six material slots.
+# Flora v2 (b4.5d): bushes/fern 3-6k tris, flower patches 1.5-3k, six material slots; thin
+# stems (5.5-6.5 mm wildflower stalks, 12 mm woody shoots), 13+ leafy shoots per shrub.
 # Material names are a client API (sway/tint by name) — do not rename.
 # Headless: Blender -b -P scripts/blender/build_plants.py
 # Optional: PLANTS_RENDER_DIR=<dir> to write turntable renders per asset.
@@ -43,8 +44,13 @@ def seed_of(name):
     return zlib.crc32(name.encode()) & 0xffff
 
 
+# Flora v2 tier bands (test-asset-tiers bushes / flowers, b4.5d): denser shrubs, thin stems.
+PLANT_BAND = {'flower_patch': (1500, 3000), 'wildflowers': (1500, 3000)}
+
+
 def finish(coll, name):
-    finish_nature(coll, name, budget=3000)
+    lo, hi = PLANT_BAND.get(name, (3000, 6000))
+    finish_nature(coll, name, budget=hi, floor=lo)
 
 
 # ── shared geometry helpers ─────────────────────────────────
@@ -140,7 +146,7 @@ def leaf_clump(coll, name, radius, leaf_mats, rng, blobs, jitter=0.46):
     forks. Returned tips attach berries/flowers to actual branch endings."""
     parts = []
     blob_data = []
-    shoots = blobs + 3
+    shoots = blobs + 6
     for i in range(shoots):
         ang = i * 2.39996 + rng.uniform(-0.30, 0.30)
         reach = radius * rng.uniform(0.45, 0.84)
@@ -149,10 +155,10 @@ def leaf_clump(coll, name, radius, leaf_mats, rng, blobs, jitter=0.46):
         pts = [base + Vector((math.cos(ang) * reach * t,
                              math.sin(ang) * reach * t, height * (t - t*t*0.17)))
                for t in (0, 0.33, 0.66, 1)]
-        parts += chain_pts(coll, f'{name}_shoot{i}', pts, 0.018, 0.005,
+        parts += chain_pts(coll, f'{name}_shoot{i}', pts, 0.012, 0.0035,
                            mat('Stem'), segs=5, balls=False)
-        for k in range(7):
-            t = 0.21 + k * 0.115 + rng.uniform(-0.018, 0.018)
+        for k in range(10):
+            t = 0.19 + k * 0.081 + rng.uniform(-0.014, 0.014)
             p = base + Vector((math.cos(ang) * reach * t,
                                math.sin(ang) * reach * t, height * (t - t*t*0.17)))
             for side in (-1, 1):
@@ -235,7 +241,7 @@ def build_fern(name):
     coll = asset_collection(name)
     rng = random.Random(seed_of(name))
     parts = []
-    fronds = 13
+    fronds = 16
     for i in range(fronds):
         yaw = (i / fronds) * math.tau + rng.random() * 0.35
         inner = (i % 4 == 0)  # every fourth frond stands taller in the middle
@@ -264,7 +270,7 @@ def build_fern(name):
         # pinnae: paired curved blades at 8 stations, shrinking toward the tip,
         # swept forward and drooping gently so the frond reads as one leaf
         pbm = bmesh.new()
-        stations = 12
+        stations = 16
         for k in range(stations):
             t = (k + 1) / (stations + 1)
             fs = t * segs_n
@@ -345,7 +351,7 @@ def build_flower_patch(name):
         lean_dir = rng.random() * math.tau
         lean = 0.15 + rng.random() * 0.35
         sbm, top, tilt = bm_bent_stem(base, stem_h, lean_dir, lean,
-                                      segs_n=3, sides=4, r1=0.013, r2=0.007)
+                                      segs_n=3, sides=4, r1=0.0055, r2=0.0028)
         parts.append(obj_from_bmesh(f"{name}_stem{i}", sbm, coll, mat("Stem")))
         parts.extend(flower_at(coll, name, i, top, -tilt * 0.8, lean_dir + math.pi / 2,
                                rng.choice(palettes), rng,
@@ -361,7 +367,7 @@ def build_wildflowers(name):
     rng = random.Random(seed_of(name))
     parts = []
     palettes = ["Flower_Pink", "Flower_Yellow", "Flower_White"]
-    stalks = 12
+    stalks = 19
     for i in range(stalks):
         ang = (i / stalks) * math.tau + rng.random() * 0.5
         base_r = 0.04 + rng.random() * 0.17
@@ -370,7 +376,7 @@ def build_wildflowers(name):
         lean_dir = ang + (rng.random() - 0.5) * 1.2
         lean = 0.12 + rng.random() * 0.28
         sbm, top, tilt = bm_bent_stem(base, height, lean_dir, lean,
-                                      segs_n=5, sides=5, r1=0.018, r2=0.007)
+                                      segs_n=5, sides=4, r1=0.0065, r2=0.0030)
         parts.append(obj_from_bmesh(f"{name}_stem{i}", sbm, coll, mat("Leaf_C")))
         # two curved leaf blades midway up
         for k in range(2):
