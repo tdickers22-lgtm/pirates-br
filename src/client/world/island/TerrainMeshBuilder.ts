@@ -847,8 +847,18 @@ export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
   // triangles per island in the depth pass, and ONLY for islands already inside
   // the 310 m ortho box (three culls the shadow pass against it, and the box is
   // sized to hold one island). The distance LOD's proxy stays non-casting below.
+  //
+  // b4.4d: WHICH side is "far" depends on the grid's winding, and the shared
+  // grid (terrainGrid stitchRings, since w7.2) winds every cap triangle with
+  // its geometric front facing DOWN (computeVertexNormals: mean normal.y -0.90
+  // on land; DoubleSide flips it for lighting). BackSide therefore wrote the
+  // sunlit TOP surface, and the shadow vertex stage pushed each receiver
+  // normalBias metres DOWN its unflipped normal, under that very surface: every
+  // island inside the shadow box sat in its own shadow (Dead Man Shoals bone
+  // sand rendered slate 95,118,118; receiveShadow off -> 195,190,170). FrontSide
+  // on a down-wound cap is the far side: lee slopes and the skirt only.
   terrain.castShadow = true;
-  terrainMat.shadowSide = THREE.BackSide;
+  terrainMat.shadowSide = THREE.FrontSide;
   terrain.receiveShadow = true;
   group.add(terrain);
   // b4.4c: near chunks draw the walkable grid, the rest a coarse list over the
