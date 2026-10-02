@@ -46,7 +46,7 @@ export function withMeshopt<T extends GLTFLoader>(loader: T): T {
  * on its OWN row: test-model-transport sums brotli bytes per family per set, test-memory-budget
  * sums resident texture MB per family per tier (AssetLibrary tags userData.assetFamily on every
  * mesh and texture it loads; untagged textures (terrain, ocean, sky, env map, UI) are `shared`).
- * A `<key>_far` sibling belongs to its base key's family. Every packed GLB must have a row here:
+ * A `<key>_far` or `<key>_lods` sibling belongs to its base key's family. Every packed GLB must have a row here:
  * test-model-transport fails a key without one, so a new GLB cannot hide in `shared`.
  */
 export const MODEL_FAMILIES = [
@@ -90,7 +90,7 @@ export const MODEL_FAMILY_OF: Readonly<Record<string, ModelFamily>> = (() => {
   return out;
 })();
 
-/** The family a model key (or its `_far` sibling) is charged to; null for an unlisted key. */
+/** The family a model key (or its `_far` / `_lods` sibling) is charged to; null for an unlisted key. */
 export function modelFamily(key: string): ModelFamily | null {
-  return MODEL_FAMILY_OF[key.replace(/_far$/, '')] ?? null;
+  return MODEL_FAMILY_OF[key.replace(/_(far|lods)$/, '')] ?? null;
 }
