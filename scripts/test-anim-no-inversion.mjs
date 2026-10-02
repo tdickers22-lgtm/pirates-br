@@ -1185,7 +1185,131 @@ console.log('\nb4.3d ship object motion: cannon recoil, gunport lids, capstan, w
     && /wheelFollowAlpha\(dt\)/.test(sr) && /bindLids\(\[root, lod1, lod2\]\)/.test(sr) && !/anchorCapstan\.rotation\.y \+= dt \* 0\.08/.test(sr));
 }
 
+// ── b4.3d DAMAGE THAT READS AT RANGE (vm:ships:6): from ~30 m a hull draws its
+// LOD1/LOD2 instanced sails, and those carried no tear at all, so a chainshot
+// rig looked whole at 60 m. The LOD sail material now cuts the same holes as
+// the LOD0 cloth (sailTearAmount / clothTornAt, seed per instance), and a ball
+// that strikes at the rail line splinters that rail run (seeded, every client).
+// Negative controls: integrity 1 has no holes; a hull hit below the rail, a
+// mid-deck hit and a hit past the breastwork break no rail.
+console.log('\nb4.3d damage at range: torn LOD sails readable at 60 m, splintered rails on impact');
+{
+  const SM = await import('../src/client/rendering/ship/shipMotion.ts');
+  const SC = await import('../src/client/rendering/ship/sailCloth.ts');
+  const HULL = await import('../src/shared/hull.ts');
+  const GEO = await import('../src/client/rendering/ship/geometry.ts');
+  // [sails] raster every square LOD sail at its pixel size 60 m off (70 deg fov, 1080 px tall).
+  const ppm = 1080 / (2 * 60 * Math.tan(35 * DEG));
+  function sailHoles(w, h, tear, inst) {
+    const W = Math.max(1, Math.round(w * ppm)), Hh = Math.max(1, Math.round(h * ppm));
+    const torn = new Uint8Array(W * Hh); let tornPx = 0;
+    for (let j = 0; j < Hh; j++) for (let i = 0; i < W; i++) {
+      if (SM.lodSailTornAt((i + 0.5) / W, (j + 0.5) / Hh, tear, inst)) { torn[j * W + i] = 1; tornPx += 1; }
+    }
+    const seen = new Uint8Array(W * Hh); let readable = 0;
+    for (let k = 0; k < W * Hh; k++) {
+      if (!torn[k] || seen[k]) continue;
+      let area = 0; const st = [k]; seen[k] = 1;
+      while (st.length) {
+        const c = st.pop(); area += 1; const ci = c % W, cj = (c / W) | 0;
+        for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const ni = ci + di, nj = cj + dj; if (ni < 0 || nj < 0 || ni >= W || nj >= Hh) continue;
+          const n = nj * W + ni; if (torn[n] && !seen[n]) { seen[n] = 1; st.push(n); }
+        }
+      }
+      if (area >= 9) readable += 1; // >= 3x3 px: a hole you can see, not a sparkle
+    }
+    return { readable, frac: tornPx / (W * Hh), mask: torn };
+  }
+  function rigHoles(type, integrity) {
+    const plan = HULL.getShipRigPlan(SHIP_STATS[type]);
+    let inst = 0, readable = 0, frac = 0, n = 0; const masks = [];
+    for (const mast of plan) for (const s of mast.sails) {
+      if (s.kind === 'spanker') continue;
+      const r = sailHoles((s.headW + s.footW) * 0.5, s.headY - s.footY, SC.sailTearAmount(integrity), inst++);
+      readable += r.readable; frac += r.frac; n += 1; masks.push(r.mask);
+    }
+    return { readable, frac: frac / Math.max(1, n), n, masks };
+  }
+  const types = Object.keys(SHIP_STATS);
+  const whole = types.map((t) => rigHoles(t, 1));
+  const shot = types.map((t) => rigHoles(t, 0.35));
+  const half = types.map((t) => rigHoles(t, 0.6));
+  expect('[sails] an intact rig has no holes at any range (integrity 1)', whole.every((r) => r.readable === 0 && r.frac === 0));
+  expect('[sails] a chainshot rig (integrity 0.35) shows >= 3 readable holes (>= 3x3 px) at 60 m on every class',
+    shot.every((r) => r.readable >= 3 && r.frac > 0.02 && r.frac < 0.3),
+    types.map((t, i) => `${t} ${shot[i].readable} holes / ${shot[i].n} sails, ${(shot[i].frac * 100).toFixed(1)}% torn`).join('; '));
+  expect('[sails] holes grow with damage (integrity 0.6 tears less than 0.35, more than 1)',
+    half.every((r, i) => r.frac > 0 && r.frac < shot[i].frac),
+    types.map((t, i) => `${t} ${(half[i].frac * 100).toFixed(1)}%`).join(', '));
+  const m = shot[types.length - 1].masks;
+  expect('[sails] each LOD sail tears on its own seed (instance 0 and 1 differ)', m.length > 1 && m[0].some((v, k) => k < m[1].length && v !== m[1][k]));
+  expect('[sails] seed mirror: lodSailSeed(i) = (i * 3.17 + 1.3) mod 11, same expression in the GLSL',
+    [0, 1, 2, 7].every((i) => Math.abs(SM.lodSailSeed(i) - ((i * 3.17 + 1.3) % 11)) < 1e-9)
+    && /mod\(float\(gl_InstanceID\) \* 3\.17 \+ 1\.3, 11\.0\)/.test(SM.LOD_SAIL_TEAR_VERTEX)
+    && /vLodSail\.x \* 5\.0 \+ vLodSeed/.test(SM.LOD_SAIL_TEAR_FRAGMENT) && /vLodSail\.y \* 7\.0 \+ vLodSeed \* 0\.37/.test(SM.LOD_SAIL_TEAR_FRAGMENT)
+    && /0\.06/.test(SM.LOD_SAIL_TEAR_FRAGMENT) && /0\.94/.test(SM.LOD_SAIL_TEAR_FRAGMENT));
+  // [sails] the chunks land in three's real standard shader (anchor drift = no tear).
+  const mat = new THREE.MeshStandardMaterial();
+  const tearU = SM.attachLodSailTear(mat);
+  const shader = { uniforms: {}, vertexShader: THREE.ShaderLib.standard.vertexShader, fragmentShader: THREE.ShaderLib.standard.fragmentShader };
+  mat.onBeforeCompile(shader, null);
+  SM.setLodSailTear(tearU, 0.35);
+  expect('[sails] attachLodSailTear patches the standard vertex + fragment shader and setLodSailTear writes sailTearAmount',
+    shader.vertexShader.includes('gl_InstanceID') && shader.fragmentShader.includes('discard') && shader.fragmentShader.includes('uLodTear')
+    && shader.uniforms.uLodTear === tearU && Math.abs(tearU.value - SC.sailTearAmount(0.35)) < 1e-9,
+    `tear ${tearU.value.toFixed(3)}`);
+  const sr = src('src/client/rendering/ShipRenderer.ts');
+  expect('[sails wiring] both LOD sail materials get the tear and updateLod2Sails writes it from ship.sailIntegrity',
+    (sr.match(/attachLodSailTear\(sailMat\)/g) ?? []).length === 2 && /setLodSailTear\(tear, ship\.sailIntegrity/.test(sr));
+
+  // [rails] the rail run of every class: a hit on the rail line breaks it, nothing else does.
+  let siteOk = true, negOk = true, buildOk = true; const notes = [];
+  for (const type of types) {
+    const st = SHIP_STATS[type]; const prof = HULL.getHullProfile(type);
+    const run = SM.railRunFor(type);
+    const hw = GEO.sheerHalfWidthAt(prof, 0);
+    const railTop = st.height + 0.44; // bulwark 0.34 + cap rail 0.1 (ShipRenderer buildShip)
+    if (Math.abs(run.railTopY - railTop) > 1e-6 || Math.abs(run.halfWidthAt(0) - hw) > 1e-6 || Math.abs(run.halfDeckZ - st.length * 0.45) > 1e-6) { siteOk = false; notes.push(`${type} run`); }
+    for (const side of [-1, 1]) {
+      const a = SM.railSplinterSite({ x: side * hw, y: railTop - 0.05, z: 0 }, run);
+      const b = SM.railSplinterSite({ x: side * (GEO.sheerHalfWidthAt(prof, st.length * 0.2) + 0.5), y: railTop + 0.3, z: st.length * 0.2 }, run);
+      if (!a || a.side !== side || !b || b.side !== side) { siteOk = false; notes.push(`${type} ${side} site`); }
+      if (SM.railSplinterSite({ x: side * hw, y: st.height * 0.3, z: 0 }, run)) { negOk = false; notes.push(`${type} planking hit broke a rail`); }
+      if (SM.railSplinterSite({ x: 0, y: railTop, z: 0 }, run)) { negOk = false; notes.push(`${type} mid-deck`); }
+      if (SM.railSplinterSite({ x: side * hw, y: railTop, z: st.length * 0.6 }, run)) { negOk = false; notes.push(`${type} past breastwork`); }
+      const g1 = SM.buildRailBreak(1234, side, 0, run), g2 = SM.buildRailBreak(1234, side, 0, run), g3 = SM.buildRailBreak(99, side, 0, run);
+      const p1 = g1.geometry.attributes.position.array, p2 = g2.geometry.attributes.position.array, p3 = g3.geometry.attributes.position.array;
+      g1.geometry.computeBoundingBox(); const bb = g1.geometry.boundingBox;
+      const same = p1.length === p2.length && p1.every((v, k) => v === p2[k]);
+      const differs = p1.length !== p3.length || p1.some((v, k) => v !== p3[k]);
+      const rises = bb.max.y >= railTop + 0.15;
+      const local = bb.max.z - bb.min.z <= 1.6 && bb.max.z - bb.min.z >= 0.5 && Math.abs((bb.max.x + bb.min.x) * 0.5 - side * hw) < 0.6;
+      const hasColor = !!g1.geometry.attributes.color;
+      if (!(same && differs && rises && local && hasColor)) { buildOk = false; notes.push(`${type} ${side} build same ${same} differs ${differs} rises ${rises} local ${local} color ${hasColor}`); }
+    }
+  }
+  expect('[rails] a ball at the rail line (on it, or 0.5 m outboard above it) splinters that side\'s run on every class', siteOk, notes.join('; '));
+  expect('[rails] negative control: a planking hit below the rail, a mid-deck hit and a hit past the breastwork break no rail', negOk, notes.join('; '));
+  expect('[rails] the broken run is seeded (same seed same splinters, new seed new ones), rises >= 15 cm above the rail, stays on the rail, one vertex-coloured draw', buildOk, notes.join('; '));
+  const breaks = new SM.RailBreaks(); const host = new THREE.Group(); const run = SM.railRunFor('galleon');
+  const hwg = run.halfWidthAt(0);
+  const firstAdd = breaks.strike(host, { x: hwg, y: run.railTopY, z: 0 }, run, 'ship-a');
+  const dup = breaks.strike(host, { x: hwg, y: run.railTopY, z: 0.3 }, run, 'ship-a');
+  for (let k = 1; k <= 10; k++) breaks.strike(host, { x: (k % 2 ? 1 : -1) * run.halfWidthAt(k - 5), y: run.railTopY, z: (k - 5) * 1.1 }, run, 'ship-a');
+  const other = new SM.RailBreaks(); const host2 = new THREE.Group();
+  const again = other.strike(host2, { x: hwg, y: run.railTopY, z: 0 }, run, 'ship-a');
+  const pa = firstAdd?.geometry.attributes.position.array, pb = again?.geometry.attributes.position.array;
+  expect('[rails] one break per spot (0.3 m off an existing break adds none), at most RAIL_BREAKS_MAX per hull, the same hull + spot splinters alike on every client',
+    !!firstAdd && dup === null && host.children.length <= SM.RAIL_BREAKS_MAX && host.children.length >= 5
+    && !!pa && !!pb && pa.length === pb.length && pa.every((v, k) => v === pb[k]),
+    `${host.children.length} breaks after 12 strikes (max ${SM.RAIL_BREAKS_MAX})`);
+  const game = src('src/client/core/Game.ts');
+  expect('[rails wiring] the ship_damage broadcast splinters the rail (every client) through ShipRenderer.splinterRail -> RailBreaks.strike',
+    /shipRenderer\.splinterRail\(target, hit\.position\)/.test(game) && /splinterRail\(ship: Ship/.test(sr) && /railBreaksOf\(mesh\)\.strike\(/.test(sr));
+}
+
 const ms = performance.now() - t0;
 console.log(`\n${checks - failures}/${checks} checks, ${ms.toFixed(0)} ms`);
 if (failures) { console.error(`FAIL: ${failures} inversion check(s)`); process.exit(1); }
-console.log('PASS: nothing inverted (wheel, flag, foliage, heel, head pitch, new-skeleton knees/elbows/head on 3 bodies, low-tier e2e, viewmodel recoil/ribbon/draw, deck roll, head bob, landing dip, spyglass sway, stick/touch look + invert-Y, sail belly, ship recoil/lids/capstan/wheel)');
+console.log('PASS: nothing inverted (wheel, flag, foliage, heel, head pitch, new-skeleton knees/elbows/head on 3 bodies, low-tier e2e, viewmodel recoil/ribbon/draw, deck roll, head bob, landing dip, spyglass sway, stick/touch look + invert-Y, sail belly, ship recoil/lids/capstan/wheel, torn LOD sails at 60 m, splintered rails)');
