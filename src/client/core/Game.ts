@@ -2540,6 +2540,8 @@ export class Game {
           }
         }
       }
+      // b4.3d vm:ships:6: a ball at the rail line splinters that rail run (attacker too).
+      if (target && hit.position) this.shipRenderer.splinterRail(target, hit.position);
       if (!hit.position || hit.attackerId === this.localPlayerId) return;
       this.combatFx.emitShipHitConfirm(hit.position, this.renderer.camera.position);
       // Physical wood-smash layer (the confirm chime alone reads as a UI blip).
