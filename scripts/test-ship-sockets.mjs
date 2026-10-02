@@ -109,7 +109,18 @@ function gradeSocket(type, s, tag) {
 const TYPES = ['sloop', 'brigantine', 'galleon'];
 const counts = {};
 for (const type of TYPES) {
-  const socks = [...kit.shipKitSockets(type), ...kit.deckKitSockets(type, [{ x: 0.5, z: 0.3, yaw: 0.7 }])];
+  const deckParts = ['barrel', 'bell', 'bilge_pump', 'cannonball_rack'];
+  const socks = [...kit.shipKitSockets(type), ...kit.deckKitSockets(type, deckParts.map((part, i) => ({ x: 0.5 - i * 0.3, z: 0.3 + i, yaw: 0.7, part })))];
+  // Deck parts (kit II): every part the renderer berths mounts its own nodes.
+  for (const part of deckParts) if (!socks.some((s) => s.surface === 'deck' && s.part === part)) fail(`[deck] ${type}: deckKitSockets has no ${part} socket`);
+  // Taffrail lanterns (kit II) on every lantern seat of the class's stern part (kit I sock_stern_*_lantern_k).
+  const sternPart = { sloop: 'stern_transom_sloop', brigantine: 'stern_gallery_brigantine', galleon: 'stern_gallery_galleon_upper' }[type];
+  const seats = GLB.ship_kit_a.nodes.map((n) => n.name).filter((n) => new RegExp(`^sock_${sternPart}_lantern_\\d$`).test(n));
+  const lanterns = socks.filter((s) => s.part === 'taffrail_lantern');
+  if (!seats.length) fail(`[seat] ${type}: no sock_${sternPart}_lantern_k seats in ship_kit_a.glb`);
+  for (const seat of seats) if (!lanterns.some((s) => s.seat && s.seat.path[s.seat.path.length - 1] === seat)) fail(`[seat] ${type}: no taffrail lantern on ${seat}`);
+  if (lanterns.length === seats.length && seats.length) ok(`[seat] ${type}: ${lanterns.length} taffrail lanterns on the ${sternPart} seats`);
+  for (const s of socks) if (s.seat) for (const n of s.seat.path) if (!GLB[s.seat.file].nodes.some((x) => x.name === n)) fail(`[seat] ${type} ${s.part}: seat ${n} not in ${s.seat.file}.glb`);
   counts[type] = socks.length;
   let bad = 0;
   for (const s of socks) if (!gradeSocket(type, s, '[socket]')) bad++;
@@ -157,15 +168,24 @@ for (const type of TYPES) {
   for (const im of root.children) {
     const node = im.name.replace(/^kit-/, '');
     const want = mounted.filter((s) => s.nodes.includes(node));
-    if (/upper/.test(node)) continue; // rides the lower tier's socket
     if (im.count !== want.length) fail(`[mount] ${type} ${node}: ${im.count} instances for ${want.length} sockets`);
-    if (/glass|lid|gudgeons/.test(node)) continue;
+    if (/glass|lid|gudgeons|^bell$|_handle$/.test(node)) continue; // pivot children: own local frame
     for (let i = 0; i < im.count; i++) {
       im.getMatrixAt(i, m); m.decompose(p, q, sc);
       const s = want[i];
+      if (!s) break; // count mismatch already failed above
       const z = new THREE.Vector3(0, 0, 1).applyQuaternion(q), y = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
-      const dz = s.surface === 'deck' ? deg(y.toArray(), s.out) : deg(z.toArray(), s.out);
-      const dp = dist(p.toArray(), s.pos);
+      // Seated parts (upper gallery tier, taffrail lanterns) sit on the GLB seat
+      // empty composed onto their parent's spline socket.
+      let wantPos = s.pos, wantOut = s.out;
+      if (s.seat) {
+        const f = kit.socketMatrix(s, new THREE.Matrix4());
+        for (const n of s.seat.path) { const o = stub.source(s.seat.file).scene.getObjectByName(n); o.updateMatrix(); f.multiply(o.matrix); }
+        const fp = new THREE.Vector3(), fq = new THREE.Quaternion(), fs = new THREE.Vector3(); f.decompose(fp, fq, fs);
+        wantPos = fp.toArray(); wantOut = new THREE.Vector3(0, 0, 1).applyQuaternion(fq).toArray();
+      }
+      const dz = s.surface === 'deck' ? deg(y.toArray(), s.out) : deg(z.toArray(), wantOut);
+      const dp = dist(p.toArray(), wantPos);
       if (dp > 0.001 || dz > 0.1) { bad++; fail(`[mount] ${type} ${node} #${i}: origin ${(dp * 100).toFixed(2)} cm, axis ${dz.toFixed(2)} deg off its socket`); }
     }
   }
@@ -182,7 +202,7 @@ for (const type of TYPES) {
     for (const im of lr.children) {
       const node = im.name.replace(/^kit-/, '');
       const ref = root.children.find((c) => c.name === im.name);
-      const file = mounted.find((s) => s.nodes.includes(node))?.file ?? (/^stern_gallery_galleon_upper/.test(node) ? 'ship_kit_a' : null);
+      const file = mounted.find((s) => s.nodes.includes(node))?.file ?? null;
       const lodNode = file && stub.source(`${file}_lods`).scene.getObjectByName(`${node}_LOD${lvl}`);
       if (/glass/.test(node)) { if (lodNode) { lodBad++; fail(`[lod${lvl}] ${type} ${node}: glass has a LOD node but the mount reused LOD0`); } continue; }
       if (!lodNode) { lodBad++; fail(`[lod${lvl}] ${type} ${node}: no ${node}_LOD${lvl} in ${file}_lods`); continue; }
@@ -195,6 +215,35 @@ for (const type of TYPES) {
     }
     if (lr.children.length !== root.children.length) { lodBad++; fail(`[lod${lvl}] ${type}: ${lr.children.length} buckets vs LOD0 ${root.children.length}`); }
     (lodBad === 0 ? ok : fail)(`[lod${lvl}] ${type}: ${lr.children.length} buckets on LOD${lvl} geometry, frames = LOD0`);
+  }
+}
+
+// Berths (b4.3c kit II): the renderer's own buildShip must berth a bell, a
+// bilge pump and a shot garland per side on every class, on the deck slab.
+{
+  const { installCanvasStub } = await import('./lib/canvas-stub.mjs');
+  installCanvasStub();
+  const { ShipRenderer } = await import('../src/client/rendering/ShipRenderer.ts');
+  const sr = new ShipRenderer();
+  sr.init(new THREE.Scene(), 'high');
+  for (const type of TYPES) {
+    const ship = {
+      id: `sockets-${type}`, type, ownerId: 'o', crewIds: [], position: { x: 0, y: 0, z: 0 }, rotation: 0,
+      velocity: { x: 0, y: 0, z: 0 }, angularVelocity: 0, sailHeight: 1, sailAngle: 0, anchored: false,
+      anchorRaiseProgress: 0, holes: [], nextHoleId: 1, maxHull: 1, onFire: false, fireTimer: 0,
+      fireDamageAccum: 0, sinkProgress: 0, sinking: false, cannonCooldowns: [], chainshottedUntil: 0,
+      sailIntegrity: 1, sailRepairWoodTimer: 0, gold: 0, treasureChestIds: [], inventory: [],
+      repairCooldown: 0, autoRepairProgress: 0, teamColor: 0x3366cc, alive: true, upgrades: [],
+    };
+    sr.buildShip(ship);
+    const mg = sr.shipMeshes.get(ship.id);
+    const deck = (mg?.kitSockets ?? []).filter((s) => s.surface === 'deck');
+    const n = (part) => deck.filter((s) => s.part === part).length;
+    // The sloop's main deck is all gun, rope and stairwell zones: a bell only.
+    const want = type === 'sloop' ? { bell: 1 } : { bell: 1, bilge_pump: 1, cannonball_rack: 2 };
+    const miss = Object.entries(want).filter(([p, k]) => n(p) < k).map(([p, k]) => `${p} ${n(p)}/${k}`);
+    const off = deck.filter((s) => !gradeSocket(type, s, '[berth]'));
+    (miss.length || off.length ? fail : ok)(`[berths] ${type}: ${deck.map((s) => `${s.part}@(${s.pos[0].toFixed(1)},${s.pos[2].toFixed(1)})`).join(' ')}${miss.length ? ` MISSING ${miss.join(', ')}` : ''}`);
   }
 }
 
@@ -223,6 +272,8 @@ if (/export function makeFigurehead/.test(readFileSync('src/client/rendering/shi
 if (!/mountShipKit\([^;]*, 1\)/.test(sr) || !/mountShipKit\([^;]*, 2\)/.test(sr)) fail('[source] ShipRenderer does not mount kit LOD1 + LOD2 in the level roots (figureheads/gunports pop off past 30 m)');
 const stern = readFileSync('src/client/rendering/ship/stern.ts', 'utf8');
 if (/makeWindowFrame|BoxGeometry\(0\.5, 0\.35|galleryRail/.test(stern)) fail('[source] stern.ts still draws the procedural stern windows / gallery rail under the kit gallery');
+if (/part === 'stern_gallery_galleon'/.test(readFileSync('src/client/rendering/ship/kit.ts', 'utf8'))) fail('[source] kit.ts special-cases the galleon upper tier instead of seating it (KitSocket.seat)');
+for (const part of ['bell', 'bilge_pump', 'cannonball_rack']) if (!new RegExp(`(part: |berth\\()'${part}'`).test(body)) fail(`[source] buildShip berths no ${part} (kit II deck part)`);
 if (/export function makeWindowFrame/.test(readFileSync('src/client/rendering/ship/dressing.ts', 'utf8'))) fail('[source] dressing.ts still exports makeWindowFrame');
 const lib = readFileSync('src/client/assets/AssetLibrary.ts', 'utf8');
 if (!/'ship_kit_a_lods'/.test(lib) || !/'ship_kit_b_lods'/.test(lib)) fail('[source] AssetLibrary does not stream ship_kit_a_lods/ship_kit_b_lods');

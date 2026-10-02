@@ -50,7 +50,23 @@ export interface KitSocket {
   v?: number;
   /** Optional per-node extra rotation about local X (gunport lid opened on its hinge). */
   hinge?: Record<string, number>;
+  /** A part that rides another part's GLB seat (the galleon's upper gallery
+   *  tier, the taffrail lanterns on the sock_stern_*_lantern_k seats): mounted
+   *  at socketMatrix(this) x the seat empties in `path` (read from `file`), so
+   *  pos/out/up stay the parent's spline socket and the seat comes from the kit. */
+  seat?: { file: ShipKitFile; path: readonly string[] };
 }
+
+/** On-deck kit II parts the renderer berths (deck frame: +Y deck normal, +Z bow). */
+export type DeckKitPart = 'barrel' | 'bell' | 'bilge_pump' | 'cannonball_rack';
+export const DECK_KIT_NODES: Record<DeckKitPart, readonly string[]> = {
+  barrel: ['barrel'],
+  bell: ['bell_belfry', 'bell'],
+  bilge_pump: ['bilge_pump', 'bilge_pump_handle'],
+  cannonball_rack: ['cannonball_rack'],
+};
+/** Small deck parts the LOD2 root leaves out (sub-pixel past the LOD1 band). */
+export const DECK_KIT_SMALL: ReadonlySet<string> = new Set<string>(['barrel', 'bell', 'bilge_pump', 'cannonball_rack']);
 
 /** Gunport lids hang open while the guns are run out (b4.3d animates them). */
 export const GUNPORT_LID_OPEN = -1.2;
@@ -138,7 +154,22 @@ export function shipKitSockets(type: ShipType): KitSocket[] {
     brigantine: ['stern_gallery_brigantine', 'stern_gallery_brigantine_glass'],
     galleon: ['stern_gallery_galleon', 'stern_gallery_galleon_glass'],
   };
-  out.push(centreSocket(profile, sternNodes[type][0], 'ship_kit_a', sternNodes[type], 0, 0, 'transom'));
+  const stern = centreSocket(profile, sternNodes[type][0], 'ship_kit_a', sternNodes[type], 0, 0, 'transom');
+  out.push(stern);
+  // The galleon's upper tier rides the lower one's seat; the taffrail
+  // lanterns (kit II) stand on the lantern seats of the top stern part.
+  const upperSeat = ['sock_stern_gallery_galleon_upper'];
+  if (type === 'galleon') {
+    out.push({ ...stern, part: 'stern_gallery_galleon_upper', nodes: ['stern_gallery_galleon_upper', 'stern_gallery_galleon_upper_glass'], seat: { file: 'ship_kit_a', path: upperSeat } });
+  }
+  const lanternSeats: Record<ShipType, readonly (readonly string[])[]> = {
+    sloop: [['sock_stern_transom_sloop_lantern_0']],
+    brigantine: [0, 1].map((k) => [`sock_stern_gallery_brigantine_lantern_${k}`]),
+    galleon: [0, 1, 2].map((k) => [...upperSeat, `sock_stern_gallery_galleon_upper_lantern_${k}`]),
+  };
+  for (const path of lanternSeats[type]) {
+    out.push({ ...stern, part: 'taffrail_lantern', file: 'ship_kit_b', nodes: ['taffrail_lantern', 'taffrail_lantern_glass'], seat: { file: 'ship_kit_a', path } });
+  }
 
   // Quarter galleries, both sides (brig + galleon).
   if (type !== 'sloop') {
@@ -174,13 +205,14 @@ export function shipKitSockets(type: ShipType): KitSocket[] {
 }
 
 /** Deck sockets for on-deck kit parts at berths the renderer chose (x, z). */
-export function deckKitSockets(type: ShipType, spots: ReadonlyArray<{ x: number; z: number; yaw: number }>): KitSocket[] {
+export function deckKitSockets(type: ShipType, spots: ReadonlyArray<{ x: number; z: number; yaw: number; part?: DeckKitPart }>): KitSocket[] {
   const deckY = getShipDeckY(0, SHIP_STATS[type]);
   return spots.map((p) => {
+    const part = p.part ?? 'barrel';
     const outAxis = norm(Math.sin(p.yaw), 0, Math.cos(p.yaw));
     // Deck parts: +Y is the deck normal, +Z the bow (handoff frames), so the
     // part's "out" is its +Y = deck up and its forward is the yaw.
-    return { part: 'barrel', file: 'ship_kit_b' as const, nodes: ['barrel'], surface: 'deck' as const, pos: [p.x, deckY, p.z], out: [0, 1, 0], up: outAxis, scale: 1, side: 0 };
+    return { part, file: 'ship_kit_b' as const, nodes: DECK_KIT_NODES[part], surface: 'deck' as const, pos: [p.x, deckY, p.z], out: [0, 1, 0], up: outAxis, scale: 1, side: 0 };
   });
 }
 
@@ -270,15 +302,18 @@ export function mountShipKit(
     if (!scene) continue;
     const lodScene = level > 0 ? src.source(`${s.file}_lods`)?.scene ?? null : null;
     socketMatrix(s, sockM);
-    for (const n of s.nodes) place(scene, n, sockM, s.hinge?.[n], lodScene);
-    if (s.part === 'stern_gallery_galleon') {
-      const seat = scene.getObjectByName('sock_stern_gallery_galleon_upper');
-      if (seat) {
-        seat.updateMatrix();
-        const upper = new THREE.Matrix4().multiplyMatrices(sockM, seat.matrix);
-        for (const n of ['stern_gallery_galleon_upper', 'stern_gallery_galleon_upper_glass']) place(scene, n, upper, undefined, lodScene);
+    if (s.seat) {
+      const seatScene = src.source(s.seat.file)?.scene;
+      let seated = !!seatScene;
+      for (const n of s.seat.path) {
+        const e = seatScene?.getObjectByName(n);
+        if (!e) { seated = false; break; }
+        e.updateMatrix();
+        sockM.multiply(e.matrix);
       }
+      if (!seated) continue; // a seat the kit lacks: leave the part off rather than float it
     }
+    for (const n of s.nodes) place(scene, n, sockM, s.hinge?.[n], lodScene);
   }
   const root = new THREE.Group();
   root.name = level > 0 ? `ship-kit-lod${level}` : 'ship-kit';
