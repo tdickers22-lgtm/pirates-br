@@ -443,5 +443,52 @@ console.log('\nPart C: archipelago row (enforced)');
 expect('both archipelagos present (Crooked Atoll, Dead Man Shoals)', ['the-crooked-atoll', 'dead-man-shoals'].every((id) => archRows.some((r) => r.id === id)), archRows.map((r) => r.id).join(', '));
 for (const r of archRows) expect(`${r.id}: islet sand ring + dry 1:12 cays`, r.archMisses.length === 0, r.archMisses.join('; '));
 
+// ── Part D: the archipelago + bone PAINT row (b4.4d d2, islands-11) ──────────
+// The colour pass's own band/palette functions (TerrainMeshBuilder exports):
+// dry islet beaches and cay crowns paint sand, not the ~2/3 grass the old
+// heightNorm-vs-seaBase mask gave; bone isles bare pale limestone on slopes
+// and bleach their turf toward the sand.
+// --mutate=no-islet-sand / --mutate=no-bone must FAIL this part.
+{
+  const THREE = await import('three');
+  const { terrainGroundBands, terrainBiomePalette, BONE_LIMESTONE } = await import('../src/client/world/island/TerrainMeshBuilder.ts');
+  const MUT = (process.argv.find((a) => a.startsWith('--mutate=')) ?? '').slice(9);
+  console.log(`\nPart D: archipelago sand + bone palette (enforced)${MUT ? ` [mutate=${MUT}]` : ''}`);
+  for (const id of ['the-crooked-atoll', 'dead-man-shoals']) {
+    const island = byId(id);
+    const profile = MUT === 'no-islet-sand' ? { ...island.profile, terrainStyle: 'tropical' } : island.profile;
+    const seaBase = 5.15 + island.radius * 0.0085;
+    const peakEst = Math.max(4, island.radius * (0.10 + island.profile.heightProfile * 0.25 + (island.profile.peakBoost ?? 0) * 0.15));
+    const ext = island.radius * 1.3;
+    let beach = 0, beachGrass = 0, crown = 0, crownGrass = 0;
+    for (let lx = -ext; lx <= ext; lx += 2) for (let lz = -ext; lz <= ext; lz += 2) {
+      const y = Y(island, lx, lz);
+      if (y < 0.3 || y > 3.1) continue;
+      const hn = Math.min(1, Math.max(0, (y - seaBase) / peakEst));
+      // distRatio 0.5 = the inland worst case (no shore berm suppression).
+      const g = terrainGroundBands(profile, y, hn, 0.5).grass;
+      if (y <= 1.2) { beach++; beachGrass += g; } else { crown++; crownGrass += g; }
+    }
+    const bg = beach ? beachGrass / beach : 1, cg = crown ? crownGrass / crown : 1;
+    expect(`${id}: islet beaches (0.3-1.2 m) paint sand, grass <= 5%`, beach > 50 && bg <= 0.05, `${beach} samples, grass ${(bg * 100).toFixed(1)}%`);
+    expect(`${id}: low dry ground / cay crowns (1.2-3.1 m) grass <= 25%`, crown > 20 && cg <= 0.25, `${crown} samples, grass ${(cg * 100).toFixed(1)}%`);
+  }
+  for (const id of ['dead-man-shoals', 'skull-cove', 'gallows-sands']) {
+    const island = byId(id);
+    if (!island) { expect(`${id}: present`, false); continue; }
+    const biome = MUT === 'no-bone' ? 'lush' : island.profile.biome;
+    const rock = new THREE.Color(0x6b665c).multiplyScalar(0.8), grass = new THREE.Color(0x5f7a3a), sand = new THREE.Color(0xd8c9a0);
+    const pal = terrainBiomePalette(biome, rock, grass, grass.clone(), sand);
+    const lum = (c) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    const dist = (a, b) => Math.hypot(a.r - b.r, a.g - b.g, a.b - b.b);
+    const toward = dist(pal.grass, grass) / dist(sand, grass);
+    expect(`${id} (bone): slopes bare pale limestone 0x${BONE_LIMESTONE.toString(16)}`, island.profile.biome === 'bone' && pal.slopeRock.getHex() === BONE_LIMESTONE && lum(pal.slopeRock) > 2 * lum(rock), `slope 0x${pal.slopeRock.getHexString()}`);
+    expect(`${id} (bone): turf bleached >= 30% toward the sand`, toward >= 0.3, `${(toward * 100).toFixed(0)}%`);
+  }
+  const lushIsle = islands.find((i) => (i.profile.biome ?? 'lush') === 'lush');
+  const lushPal = terrainBiomePalette(lushIsle.profile.biome, new THREE.Color(0x555555), new THREE.Color(0x00ff00), new THREE.Color(0x00aa00), new THREE.Color(0xffffff));
+  expect('non-bone biomes keep their palette (no bleaching leak)', lushPal.grass.getHex() === 0x00ff00 && lushPal.slopeRock.getHex() === 0x555555, lushIsle.id);
+}
+
 console.log(`\n${passes} passed, ${fails} failed`);
 process.exit(fails ? 1 : 0);

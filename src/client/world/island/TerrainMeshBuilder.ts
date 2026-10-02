@@ -464,11 +464,60 @@ export function buildTerrainHeightfield(args: {
 }
 
 
+/** Pale limestone the bone isles show on their steep faces (b4.4d, islands-11):
+ *  their rock is bleached coral and chalk, not the darkened biome rock every
+ *  other island bares, which read as olive-grey at eye height. */
+export const BONE_LIMESTONE = 0xd2c9b2;
+
+/** Height/biome bands for one terrain vertex (b4.4d). Pure and exported so the
+ *  relief gate checks the same numbers the colour pass paints.
+ *
+ *  grassMask used to key only on heightNorm against seaBase (~5.6 m), so every
+ *  archipelago islet beach (0.3-1.2 m) and every dry cay crown (~2.6-3.1 m)
+ *  painted ~2/3 grass. Archipelagos now carry a height-band sand mask: dry
+ *  ground below ~2.8 m is sand, fading to the normal bands by 3.8 m. */
+export function terrainGroundBands(
+  profile: { readonly terrainStyle?: string },
+  pointY: number,
+  heightNorm: number,
+  distRatio: number,
+): { grass: number; jungle: number; isletSand: number } {
+  const isletSand = profile.terrainStyle === 'archipelago'
+    ? 1 - THREE.MathUtils.smoothstep(pointY, 2.8, 3.8)
+    : 0;
+  // Grass is the DEFAULT interior ground: any land above the waterline is
+  // green (the distRatio gate alone keeps a sand berm at the shore), so even
+  // low, wide aprons on big islands read lush, not as tan dunes.
+  const grass = THREE.MathUtils.smoothstep(heightNorm, -0.08, 0.05)
+    * (1 - THREE.MathUtils.smoothstep(distRatio, 0.84, 0.99)) * (1 - isletSand);
+  const jungle = THREE.MathUtils.smoothstep(heightNorm, 0.08, 0.4)
+    * (1 - THREE.MathUtils.smoothstep(distRatio, 0.55, 0.82)) * 0.58 * (1 - isletSand);
+  return { grass, jungle, isletSand };
+}
+
+/** Bone biome palette (b4.4d): slopes bare pale limestone instead of the x0.8
+ *  darkened biome rock, and the turf is bleached 35% toward the sand so the
+ *  isles read sun-bleached, not as mossy gumdrops. Other biomes pass through. */
+export function terrainBiomePalette(
+  biome: string | undefined,
+  rockSlope: THREE.Color,
+  grass: THREE.Color,
+  jungle: THREE.Color,
+  sand: THREE.Color,
+): { slopeRock: THREE.Color; grass: THREE.Color; jungle: THREE.Color } {
+  if (biome !== 'bone') return { slopeRock: rockSlope, grass, jungle };
+  return {
+    slopeRock: new THREE.Color(BONE_LIMESTONE),
+    grass: grass.clone().lerp(sand, 0.35),
+    jungle: jungle.clone().lerp(sand, 0.3),
+  };
+}
+
 export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
   const {
     host, island, group, r, rng, lowDetail, visualDetail, surfacePoint, carveCaveMouth,
     isVolcanic, whiteSand,
-    sandColor, beachColor, cliffColor, grassColor, jungleColor, peakColor, mudColor, paletteRock,
+    sandColor, beachColor, cliffColor, peakColor, mudColor, paletteRock,
   } = ctx;
   // The vertex grid + its carve depths (pure; shared with the regression suite).
   // The vertex grid is SHARED and quality-independent (GRID-01): low, balanced
@@ -493,7 +542,12 @@ export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
 
   const terrainColor = new THREE.Color();
   const scratchColor = new THREE.Color();
-  const rockSlopeColor = paletteRock.clone().multiplyScalar(0.8);
+  const biomePalette = terrainBiomePalette(
+    island.profile.biome, paletteRock.clone().multiplyScalar(0.8), ctx.grassColor, ctx.jungleColor, sandColor,
+  );
+  const rockSlopeColor = biomePalette.slopeRock;
+  const grassColor = biomePalette.grass;
+  const jungleColor = biomePalette.jungle;
   const ashCharcoal = new THREE.Color(0x2b2621);
   /** Vein GATE (smooth, interpolates cleanly) — the crack field itself is
    *  evaluated per-PIXEL in the fragment shader, so veins read as hairline
@@ -594,13 +648,11 @@ export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
        *  the volcanic ash/vein gates (see realRelief). */
       const reliefNorm = THREE.MathUtils.clamp((pointY - seaBase) / realRelief, 0, 1);
       const shoreMask = THREE.MathUtils.smoothstep(distRatio, 0.72, 0.99);
-      // Grass is the DEFAULT interior ground: any land above the waterline is
-      // green (the distRatio gate alone keeps a sand berm at the shore), so
-      // even low, wide aprons on big islands read lush — not as tan dunes.
-      const grassMask = THREE.MathUtils.smoothstep(heightNorm, -0.08, 0.05)
-        * (1 - THREE.MathUtils.smoothstep(distRatio, 0.84, 0.99));
-      const jungleMask = THREE.MathUtils.smoothstep(heightNorm, 0.08, 0.4)
-        * (1 - THREE.MathUtils.smoothstep(distRatio, 0.55, 0.82)) * 0.58;
+      // Grass/jungle/islet-sand bands: see terrainGroundBands.
+      const bands = terrainGroundBands(island.profile, pointY, heightNorm, distRatio);
+      const grassMask = bands.grass;
+      const jungleMask = bands.jungle;
+      const isletSand = bands.isletSand;
       // Rock is earned by SLOPE first; only genuinely high ground rock-caps.
       const rockMask = THREE.MathUtils.smoothstep(heightNorm, 0.72, 0.97) * (1 - shoreMask * 0.6) * 0.55;
       const peakMask = THREE.MathUtils.smoothstep(heightNorm, 0.88, 1) * 0.4;
@@ -611,7 +663,7 @@ export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
       const slopeRockMask = THREE.MathUtils.smoothstep(slope, 0.42, 0.74) * (1 - shoreMask);
 
       terrainColor.copy(sandColor);
-      terrainColor.lerp(beachColor, shoreMask * coast.beach * 0.95);
+      terrainColor.lerp(beachColor, Math.max(shoreMask * coast.beach * 0.95, isletSand * 0.55));
       terrainColor.lerp(cliffColor, shoreMask * rockyCoast * 0.75);
       terrainColor.lerp(mudColor, mudMask);
       terrainColor.lerp(grassColor, grassMask);
@@ -659,7 +711,10 @@ export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
       // read as a blinding white plate from above. Tint the low, non-berm
       // interior toward lagoon aqua so it reads as the shallow water it should.
       if (whiteSand) {
-        const lagoon = (1 - THREE.MathUtils.smoothstep(heightNorm, 0.0, 0.13)) * (1 - shoreMask * 0.55);
+        // Archipelago islet beaches and cays are DRY sand above 0.3 m (b4.4d):
+        // only the wet fringe takes the lagoon tint there.
+        const lagoon = (1 - THREE.MathUtils.smoothstep(heightNorm, 0.0, 0.13)) * (1 - shoreMask * 0.55)
+          * (isletSand > 0 ? 1 - THREE.MathUtils.smoothstep(pointY, 0.15, 0.6) : 1);
         terrainColor.lerp(new THREE.Color(0x54b8bd), lagoon * 0.55);
       }
 
@@ -721,7 +776,7 @@ export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
       // read as one flat paint bucket (survives ACES tonemapping). Sand
       // (near shore) gets extra tonal variation so beaches don't clip to a
       // uniform bright halo.
-      const sandiness = shoreMask * coast.beach;
+      const sandiness = Math.max(shoreMask * coast.beach, isletSand);
       const worldX = terrainPositions[index * 3 + 0] + island.position.x;
       const worldZ = terrainPositions[index * 3 + 2] + island.position.z;
       // World-space fbm: broad tonal drift + finer mottle, plus a hint of
@@ -871,8 +926,10 @@ export function buildProxyTerrainMesh(
    *  heightfield so the closer swap keeps the relief, not just the coastline. */
   res: { rings?: number; segments?: number } = {},
 ): THREE.Mesh {
-  const { island, surfacePoint, sandColor, beachColor, cliffColor, grassColor, peakColor } = ctx;
+  const { island, surfacePoint, sandColor, beachColor, cliffColor, peakColor } = ctx;
   const { shoreRingSpan, seaBase, peakEst, rockSlopeColor, wetSandColor, submergedColor } = terrain;
+  // Same bleached bone turf as the full mesh, or the far swap pops greener.
+  const grassColor = terrainBiomePalette(island.profile.biome, rockSlopeColor, ctx.grassColor, ctx.jungleColor, sandColor).grass;
   const pRad = res.rings ?? 10;
   const pAng = res.segments ?? 30;
   const pShore = 2;
