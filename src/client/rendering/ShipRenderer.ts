@@ -1874,7 +1874,7 @@ export class ShipRenderer {
     }
 
     // Rope coil flaked down beside the anchor capstan
-    const ropeCoil = makeRopeCoil(ropeCoilMat, 0.3, 0.062, 3, 2.7);
+    const ropeCoil = makeRopeCoil(ropeCoilMat, 0.3, 0.062, 3, 2.7, this.lodPhone ? 4 : 6);
     ropeCoil.position.set(-0.24, H + 0.1, L * 0.38);
     ropeCoil.rotation.y = 0.6;
     group.add(ropeCoil);
@@ -2264,7 +2264,7 @@ export class ShipRenderer {
     }
 
     // Mooring line flaked down near the stern quarter
-    const sternRope = makeRopeCoil(ropeCoilMat, 0.24, 0.052, 7, 2.9);
+    const sternRope = makeRopeCoil(ropeCoilMat, 0.24, 0.052, 7, 2.9, this.lodPhone ? 4 : 6);
     sternRope.position.set(W * 0.3, H + 0.1, -L * 0.26);
     sternRope.rotation.y = -1.1;
     group.add(sternRope);

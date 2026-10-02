@@ -9,7 +9,7 @@ import type { RenderQuality } from '../Renderer.js';
 import { attachSailCloth, makeSailClothGeometry, sailClothGrid } from './sailCloth.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { makeCylinderBetween, makeRopeCoil } from './dressing.js';
-import { buildRigging, buildRigFarCards, planRopes, type RigPlanMast, type RopeRun, type Rigging, type RiggingSet } from './rigging.js';
+import { buildRigging, buildRigFarCards, planRopes, SLACK_SEGMENTS, SLACK_SEGMENTS_PHONE, type RigPlanMast, type RopeRun, type Rigging, type RiggingSet } from './rigging.js';
 
 // Square-sail cloth is GPU cloth (ship/sailCloth.ts, b4.2g): a flat grid
 // whose belly, flutter, hoist folds and tear holes are computed in the vertex
@@ -579,16 +579,23 @@ export function buildRig(ctx: RigContext): RigBuild {
   // sides on the low tier, five elsewhere: ~290 triangles per hull on low,
   // ~480 on balanced — under a tenth of a percent of the wide-shot budget,
   // and the draw-call count is identical to the two LineSegments it replaces.
-  // Phones (b4.2h): two radial sides (a flat ribbon, 4 tris) and only the
-  // deadeyes and blocks among the fittings, to hold the phone own-hull cap.
-  const ropeSides = ctx.phone ? 2 : quality === 'low' ? 3 : 5;
+  // Phones (b4.2h): a DoubleSide ribbon (2 tris; the old 2-sided cylinder
+  // was the same quad twice at 4 tris), only the
+  // deadeyes and blocks among the fittings, no lanyards (the deadeye pair
+  // reads as one fitting at phone size), slack lines in 3 segments and a
+  // ratline every 1.14 m, to hold the 45k phone own-hull cap with the rig
+  // root counted (galleon 46,191 -> under 45,000).
+  const ropeSides = ctx.phone ? 1 : quality === 'low' ? 3 : 5;
   if (ctx.phone) plan.hardware = plan.hardware.filter((f) => f.kind === 'deadeye' || f.kind === 'block');
+  const ropeRunsBuilt = ctx.phone ? ropeRuns.filter((r) => r.label !== 'lanyard') : ropeRuns;
+  const slackSegs = ctx.phone ? SLACK_SEGMENTS_PHONE : SLACK_SEGMENTS;
   const ropeRigMat = new THREE.MeshStandardMaterial({ color: 0x6a5030, roughness: 1 });
   ropeRigMat.name = 'ship-rigging-rope';
   const ratlineRigMat = new THREE.MeshStandardMaterial({ color: 0x4b3520, roughness: 1 });
   ratlineRigMat.name = 'ship-rigging-ratline';
-  const ropeRig = buildRigging(ropeRuns, ropeRigMat, 0.028, ropeSides, plan.hardware);
-  const ratlineRig = buildRigging(ratlineRuns, ratlineRigMat, 0.018, ropeSides);
+  if (ctx.phone) { ropeRigMat.side = THREE.DoubleSide; ratlineRigMat.side = THREE.DoubleSide; }
+  const ropeRig = buildRigging(ropeRunsBuilt, ropeRigMat, 0.028, ropeSides, plan.hardware, slackSegs);
+  const ratlineRig = buildRigging(ratlineRuns, ratlineRigMat, 0.018, ropeSides, [], slackSegs);
   const rigSet: RiggingSet | null = ropeRig && ratlineRig
     ? { rope: ropeRig, ratline: ratlineRig, far: buildRigFarCards(plan.cards, 0x4b3520) }
     : null;

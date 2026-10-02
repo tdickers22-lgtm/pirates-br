@@ -58,6 +58,8 @@ export function makeRopeCoil(
   thickness: number,
   seed = 0,
   turns = 2.6,
+  /** Tube sides: 6; phones pass 4 (b4.2h phone own-hull cap). */
+  radial = 6,
 ): THREE.Group {
   const g = new THREE.Group();
   const rnd = (i: number) => {
@@ -95,7 +97,7 @@ export function makeRopeCoil(
   ));
   const curve = new THREE.CatmullRomCurve3(points, false, 'catmullrom', 0.35);
   const tube = new THREE.Mesh(
-    new THREE.TubeGeometry(curve, Math.max(24, steps + 6), thickness * 0.5, 6, false),
+    new THREE.TubeGeometry(curve, Math.max(24, steps + 6), thickness * 0.5, radial, false),
     material,
   );
   tube.castShadow = true;

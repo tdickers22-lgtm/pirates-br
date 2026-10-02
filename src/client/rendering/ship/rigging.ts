@@ -158,6 +158,10 @@ const _drop = new THREE.Vector3();
  * and the next match's rigging would draw from a dead buffer.
  */
 function ropeGeometry(sides: number): THREE.BufferGeometry {
+  // sides 1 = the phone ribbon: one 2-tri quad (x +-1, y +-0.5, the same
+  // frame as the cylinder) drawn DoubleSide. A 2-sided cylinder is exactly
+  // this quad twice, back to back, at 4 tris (b4.2h phone own-hull cap).
+  if (sides <= 1) return acquireSharedGeometry('rope-ribbon', () => new THREE.PlaneGeometry(2, 1, 1, 1))!;
   return acquireSharedGeometry(
     `rope-cylinder-${sides}`,
     () => new THREE.CylinderGeometry(1, 1, 1, sides, 1, true),
@@ -215,11 +219,15 @@ function writeFitting(mesh: THREE.InstancedMesh, index: number, f: RigFitting) {
 
 /** Segments a slack run is drawn in (taut runs are one). */
 export const SLACK_SEGMENTS = 6;
+/** Phones draw slack runs in 3 segments (the own-hull tri cap, b4.2h). */
+export const SLACK_SEGMENTS_PHONE = 3;
 
 /**
  * Build one instanced rope family.
  *
- * @param sides radial segments — 3 on the low tier, 5 elsewhere.
+ * @param sides radial segments — 3 on the low tier, 5 elsewhere, 1 = the
+ *   phone ribbon (2 tris, needs a DoubleSide material).
+ * @param slackSegments segments per slack run (6; 3 on phones).
  */
 export function buildRigging(
   runs: RopeRun[],
@@ -227,12 +235,13 @@ export function buildRigging(
   radius: number,
   sides: number,
   hardware: RigFitting[] = [],
+  slackSegments: number = SLACK_SEGMENTS,
 ): Rigging | null {
   if (runs.length === 0) return null;
   // Order: fittings, standing, running (count = standingEnd drops the running).
   const famOf = (r: RopeRun): RopeFamily => r.family ?? (r.pivot ? 'running' : 'standing');
   const ordered = [...runs.filter((r) => famOf(r) !== 'running'), ...runs.filter((r) => famOf(r) === 'running')];
-  const segsOf = (r: RopeRun) => ((r.sag ?? 0) > 0 ? SLACK_SEGMENTS : 1);
+  const segsOf = (r: RopeRun) => ((r.sag ?? 0) > 0 ? slackSegments : 1);
   const total = hardware.length + ordered.reduce((n, r) => n + segsOf(r), 0);
   const mesh = new THREE.InstancedMesh(ropeGeometry(sides), material, total);
   mesh.castShadow = true;

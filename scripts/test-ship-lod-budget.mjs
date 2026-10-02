@@ -184,10 +184,20 @@ for (const type of CLASSES) {
   // phone hardware cut. Built after a high and a low build of the same class
   // are cached: the shared static merge must not leak across tiers.
   const phoneRoot = srPhone.buildShip(fixtureShip(type, `lod-phone-${type}`));
-  // TODO(b4.2h remaining): count rigOf(phoneRoot) here too. With the v2 rope
-  // plan (phone lite: 2 sides, deadeyes + blocks only) the galleon reads
-  // 46,191 > 45,000; trim the phone plan, then add the rig root to this census.
-  const cp = census(phoneRoot.children.find((c) => c.name === 'ship-detail-root'));
+  // The phone census counts the rig root too (rope, ratline draws): the v2
+  // rope plan on phones is 2-sided ribbons, deadeyes + blocks only, slack
+  // lines in 3 segments and ratlines every third step (b4.2h).
+  const prig = rigOf(phoneRoot);
+  const cp = census(phoneRoot.children.find((c) => c.name === 'ship-detail-root'), prig);
+  if (prig) console.log(`    phone own hull ${cp.tris} tris (rig root ${census(prig).tris})`);
+  expect(`${type} phone own hull counts the rig root (ship-rig-root present)`, !!prig);
+  // The phone ribbon is one quad: single-sided it vanishes from half the
+  // views, so every phone rope/ratline draw must be DoubleSide.
+  const ribbons = [];
+  prig?.traverse((o) => { if (o.isInstancedMesh && o.name === 'ship-rigging') ribbons.push(o); });
+  expect(`${type} phone rope + ratline draws are DoubleSide ribbons (2 tris per instance)`,
+    ribbons.length === 2 && ribbons.every((m) => m.material.side === THREE.DoubleSide && (m.geometry.index ? m.geometry.index.count : m.geometry.attributes.position.count) === 6),
+    ribbons.map((m) => `${m.material.side}/${m.geometry.index?.count}`).join(' '));
   expect(`${type} phone own hull (low build, LOD1 shell) <= ${PHONE_OWN_CAP} tris`, cp.tris <= PHONE_OWN_CAP, `${cp.tris}`);
 }
 console.log(`\nmeasured LOD0: ${JSON.stringify(measured)}`);
