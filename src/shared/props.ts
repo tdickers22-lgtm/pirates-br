@@ -1,5 +1,7 @@
 import type { Island, IslandBiome, IslandProp, IslandPropType, Vec3 } from './types/index.js';
 import { getIslandSurfaceY } from './utils/index.js';
+import { PLAYER } from './constants/index.js';
+import { intersectRayKit, resolveKitCollision } from './hullCollide.js';
 
 // ── Prop collider metadata ──────────────────────────────────────────────────
 // One entry per GLB asset type (public/assets/models/README.md manifest).
@@ -387,9 +389,11 @@ export function resolvePropCollision(
   radius: number,
   island: Island,
 ): { x: number; z: number; pushed: boolean } {
-  let x = pos.x;
-  let z = pos.z;
-  let pushed = false;
+  // Cliff-kit hulls first (b4.6c): convex walls, XZ pushout over the capsule above the step band.
+  const kit = resolveKitCollision(pos, radius, PLAYER.HEIGHT, island);
+  let x = kit.x;
+  let z = kit.z;
+  let pushed = kit.pushed;
   const props = island.props;
   if (!props || props.length === 0) return { x, z, pushed };
   for (const prop of props) {
@@ -480,8 +484,9 @@ export function intersectRayIslandProps(
   island: Island,
 ): number | null {
   const props = island.props;
-  if (!props || props.length === 0) return null;
-  let best: number | null = null;
+  // Every cliff-kit piece stops a shot (b4.6c): convex hulls enclose each drawn vertex.
+  let best: number | null = intersectRayKit(origin, direction, range, island);
+  if (!props || props.length === 0) return best;
   for (const prop of props) {
     if (!SHOT_BLOCKING_PROPS.has(prop.type)) continue;
     const col = PROP_COLLIDERS[prop.type];

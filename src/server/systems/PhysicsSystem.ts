@@ -90,6 +90,7 @@ type HullSweepHit =
   | { kind: HullImpactKind; point: Vec3 }
   | { kind: 'player'; point: Vec3; player: Player };
 import { intersectRayIslandProps, resolvePropCollision } from '../../shared/props.js';
+import { getIslandKitReach, kitPenetration } from '../../shared/hullCollide.js';
 import { resolveWalkerAgainstWildlife, swimFloatVelocity } from '../../shared/locomotion.js';
 import { applyHoldWater } from './holdMovement.js';
 import { raymarchIslandSurface } from '../../shared/raycast.js';
@@ -1100,6 +1101,7 @@ export class PhysicsSystem {
       for (const rock of seaRocks) {
         this.pushShipOutOfSeaRock(ship, rock, t);
       }
+      for (const island of islands) this.pushShipOutOfKit(ship, island);
       // Held on the bottom, and said so on the wire. Only while she is trying to
       // sail: an anchored hull resting in her berth is moored, not stuck, and a
       // ship with no canvas out is simply lying to. The hold bridges the contact
@@ -2808,10 +2810,11 @@ export class PhysicsSystem {
   private resolvePlayerPropCollision(player: Player, islands: Island[]) {
     for (const island of islands) {
       const props = island.props;
-      if (!props || props.length === 0) continue;
+      const kitReach = getIslandKitReach(island);
+      if ((!props || props.length === 0) && kitReach === 0) continue;
       const dxi = player.position.x - island.position.x;
       const dzi = player.position.z - island.position.z;
-      const br = getIslandMaxRadius(island) + LOCO.PROP_BROADPHASE_PAD;
+      const br = Math.max(getIslandMaxRadius(island), kitReach) + LOCO.PROP_BROADPHASE_PAD;
       if (dxi * dxi + dzi * dzi > br * br) continue;
       const res = resolvePropCollision(player.position, PLAYER.RADIUS, island);
       if (!res.pushed) continue;
@@ -3619,6 +3622,39 @@ export class PhysicsSystem {
     }
     return { contact: true, into };
   }
+
+  /**
+   * Cliff-kit hulls vs the hull contact stations (b4.6c, islands-02): arch legs, stacks and cliff
+   * feet stop her like a sea rock. Each station is a vertical circle from her keel to her rail; the
+   * rig above the rail never collides, so a sail-through arch passes her masts under its span while
+   * its legs still stop the hull.
+   */
+  pushShipOutOfKit(ship: Ship, island: Island): boolean {
+    const reach = getIslandKitReach(island);
+    if (reach === 0) return false;
+    const stats = SHIP_STATS[ship.type];
+    const idx = ship.position.x - island.position.x;
+    const idz = ship.position.z - island.position.z;
+    const r = reach + stats.length + stats.width + 4;
+    if (idx * idx + idz * idz > r * r) return false;
+    const y0 = ship.position.y - stats.height * 0.45;
+    const y1 = ship.position.y + stats.height + 1.2;
+    let best: { nx: number; nz: number; pen: number } | null = null;
+    for (const sample of this.getShipHullContactSamples(ship)) {
+      const p = kitPenetration(island, sample.x, y0, y1, sample.z, sample.radius, this.kitPen);
+      if (p && (!best || p.pen > best.pen)) best = { nx: p.nx, nz: p.nz, pen: p.pen };
+    }
+    if (!best) return false;
+    ship.position.x += best.nx * best.pen;
+    ship.position.z += best.nz * best.pen;
+    const into = ship.velocity.x * best.nx + ship.velocity.z * best.nz;
+    if (into < 0) {
+      ship.velocity.x -= into * best.nx * (1 + HULL_RESTITUTION);
+      ship.velocity.z -= into * best.nz * (1 + HULL_RESTITUTION);
+    }
+    return true;
+  }
+  private readonly kitPen = { nx: 0, nz: 0, pen: 0 };
 
   private pushShipOutOfSeaRock(ship: Ship, rock: SeaRock, t = 0) {
     // performance-13: a hull-level broadphase before the per-sample chain is

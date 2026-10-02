@@ -1,6 +1,7 @@
 import type { Island, Ship, Vec3 } from './types/index.js';
 import { SHIP_STATS } from './constants/index.js';
 import { getHullProfile } from './hull.js';
+import { getIslandKitPieces, intersectRayKit } from './hullCollide.js';
 import {
   getCaveCeilingY,
   getCaveFloorY,
@@ -176,6 +177,13 @@ export function raymarchIslandSurface(
       );
       step = distRatio <= TERRAIN_SHORE_BAND && distRatio >= 0.9 ? TERRAIN_SHORE_STEP : TERRAIN_STEP;
     }
+  }
+
+  // Cliff-kit hulls (b4.6c) are terrain a heightfield cannot express: arches, overhangs, stacks.
+  for (const island of islands) {
+    if (getIslandKitPieces(island).length === 0) continue;
+    const kitT = intersectRayKit(origin, direction, Math.min(maxDist, bestDistance), island);
+    if (kitT !== null && kitT < bestDistance) bestDistance = kitT;
   }
 
   if (bestDistance > maxDist) {
