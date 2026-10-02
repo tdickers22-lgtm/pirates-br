@@ -32,7 +32,9 @@
 #   places an offset. Node extras: kit_part (part name), socket (true on sockets).
 #
 #   /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup -P scripts/blender/build_ship_kit.py
-#   env: KIT_OUT (dir), KIT_SAMPLES (bake samples, 12), KIT_SHEET (contact sheet PNG path, '' to skip)
+#   env: KIT_OUT (dir), KIT_SAMPLES (bake samples, 12), KIT_SHEET (contact sheet PNG path, '' to skip),
+#        KIT (a = this file's parts -> ship_kit_a.glb; b = the deck/rig/ground-tackle parts in
+#        _ship_kit_rigging.py -> ship_kit_b.glb, same helpers, density loop, atlas bake, LODs and sheet)
 import os
 import sys
 import math
@@ -649,6 +651,12 @@ BUILDS = [
     ('rudder', PART, build_rudder),
     ('cathead', PART, build_cathead),
 ]
+ATLAS = 'ship_trim'
+CAGE = 0.006
+if os.environ.get('KIT', 'a') == 'b':
+    name = 'ship_kit_b'  # -> ship_kit_b.glb + ship_kit_b_lods.glb (parts and frames in _ship_kit_rigging.py)
+    exec(open(os.path.join(HERE, '_ship_kit_rigging.py')).read())
+    BUILDS = BUILDS_B  # noqa: F821 (defined by _ship_kit_rigging.py)
 
 
 def tris_of(objs):
@@ -669,8 +677,8 @@ def join_as(objs, nm, pivot=None):
 
 
 def build(key, band, fn):
-    lo, hi = band
-    target = (lo + hi) / 2
+    lo, hi = band[:2]
+    target = band[2] if len(band) > 2 else (lo + hi) / 2  # kit II: (lo, hi, target) so instanced parts stay light
     D['d'] = 1.0
     for attempt in range(6):
         coll = asset_collection(key)  # noqa: F821
@@ -679,7 +687,7 @@ def build(key, band, fn):
         nodes = [join_as(parts, g, pivot) for g, (parts, pivot) in groups.items() if parts]
         t = tris_of(nodes)
         print(f'BUILD {key} d={D["d"]:.3f} tris={t}', flush=True)
-        if lo <= t <= hi:
+        if lo <= t <= hi and (len(band) < 3 or attempt == 5 or abs(t - target) <= 0.35 * target):
             DENS[key] = round(D['d'], 3)
             return coll, nodes, t
         for o in list(coll.objects):
@@ -744,7 +752,7 @@ for i, (key, (band, coll, nodes, t)) in enumerate(built.items()):
         if not o.name.endswith('_glass'):
             atlas_objs.append(o)
 # cage 6 mm: the default 20 mm cage is thicker than the fronds, frill spines and crown points and baked them black
-A.pbr_atlas(atlas_objs, 'ship_trim', tier='near', samples=SAMPLES, cage_offset=0.006)
+A.pbr_atlas(atlas_objs, ATLAS, tier='near', samples=SAMPLES, cage_offset=CAGE)
 for i, (key, (band, coll, nodes, t)) in enumerate(built.items()):
     for o in nodes:
         o.location.x -= 7.0 * i
@@ -831,7 +839,7 @@ for key, (band, coll, nodes, t) in built.items():
         prev = v
 report['lods_bytes'] = os.path.getsize(lpath)
 report['errors'] = errs
-with open('/tmp/pbr-ship-kit.json', 'w') as f:
+with open(f'/tmp/pbr-{name}.json', 'w') as f:
     json.dump(report, f, indent=1)
 print('SHIP KIT REPORT ' + json.dumps(report))
 
