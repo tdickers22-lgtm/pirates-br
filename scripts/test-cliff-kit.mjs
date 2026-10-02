@@ -315,4 +315,40 @@ if (!ONLY.length || ONLY.includes('sea_arch_a')) {
     '[parity] kit walker path bit-equal on the server walker and the client prediction path, and pushed', `end (${a[a.length - 2].toFixed(3)}, ${a[a.length - 1].toFixed(3)}) vs free ${free.toFixed(1)}`);
 }
 
+// ── b4.6d [world] placement totals (placement/cliffKit.ts, its own stream) ──────────────────────
+{
+  const { MapGenerator } = await import('../src/server/world/MapGenerator.ts');
+  const { placeCliffKitWorld, STACK_REPEAT_M } = await import('../src/server/world/placement/cliffKit.ts');
+  const { getKitColliders } = await import('../src/shared/hullCollide.ts');
+  const { getIslandCoastWeights } = await import('../src/shared/utils/index.ts');
+  const run = () => { const isl = new MapGenerator(20260801).generateIslands(); const counts = placeCliffKitWorld(isl); return { isl, counts }; };
+  const { isl, counts } = run();
+  const all = isl.flatMap((i) => (i.kitPieces ?? []).map((p) => ({ ...p, island: i })));
+  const arches = all.filter((p) => p.key.startsWith('sea_arch'));
+  const sail = all.filter((p) => p.key === 'sea_arch_a');
+  ok(arches.length >= 4 && sail.length >= 2, '[world] >= 4 sea arches, >= 2 sail-through', `arches ${arches.length} (sea_arch_a ${sail.length})`);
+  ok(sail.every((p) => p.y === 0 && !p.scale), '[world] sea_arch_a sits on the design waterline unscaled (clearance graded from y = 0)');
+  const cliffIsl = isl.filter((i) => Array.from({ length: 96 }, (_, k) => getIslandCoastWeights(i, (k / 96) * Math.PI * 2).cliff > 0.6).some(Boolean));
+  const noOver = cliffIsl.filter((i) => !(i.kitPieces ?? []).some((p) => p.key.startsWith('cliff_overhang'))).map((i) => i.id);
+  ok(cliffIsl.length > 0 && noOver.length === 0, '[world] >= 1 overhang on every cliff island', `${cliffIsl.length} cliff islands, missing: ${noOver.join(',') || 'none'}`);
+  const rockyIsl = isl.filter((i) => i.profile.terrainStyle === 'rocky' || i.profile.biome === 'bone');
+  const noShelf = rockyIsl.filter((i) => !(i.kitPieces ?? []).some((p) => p.key.startsWith('rock_shelf'))).map((i) => i.id);
+  ok(rockyIsl.length > 0 && noShelf.length === 0, '[world] >= 1 shelf on every rocky / bone island', `${rockyIsl.length} islands, missing: ${noShelf.join(',') || 'none'}`);
+  const unknown = all.filter((p) => !getKitColliders(p.key)).map((p) => p.key);
+  ok(all.length > 0 && unknown.length === 0, '[world] every placed key has colliders', `${all.length} pieces, ${Object.keys(counts).length} keys, unknown: ${unknown.join(',') || 'none'}`);
+  const stacks = all.filter((p) => /^searock_[d-g]$/.test(p.key));
+  let rep = 0;
+  for (let a = 0; a < stacks.length; a++) for (let b = a + 1; b < stacks.length; b++) if (stacks[a].key === stacks[b].key && Math.hypot(stacks[a].x - stacks[b].x, stacks[a].z - stacks[b].z) < STACK_REPEAT_M) rep++;
+  ok(stacks.length >= 8 && rep === 0, '[world] kit sea stacks: no silhouette repeated within 250 m', `${stacks.length} stacks, ${rep} repeats`);
+  let hits = 0;
+  for (const p of all) {
+    const i = p.island;
+    const r = (getKitColliders(p.key)?.radiusXZ ?? 0) * (p.scale ?? 1) * 0.8;
+    for (const q of [i.dock?.berthPosition, i.dock?.position, i.tavern?.position].filter(Boolean)) if (Math.hypot(p.x - q.x, p.z - q.z) < r + 26) hits++;
+  }
+  ok(hits === 0, '[world] no kit piece within 26 m + its radius of a dock, berth or tavern', `${hits} conflicts`);
+  const again = run().isl.map((i) => JSON.stringify(i.kitPieces)).join('|');
+  ok(again === isl.map((i) => JSON.stringify(i.kitPieces)).join('|'), '[world] placement deterministic (two generations byte-equal)');
+}
+
 process.exit(failed ? 1 : 0);
