@@ -126,7 +126,14 @@ export const PERF_BUDGETS = {
     // removed); taking it to 1934 to honour the 1.12x rule would buy nothing and
     // put the batcher's tripwire inside the noise. The triangle ceiling did come
     // down, 2,250k -> 2,000k, against a reading that fell 1,885k -> 1,784k.
-    { scene: 'dock-vista', label: 'wide island vista', measured: 1727, draws: 1950, tris: 2_000_000 },
+    { scene: 'dock-vista', label: 'wide island vista', measured: 1095, draws: 1500, tris: 1_600_000 },
+    // b4.4a (island HLOD, PLAN 3.14): the vista row above is tightened to the
+    // 3.14 table, 1,500 draws / 1.6 M tris (pre-HLOD reading 1339 / 1692k at
+    // HEAD: the triangle cell was red; 1095 / 1387k with the sectors), and the
+    // eye-level island view gets its first HIGH row at the table's 1,300 / 1.4 M,
+    // RED at 1462 / 1890k with the sectors (b4.4a still owes terrain sector
+    // chunks + the far impostor; see the b4.4 lane report).
+    { scene: 'island-interior', label: 'island interior', measured: 1462, draws: 1300, tris: 1_400_000 },
     // THE ONE SCENE WHOSE FRAME MOVES, and the widest ceiling in the table
     // because of it. The camera rides the hull, so which islands are behind it
     // is a fact about where the ship is lying when the measurement lands — and
@@ -181,7 +188,8 @@ export const PERF_BUDGETS = {
   // should say so rather than let the high-tier numbers speak for both.
   low: [
     // 591-601 draws / 515k tris over five pinned runs; 601 came from the fifth.
-    { scene: 'dock-vista', label: 'wide island vista (low tier)', measured: 601, draws: 680, tris: 580_000 },
+    // b4.4a: held at the PLAN 3.14 low row (<= 620 draws / 520k tris).
+    { scene: 'dock-vista', label: 'wide island vista (low tier)', measured: 601, draws: 620, tris: 520_000 },
     { scene: 'open-sea', label: 'open water (low tier)', measured: 283, draws: 320, tris: 180_000 },
     // The same device must afford the places a pirate actually walks into.
     // Audit r1: inland/cave 731-754k tris, respawn deck 725 draws. Pinned
