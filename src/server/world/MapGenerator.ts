@@ -31,6 +31,7 @@ import {
 import { BIOME_PALETTES, PROP_COLLIDERS, getPropSpacingRadius, radialFill, resolvePropCollision } from '../../shared/props.js';
 import { getIslandLandforms } from '../../shared/landforms.js';
 import { placeCliffKitWorld } from './placement/cliffKit.js';
+import { placeClimbsWorld } from './placement/climbs.js';
 
 const SHIP_TYPES = ['sloop', 'brigantine', 'galleon'] as const;
 
@@ -658,6 +659,8 @@ export class MapGenerator {
 
     // b4.6d: the Blender cliff kit, on its own per-island stream, after every island stream above.
     placeCliffKitWorld(islands);
+    // b4.7b: ladders, ropes and scramble corridors (pure geometry, no rng draw).
+    placeClimbsWorld(islands);
     return islands;
   }
 
