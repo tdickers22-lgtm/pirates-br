@@ -37,7 +37,13 @@ const QUALITY = arg('quality', 'high');
 const ONLY = arg('only', 'sloop,brigantine,galleon').split(',');
 const OUT = arg('out', 'test-results/ship-gallery');
 const VIEWS = arg('views', '') ? arg('views', '').split(',') : null;
-const HULL_LUMA_MIN = 45, BAND_WHITE_MAX = 0.08;
+const HULL_LUMA_MIN = 45, BAND_WHITE_MAX = 0.08, SAIL_HULL_MIN = 1.6;
+// Trim per view (b4.2f). The ships-02 verifier: the sail/hull gate "must pin trim square TO THE CAMERA or it
+// measures trim, not rig". sailAngle 0 squares the yards to the HULL, which a broadside camera sees edge-on
+// (sail normal = ship forward), so mid-broadside braces the yards to the rig's visual limit (1.15 rad, the
+// ShipRenderer clamp = MAX_BRACE 65 deg), canvas turned toward the +x camera: the nearest legal trim to
+// square-to-camera. mid-broadside-square keeps the old sailAngle 0 frame as an ungraded diagnostic.
+const BRACE_TO_CAMERA = 1.15;
 // Shaded-hull luma is graded on the low outboard views; band-15m looks down on the sunlit deck (deck planks
 // share the ship-hull material), so it is excluded from the luma gate.
 const OUTBOARD_VIEWS = ['near-bowq', 'mid-broadside', 'stern'];
@@ -130,16 +136,22 @@ function metrics(beauty, id, opts = {}) {
     ...(opts.bandPx ? bandWhite(beauty, id, opts.bandPx) : {}) };
 }
 const line = (v) => `[gallery] ${v.type.padEnd(10)} ${v.view.padEnd(16)} luma ${String(v.frameLuma).padStart(5)} hull ${String(v.hullLuma).padStart(5)} white ${v.white.toFixed(3)} sailWhite ${v.sailWhite ?? '-'} sail/hull ${v.sailHull ?? '-'} (${v.sailPx}/${v.hullPx} px)${v.bandWhite != null ? ` band2m ${v.bandWhite} (${v.ringPx} px, r ${v.bandPx})` : ''}`;
-function grade(views) {
+function grade(views, live) {
   const fails = [];
   for (const v of views) {
     if (OUTBOARD_VIEWS.includes(v.view) && v.hullLuma != null && v.hullLuma < HULL_LUMA_MIN) fails.push(`${v.type} ${v.view} hullLuma ${v.hullLuma} < ${HULL_LUMA_MIN}`);
     if (v.view === 'band-15m' && !(v.bandWhite != null && v.bandWhite < BAND_WHITE_MAX)) fails.push(`${v.type} band-15m bandWhite ${v.bandWhite} >= ${BAND_WHITE_MAX}`);
+    if (v.view === 'mid-broadside' && !(v.sailHull != null && v.sailHull >= SAIL_HULL_MIN)) fails.push(`${v.type} mid-broadside sail/hull ${v.sailHull} < ${SAIL_HULL_MIN}`);
+  }
+  for (const [type, c] of Object.entries(live ?? {})) {
+    if (c.helmCourse != null && Math.abs(c.helmCourse - 0.35) > 0.03) fails.push(`${type} helm first-person course opacity ${c.helmCourse} != 0.35`);
+    if (c.offHelmCourse != null && c.offHelmCourse < 0.999) fails.push(`${type} course opacity off the helm ${c.offHelmCourse} != 1`);
+    if (c.furl && !(c.furl.topsailsShown === 0 && c.furl.coursesShown === c.furl.courses)) fails.push(`${type} at sailHeight 0.3 topsails shown ${c.furl.topsailsShown}, courses shown ${c.furl.coursesShown}/${c.furl.courses} (topsail must furl first)`);
   }
   if (!views.some((v) => OUTBOARD_VIEWS.includes(v.view) && v.hullLuma != null)) fails.push('no outboard view with hull pixels was graded');
   for (const f of fails) console.log(`[gallery] GATE FAIL ${f}`);
-  if (!fails.length) console.log(`[gallery] gates OK (hullLuma >= ${HULL_LUMA_MIN} on outboard views, band2m white < ${BAND_WHITE_MAX})`);
-  return { hullLumaMin: HULL_LUMA_MIN, bandWhiteMax: BAND_WHITE_MAX, fails };
+  if (!fails.length) console.log(`[gallery] gates OK (hullLuma >= ${HULL_LUMA_MIN} on outboard views, band2m white < ${BAND_WHITE_MAX}, mid-broadside sail/hull >= ${SAIL_HULL_MIN}, helm course fade, topsail furls first)`);
+  return { hullLumaMin: HULL_LUMA_MIN, bandWhiteMax: BAND_WHITE_MAX, sailHullMin: SAIL_HULL_MIN, fails };
 }
 
 // --recompute: re-derive the metrics from the PNG pairs a previous run saved (no stack, no browser).
@@ -150,7 +162,7 @@ if (process.argv.includes('--recompute')) {
     Object.assign(v, metrics(readPng(readFileSync(`${OUT}/${v.file}`)), readPng(readFileSync(`${OUT}/${v.file.replace(/\.png$/, '.id.png')}`)), { bandPx: v.bandPx }));
     console.log(line(v));
   }
-  prev.gates = grade(prev.views); if (prev.gates.fails.length) process.exitCode = 1;
+  prev.gates = grade(prev.views, prev.live); if (prev.gates.fails.length) process.exitCode = 1;
   writeFileSync(file, JSON.stringify(prev, null, 2));
   process.exit(process.exitCode ?? 0);
 }
@@ -197,7 +209,7 @@ try {
         outer: for (let R = 60; R <= 900; R += 40) for (let k = 0; k < 24; k++) { const an = k * Math.PI / 12; const x = own.position.x + Math.cos(an) * R, z = own.position.z + Math.sin(an) * R; if (deep(x, z)) { a.spot = { x, z }; break outer; } }
         a.spot = a.spot ?? { x: own.position.x, z: own.position.z };
       }
-      const fake = { ...own, position: { ...own.position, x: a.spot.x, z: a.spot.z }, id: 'audit-' + a.type, type: a.type, sailHeight: 1, sailAngle: 0,
+      const fake = { ...own, position: { ...own.position, x: a.spot.x, z: a.spot.z }, id: 'audit-' + a.type, type: a.type, sailHeight: a.sailHeight ?? 1, sailAngle: a.trim ?? 0,
         holes: a.holes, anchored: true, velocity: { x: 0, y: 0, z: 0 }, hull: 9999, maxHull: 9999, waterLevel: 0 };
       if (a.freeze) { a.frozenFake = fake; a.frozenOwn = own.id; }
       return orig(ships.filter((s) => s.id !== own.id).concat([fake]), players, t, dt, ...rest);
@@ -256,6 +268,10 @@ try {
       const diag = await page.evaluate(() => ({ audit: { ...window.__audit, holes: undefined }, ships: window.__piratesBR.state.ships.map((s) => s.id + ':' + s.type) }));
       throw new Error(`audit ${type} never built: ${JSON.stringify(diag)} errors ${JSON.stringify(errors.slice(0, 5))}`);
     }
+    // ShipRenderer never drops a hull that leaves the ship list, so the previous class's audit hull stays parked on
+    // the same open-water spot, frozen in its last pose: it was the second mast cluster over the galleon (b4.2f).
+    // Hide every other audit hull; the ID pass only swaps this group, so a stale one in front stole its pixels.
+    await page.evaluate((id) => { const sr = window.__piratesBR.shipRenderer; for (const k of ['sloop', 'brigantine', 'galleon']) { const o = sr.getShipGroup('audit-' + k); if (o && 'audit-' + k !== id) o.visible = false; } }, id);
     await sleep(2500);
     report.census[type] = await page.evaluate((id) => {
       const grp = window.__piratesBR.shipRenderer.getShipGroup(id); if (!grp) return null;
@@ -279,7 +295,8 @@ try {
     }, id);
     const plan = [
       ['near-bowq', [w * 0.5 + 9, h + 2.5, l * 0.5 + 7], [0, h * 0.8, l * 0.1]],
-      ['mid-broadside', [w * 0.5 + 38, h + 5, 0], [0, h, 0]],
+      ['mid-broadside', [w * 0.5 + 38, h + 5, 0], [0, h, 0], BRACE_TO_CAMERA],
+      ['mid-broadside-square', [w * 0.5 + 38, h + 5, 0], [0, h, 0], 0],
       ['far-quarter', [w + 90, 16, l + 70], [0, h, 0]],
       // Low stern quarter aimed at the sternpost so the rudder hanging on it is in frame.
       ['stern', [3, h + 1.6, -(l * 0.5 + 9)], [0, h * 0.45, -l * 0.45]],
@@ -294,8 +311,20 @@ try {
       // The camera sits on the sun's side of the hull (sun behind it), so specular glints do not land in the band.
       ['band-15m', [sunSide * (w * 0.5 + 9), 12, 0], [sunSide * w * 0.5, 0, 0]],
     ].filter(([name]) => !VIEWS || VIEWS.includes(name));
-    for (const [name, p, t] of plan) {
+    for (const [name, p, t, trim = 0] of plan) {
+      const retrim = await page.evaluate((trim) => { const a = window.__audit; const was = a.trim ?? 0; a.trim = trim; return was !== trim; }, trim);
       await camLocal(id, p, t); await sleep(1200);
+      // The brace is a dt-driven lerp (Game clamps dt to 50 ms): under a loaded SwiftShader a fixed 2.5 s once
+      // shot the sloop half-braced (sail/hull 1.315 vs 2.519 settled). Wait until every yard sits on the trim.
+      if (retrim) await page.waitForFunction((id) => {
+        const want = Math.max(-1.15, Math.min(1.15, window.__audit.trim ?? 0)); let ok = true;
+        window.__piratesBR.shipRenderer.getShipGroup(id).traverse((o) => { const pv = o.userData?.trimPivot; if (o.userData?.sailKind === 'square' && pv && Math.abs(pv.rotation.y - want) > 0.02) ok = false; });
+        return ok;
+      }, id, { timeout: 60_000, polling: 250 }).catch(() => console.log(`[gallery] ${type} ${name}: yards did not settle on trim ${trim}`));
+      // The audit hull copies the own ship's heading every frame, so a long settle lets it swing under a camera
+      // placed in its old local frame (a brig "broadside" shot came out bow-quarter, hull 1237 px vs 3365):
+      // re-aim in the current frame after the wait.
+      if (retrim) { await camLocal(id, p, t); await sleep(1200); }
       // 2 m at the waterline beside the hull, projected to px (for the band metric).
       const bandPx = name !== 'band-15m' ? 0 : await page.evaluate(([id, x]) => {
         const g = window.__piratesBR; const grp = g.shipRenderer.getShipGroup(id); const cam = g.renderer.camera;
@@ -314,12 +343,40 @@ try {
         finally { await idSwap(id, false); }
       } finally { await page.evaluate(() => { window.__audit.freeze = false; }); }
       const m = metrics(readPng(beautyBuf), readPng(idBuf), { bandPx });
-      const v = { type, view: name, file: `${file}.png`, ...m };
+      const v = { type, view: name, trim, file: `${file}.png`, ...m };
       report.views.push(v);
       console.log(line(v));
     }
+    // Live own-ship rig checks (b4.2f), numbers off the real update path: the audit hull carries the local crew,
+    // so the helmsman's first-person course fade and the furl order run as in play. Skipped with --views.
+    if (!VIEWS || VIEWS.includes('helm-fp')) {
+      const courses = () => page.evaluate((id) => {
+        const grp = window.__piratesBR.shipRenderer.getShipGroup(id); const r = { n: 0, op: 0, courses: 0, coursesShown: 0, topsails: 0, topsailsShown: 0 };
+        grp.traverse((o) => { const k = o.userData?.sailKind ? o.userData.rigKind : null; /* canvas only, not the furled bundles */ if (k === 'course') { r.courses++; if (o.visible) r.coursesShown++; if (o.material) { r.n++; r.op += o.material.opacity; } } if (k === 'topsail') { r.topsails++; if (o.visible) r.topsailsShown++; } });
+        return { ...r, op: r.n ? Math.round(r.op / r.n * 1000) / 1000 : null };
+      }, id);
+      await page.evaluate(() => { window.__audit.trim = 0; window.__audit.sailHeight = 1; });
+      const hz = -l * 0.315 - 0.5;
+      // The fade is a dt-driven lerp and Game clamps dt to 50 ms, so under SwiftShader (a few fps) it takes
+      // seconds of wall clock: wait for the steady state instead of a fixed sleep (a 2.5 s sleep read 0.83).
+      const settle = (pred) => page.waitForFunction(([id, pred]) => {
+        let n = 0, op = 0; window.__piratesBR.shipRenderer.getShipGroup(id).traverse((o) => { if (o.userData?.sailKind && o.userData.rigKind === 'course' && o.material) { n++; op += o.material.opacity; } });
+        return n > 0 && (pred === 'faded' ? op / n <= 0.36 : op / n >= 0.999);
+      }, [id, pred], { timeout: 40_000, polling: 250 }).catch(() => {});
+      await camLocal(id, [0, h + 2.4, hz], [0, h + 5, l * 0.5]); await sleep(1200); await settle('faded');
+      const atHelm = await courses();
+      if (atHelm.courses) await page.screenshot({ path: `${OUT}/${type}-helm-fp-${QUALITY}.png`, timeout: 120_000 });
+      await camLocal(id, [w * 0.5 + 38, h + 5, 0], [0, h, 0]); await sleep(1200); await settle('solid');
+      const offHelm = await courses();
+      await page.evaluate(() => { window.__audit.sailHeight = 0.3; }); await sleep(1500);
+      const furled = await courses();
+      await page.evaluate(() => { window.__audit.sailHeight = 1; }); await sleep(1500);
+      report.live = report.live ?? {};
+      report.live[type] = atHelm.courses ? { helmCourse: atHelm.op, offHelmCourse: offHelm.op, furl: { courses: furled.courses, coursesShown: furled.coursesShown, topsails: furled.topsails, topsailsShown: furled.topsailsShown }, helmFrame: `${type}-helm-fp-${QUALITY}.png` } : { courses: 0 };
+      console.log(`[gallery] ${type.padEnd(10)} live ${JSON.stringify(report.live[type])}`);
+    }
   }
-  report.gates = grade(report.views); if (report.gates.fails.length) process.exitCode = 1;
+  report.gates = grade(report.views, report.live); if (report.gates.fails.length) process.exitCode = 1;
   report.info = await page.evaluate(() => { const r = window.__piratesBR.renderer.renderer.info; return { calls: r.render.calls, tris: r.render.triangles, programs: r.programs?.length }; });
   report.pageErrors = errors.slice(0, 20);
 } catch (e) {
