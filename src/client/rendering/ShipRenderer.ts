@@ -46,7 +46,7 @@ import { buildRudder, buildSternCastle } from './ship/stern.js';
 import { buildRig } from './ship/sails.js';
 import { attachLodSailTear, railBreaksOf, railRunFor, setLodSailTear, shipMotionOf, wheelFollowAlpha, type LodSailTear } from './ship/shipMotion.js';
 import { DECK_KIT_SMALL, deckKitSockets, kitDrawCount, type DeckKitPart, mountShipKit, shipKitSockets, SHIP_KIT_FILES, SHIP_KIT_LOD_FILES, type KitSocket, type ShipKitFile, type ShipKitLodFile, type ShipKitSource } from './ship/kit.js';
-import { stationGripsCannon, stationGripsCapstan, stationGripsFallback, stationGripsHelm } from './ship/kit.js';
+import { stationAnchors, stationGripsCannon, stationGripsCapstan, stationGripsFallback, stationGripsHelm } from './ship/kit.js';
 import { SAIL_BELLY, SAIL_CLOTH_GRID, makeLodSailCard, sailFillTarget, sailLuff01, sailWind01, setSailClothUniforms, stepSailFill, type SailClothUniforms } from './ship/sailCloth.js';
 import { applyRiggingLod, updateRigging, type Rigging, type RiggingSet } from './ship/rigging.js';
 import { buildWakeSurface, writeWakeSurface, setArmsVisible, makeWakeFrame, ARM_FACTOR_FLOOR, buildWaterlineCollar, seatWaterlineCollar, type WakeSurface, type WakeFrame } from './ship/wake.js';
@@ -1676,12 +1676,13 @@ export class ShipRenderer {
     const rimR = 0.4 * wheelScale;
     const spokeLen = rimR * 1.42;
     const wheelPost = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.1, 1.06, 10), darkMat);
-    wheelPost.position.set(0, H + qdRise + 0.53, -L * 0.315);
+    const anchors = stationAnchors(stats);
+    wheelPost.position.set(0, H + qdRise + 0.53, anchors.helmWheelZ);
     wheelPost.castShadow = true;
     group.add(wheelPost);
 
     const wheelGroup = new THREE.Group();
-    wheelGroup.position.set(0, H + qdRise + 0.74 + rimR, -L * 0.315);
+    wheelGroup.position.set(0, H + qdRise + 0.74 + rimR, anchors.helmWheelZ);
     group.add(wheelGroup);
 
     const wheelBase = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.13, 12), metalMat);
@@ -2095,7 +2096,7 @@ export class ShipRenderer {
         mergeStaticMeshes(pitchPivot, new Set<THREE.Object3D>([chargeGroup]), `cannon-pitch-${ship.type}${ph ? '-phone' : ''}`);
         mergeStaticMeshes(cg, new Set<THREE.Object3D>([yawPivot]), `cannon-root-${ship.type}${ph ? '-phone' : ''}`);
 
-        cg.position.set(sideX, H + 0.18, cz);
+        cg.position.set(Math.sign(sideX) * stationAnchors(stats).cannonX(side === 0 ? c : cannonsPerSide + c), H + 0.18, cz);
         cg.rotation.y = side === 0 ? 0 : Math.PI;
         group.add(cg);
         // b3.3c: breech handle grips for the gunner's hand IK (behind the cascabel).
@@ -2112,7 +2113,7 @@ export class ShipRenderer {
     const mainMastLocalZ = getMainMastLocalZ(stats);
     const deckStations: Array<{ x: number; z: number; r: number }> = [
       { x: 0, z: L * 0.42, r: 1.25 },     // anchor capstan (handles sweep 0.71)
-      { x: 0, z: -L * 0.315, r: 1.4 },    // helm wheel
+      { x: 0, z: stationAnchors(stats).helmWheelZ, r: 1.4 },    // helm wheel
       ...getSailRopeStationLocals(stats).map((s) => ({ x: s.x, z: s.z, r: 1.3 })),
       ...getBraceStationLocals(stats).map((s) => ({ x: s.x, z: s.z, r: 1.3 })),
     ];
@@ -3715,7 +3716,7 @@ void main() {
       // other camera, and every other player, sees them solid.
       let helmView = false;
       if (localCrewShip && cameraPosition) {
-        const hz = -SHIP_STATS[ship.type].length * 0.315 - 0.5;
+        const hz = stationAnchors(SHIP_STATS[ship.type]).helmWheelZ - 0.5;
         const c = Math.cos(ship.rotation), sn = Math.sin(ship.rotation);
         const hx = ship.position.x + hz * sn, hzw = ship.position.z + hz * c;
         helmView = (cameraPosition.x - hx) ** 2 + (cameraPosition.z - hzw) ** 2 < 1.6 * 1.6;

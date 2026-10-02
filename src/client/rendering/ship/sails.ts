@@ -376,7 +376,9 @@ export function buildRig(ctx: RigContext): RigBuild {
       rail.castShadow = true;
       group.add(rail);
     }
-    const rungCount = 8;
+    // b4.3f2: rung pitch capped at the sloop's 1.4 m (8 rungs) on every class:
+    // a fixed 8 left the galleon's rungs 2.16 m apart, past the climber's reach.
+    const rungCount = Math.max(8, Math.ceil(ladderH / 1.4));
     const rungSpan = railCenterX * 2 + railW * 0.45;
     for (let r = 0; r <= rungCount; r++) {
       const ry = ladderBottom + (r / rungCount) * ladderH;
