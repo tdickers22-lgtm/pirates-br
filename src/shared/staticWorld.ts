@@ -32,7 +32,7 @@ import { getIslandMaxRadius, getIslandSurfaceY } from './utils/index.js';
 /** Bump when ANY generator input changes the static world (roster, landform,
  *  placement rule, collider table). A client on another version must not
  *  regenerate: b4.1b falls back to a full world_sync. */
-export const WORLD_VERSION = 1;
+export const WORLD_VERSION = 2;
 
 // ── Deterministic transcendental kernels (fdlibm 5.3 constants) ──────────────
 
