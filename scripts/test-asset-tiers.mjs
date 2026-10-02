@@ -224,19 +224,19 @@ export const RATCHET = [
   'searock_b:textures',
   'searock_c:textures',
   // arches
-  'rock_arch:band', 'rock_arch:lods', 'rock_arch:textures', 'rock_arch:verts',
+  'rock_arch:textures',
   // cliff
-  'crag:band', 'crag:lods', 'crag:textures', 'crag:verts',
+  'crag:textures',
   // cave-clusters
-  'stalactite_cluster_a:band', 'stalactite_cluster_a:lods', 'stalactite_cluster_a:textures', 'stalactite_cluster_a:verts',
-  'stalactite_cluster_b:band', 'stalactite_cluster_b:lods', 'stalactite_cluster_b:textures', 'stalactite_cluster_b:verts',
-  'stalagmite_cluster_a:band', 'stalagmite_cluster_a:lods', 'stalagmite_cluster_a:textures', 'stalagmite_cluster_a:verts',
-  'stalagmite_cluster_b:band', 'stalagmite_cluster_b:lods', 'stalagmite_cluster_b:textures', 'stalagmite_cluster_b:verts',
+  'stalactite_cluster_a:textures',
+  'stalactite_cluster_b:textures',
+  'stalagmite_cluster_a:textures',
+  'stalagmite_cluster_b:textures',
   'crystal_vein_a:band', 'crystal_vein_a:lods', 'crystal_vein_a:textures', 'crystal_vein_a:verts',
   'crystal_vein_b:band', 'crystal_vein_b:lods', 'crystal_vein_b:textures', 'crystal_vein_b:verts',
-  'cave_ledge:band', 'cave_ledge:lods', 'cave_ledge:textures', 'cave_ledge:verts',
-  'cave_pool_rim:band', 'cave_pool_rim:lods', 'cave_pool_rim:textures', 'cave_pool_rim:verts',
-  'rock_arch_cave:band', 'rock_arch_cave:lods', 'rock_arch_cave:textures', 'rock_arch_cave:verts',
+  'cave_ledge:textures',
+  'cave_pool_rim:textures',
+  'rock_arch_cave:textures',
   // buildings
   'dock_mid:band', 'dock_mid:lods', 'dock_mid:textures',
   'dock_end:band', 'dock_end:lods', 'dock_end:textures',
