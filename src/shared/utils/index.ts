@@ -715,6 +715,11 @@ function caveReliefWeight(island: Island, x: number, z: number): number {
   let nearest = Infinity;
   for (const cave of island.caves ?? []) {
     const dx = x - cave.position.x, dz = z - cave.position.z;
+    // b4.4h early-out: a sample farther than hypot(r + 22, length + 25) from
+    // the cave origin is >= 22 m from its collar, where the weight is already
+    // 1 (smoothstep(5, 22)); skipping it never changes the minimum's outcome.
+    const reach = (cave.interiorRadius ?? 3) + cave.length + 47;
+    if (dx * dx + dz * dz > reach * reach) continue;
     const cs = Math.cos(cave.rotation), sn = Math.sin(cave.rotation);
     const lx = dx * cs - dz * sn, lz = dx * sn + dz * cs;
     const side = Math.max(0, Math.abs(lx) - (cave.interiorRadius ?? 3));
@@ -740,7 +745,20 @@ export function getIslandInletCut(island: Island, angle: number): number {
   return Math.min(cut, 0.6); // never bite past the island core
 }
 
+// b4.4h: getIslandSurfaceY asks for the shape terms twice per sample (once
+// through getIslandDistRatio for the bulge, once for the masks) at the same
+// angle; a one-entry memo keyed on the profile object and the exact angle
+// returns the identical result object (pure function of both: bit-identical).
+let shapeMemoProfile: Island['profile'] | null = null;
+let shapeMemoAngle = NaN;
+let shapeMemoTerms: { primaryMask: number; secondaryMask: number; tertiaryMask: number; bulge: number } | null = null;
 function getIslandShapeTerms(island: Island, angle: number) {
+  if (shapeMemoTerms && island.profile === shapeMemoProfile && angle === shapeMemoAngle) return shapeMemoTerms;
+  const terms = computeIslandShapeTerms(island, angle);
+  shapeMemoProfile = island.profile; shapeMemoAngle = angle; shapeMemoTerms = terms;
+  return terms;
+}
+function computeIslandShapeTerms(island: Island, angle: number) {
   const profile = island.profile;
   const primaryMask = islandAngleMask(angle, profile.primaryHillAngle, 0.8);
   const secondaryMask = islandAngleMask(angle, profile.secondaryHillAngle, 0.68) * profile.secondaryHillScale;
@@ -1093,6 +1111,40 @@ export function resolveCaveWallCollision(
  *  archLandFactor sink crossed sea level), as rho = sqrt(-ln d). */
 const ISLET_WATERLINE_RHO = Math.sqrt(-Math.log(0.22));
 
+// Hoisted out of getIslandSurfaceY (b4.4h): per-call closures cost a fresh
+// function object every sample (and an esbuild keepNames __name call under
+// tsx, ~11% of the node grid build). Same arithmetic, same order: bit-identical.
+function islandHillContribution(
+  island: Island, localX: number, localZ: number,
+  hillAngle: number, hillOffset: number, radiusScale: number, heightScale: number,
+): number {
+  const profile = island.profile;
+  const centerX = Math.cos(hillAngle) * hillOffset * profile.footprintX;
+  const centerZ = Math.sin(hillAngle) * hillOffset * profile.footprintZ;
+  const dx = localX - centerX;
+  const dz = localZ - centerZ;
+  const radius = Math.max(4, island.radius * radiusScale);
+  return Math.exp(-(dx * dx + dz * dz) / (radius * radius)) * island.radius * heightScale;
+}
+
+function islandIsletDiscAt(island: Island, localX: number, localZ: number, hillAngle: number, hillOffset: number, discR: number): number {
+  const profile = island.profile;
+  const cx = Math.cos(hillAngle) * hillOffset * profile.footprintX;
+  const cz = Math.sin(hillAngle) * hillOffset * profile.footprintZ;
+  const ddx = localX - cx;
+  const ddz = localZ - cz;
+  const r = Math.max(6, island.radius * discR);
+  return Math.exp(-(ddx * ddx + ddz * ddz) / (r * r));
+}
+
+function islandTwoScaleHill(
+  island: Island, localX: number, localZ: number,
+  hillAngle: number, hillOffset: number, crestR: number, amp: number, shoulderR: number, shoulderFrac: number,
+): number {
+  return islandHillContribution(island, localX, localZ, hillAngle, hillOffset, crestR, amp * (shoulderFrac > 0 ? 0.78 : 1))
+    + (shoulderFrac > 0 ? islandHillContribution(island, localX, localZ, hillAngle, hillOffset, shoulderR, amp * shoulderFrac) : 0);
+}
+
 export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: IslandSurfaceOptions): number {
   const { angle, distRatio } = getIslandDistRatio(island, x, z);
   const { primaryMask, secondaryMask, tertiaryMask } = getIslandShapeTerms(island, angle);
@@ -1107,19 +1159,6 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   const ridgeWave = 1
     + Math.cos(angle - profile.ridgeAxis) * profile.ridgeBias
     + Math.sin(angle * 2.6 + profile.ridgeAxis) * 0.04;
-  const hillContribution = (
-    hillAngle: number,
-    hillOffset: number,
-    radiusScale: number,
-    heightScale: number,
-  ) => {
-    const centerX = Math.cos(hillAngle) * hillOffset * profile.footprintX;
-    const centerZ = Math.sin(hillAngle) * hillOffset * profile.footprintZ;
-    const dx = localX - centerX;
-    const dz = localZ - centerZ;
-    const radius = Math.max(4, island.radius * radiusScale);
-    return Math.exp(-(dx * dx + dz * dz) / (radius * radius)) * island.radius * heightScale;
-  };
   const beachRise = Math.pow(shoreline, 1.12) * island.radius * 0.032;
   const cliffRise = Math.pow(Math.max(0, 1 - distRatio / 0.9), 1.35)
     * island.radius
@@ -1165,17 +1204,8 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   // above 30 m on a 41,000 m² island) — from the sea it read as a green disc.
   // The shoulder carries most of the mass out to ~0.6·radius so the island
   // presents a real massif at 320 m; the crest still spires out of it.
-  const twoScaleHill = (
-    hillAngle: number,
-    hillOffset: number,
-    crestR: number,
-    amp: number,
-    shoulderR: number,
-    shoulderFrac: number,
-  ) => hillContribution(hillAngle, hillOffset, crestR, amp * (shoulderFrac > 0 ? 0.78 : 1))
-    + (shoulderFrac > 0 ? hillContribution(hillAngle, hillOffset, shoulderR, amp * shoulderFrac) : 0);
   const massifFrac = isMountain ? 0.62 : isTwin ? 0.5 : 0;
-  const primaryHill = twoScaleHill(
+  const primaryHill = islandTwoScaleHill(island, localX, localZ, 
     profile.primaryHillAngle,
     lerp(profile.primaryHillOffset, reliefFeatures.summits.primary, reliefWeight),
     primaryPeakR,
@@ -1190,7 +1220,7 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   // profile's secondaryHillScale so the two fangs still differ in stature.
   const twinFangAmp = primaryPeakAmp * clamp(profile.secondaryHillScale, 0.74, 1.0);
   const secondaryHill = isTwin
-    ? twoScaleHill(
+    ? islandTwoScaleHill(island, localX, localZ, 
       profile.secondaryHillAngle,
       lerp(profile.secondaryHillOffset, reliefFeatures.summits.secondary, reliefWeight),
       primaryPeakR,
@@ -1198,7 +1228,7 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
       0.44 + profile.mesaBias * 0.06,
       massifFrac,
     )
-    : twoScaleHill(
+    : islandTwoScaleHill(island, localX, localZ, 
       profile.secondaryHillAngle,
       lerp(profile.secondaryHillOffset, reliefFeatures.summits.secondary, reliefWeight),
       0.3 + profile.secondaryHillScale * 0.1,
@@ -1211,7 +1241,7 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
       isMountain ? 0.55 : 0,
     );
   const tertiaryHill = profile.tertiaryHillScale > 0
-    ? hillContribution(
+    ? islandHillContribution(island, localX, localZ, 
       profile.tertiaryHillAngle,
       profile.tertiaryHillOffset,
       0.26 + profile.tertiaryHillScale * 0.1,
@@ -1245,14 +1275,6 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   // 2D islet discs: a true gaussian around each sub-peak CENTER (not the angular
   // mask), so an archipelago reads as separate islets with open water between —
   // rather than one blob with pie-slice notches.
-  const isletDiscAt = (hillAngle: number, hillOffset: number, discR: number) => {
-    const cx = Math.cos(hillAngle) * hillOffset * profile.footprintX;
-    const cz = Math.sin(hillAngle) * hillOffset * profile.footprintZ;
-    const ddx = localX - cx;
-    const ddz = localZ - cz;
-    const r = Math.max(6, island.radius * discR);
-    return Math.exp(-(ddx * ddx + ddz * ddz) / (r * r));
-  };
   let archLandFactor = 1;
   let crescentBay = 0;
   // Islet-local frame (archipelago only): the dominant islet's disc value and
@@ -1260,11 +1282,11 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   let isletDisc = 0;
   let isletRadius = 0;
   if (isArchipelago) {
-    const d1 = isletDiscAt(profile.primaryHillAngle, profile.primaryHillOffset, 0.46);
+    const d1 = islandIsletDiscAt(island, localX, localZ, profile.primaryHillAngle, profile.primaryHillOffset, 0.46);
     const d2 = profile.secondaryHillScale > 0.05
-      ? isletDiscAt(profile.secondaryHillAngle, profile.secondaryHillOffset, 0.42) : 0;
+      ? islandIsletDiscAt(island, localX, localZ, profile.secondaryHillAngle, profile.secondaryHillOffset, 0.42) : 0;
     const d3 = profile.tertiaryHillScale > 0
-      ? isletDiscAt(profile.tertiaryHillAngle, profile.tertiaryHillOffset, 0.38) : 0;
+      ? islandIsletDiscAt(island, localX, localZ, profile.tertiaryHillAngle, profile.tertiaryHillOffset, 0.38) : 0;
     isletDisc = Math.max(d1, d2, d3);
     // Power-8 weights blend the radius across the saddle where the dominant
     // islet switches, so the beach ring never jumps (no seam, no notch).

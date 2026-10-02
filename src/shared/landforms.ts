@@ -203,6 +203,10 @@ export const LANDFORM_ROSTER: Readonly<Record<string, readonly Landform[]>> = Ob
       rimWidth: 10, outerRun: 20, breach: { angle: 2.76, halfWidth: 3.5, sillY: 35 },
     },
     { id: 'old-maw-crater-lake', kind: 'basin', center: [-38, -18], radius: 11, spillY: 32, depth: 3, flat: 0.45 },
+    // b4.4h: a lava-rock sea cliff on the north-west flank (raised side
+    // inland) and black-sand dunes on the east beach, clear of the NE caves.
+    { id: 'old-maw-sea-cliff', kind: 'scarp', path: [[-30, -86], [-78, -62]], height: 8, face: 2, reach: 26, taper: 10 },
+    { id: 'old-maw-black-sand', kind: 'dune_field', path: [[112, -30], [112, 6]], width: 10, amplitude: 1.0, wavelength: 7 },
   ],
   // Parley Point: a true mesa. Flat top at 26 m (radius 28 m, ~2,460 m2), a
   // 3 m cliff face over 10-17 m surrounding ground, two 46 m ramps (one toward
@@ -213,6 +217,9 @@ export const LANDFORM_ROSTER: Readonly<Record<string, readonly Landform[]>> = Ob
       ramps: [{ angle: -2.1, halfWidth: 3, run: 46 }, { angle: 0.7, halfWidth: 3, run: 46 }],
       ladders: [Math.PI],
     },
+    // b4.4h: dunes on the south beach and a tide shelf west of the dock.
+    { id: 'parley-dunes', kind: 'dune_field', path: [[-30, 50], [10, 52]], width: 10, amplitude: 0.9, wavelength: 7 },
+    { id: 'parley-tide-shelf', kind: 'rock_shelf', center: [-46, -60], radius: 5, y: 0.5 },
   ],
   // Kraken Tooth: two basalt fangs (steep headland spires raised on the two
   // natural summits at (-32, -32) and (30, 30)) over a low central saddle, and
@@ -221,6 +228,8 @@ export const LANDFORM_ROSTER: Readonly<Record<string, readonly Landform[]>> = Ob
     { id: 'kraken-fang-west', kind: 'headland', path: [[-32, -32], [-36, -36]], crestBaseY: 52, crestTipY: 48, topHalfWidth: 1.5, sideSlope: 2.4 },
     { id: 'kraken-fang-east', kind: 'headland', path: [[30, 30], [34, 34]], crestBaseY: 49, crestTipY: 45, topHalfWidth: 1.5, sideSlope: 2.4 },
     { id: 'kraken-arch', kind: 'arch_site', center: [-67, 67], radius: 7, heading: 2.36 },
+    // b4.4h: a basalt sea cliff on the west shore (raised side inland, +x).
+    { id: 'kraken-basalt-cliff', kind: 'scarp', path: [[-64, 22], [-64, -22]], height: 8, face: 2, reach: 24, taper: 8 },
   ],
 
   // b4.4f: authored relief for four dome islands (islands-01, PLAN 3.14 table).
@@ -346,6 +355,24 @@ export const LANDFORM_ROSTER: Readonly<Record<string, readonly Landform[]>> = Ob
     },
     { id: 'crow-sea-cliff', kind: 'scarp', path: [[94, -44], [94, 44]], height: 8, face: 2, reach: 30, taper: 10 },
     { id: 'crow-roost-spur', kind: 'headland', path: [[60, -60], [88, -88]], crestBaseY: 28, crestTipY: 24, topHalfWidth: 2.5, sideSlope: 2.2 },
+  ],
+
+  // b4.4h: authored relief for the last two record-free islands (islands-01).
+  // Gallows Sands: the gallows knoll stands on a north scarp (raised side
+  // south-east, inland) over a tide shelf, and a second shelf on the east
+  // point. The central cave cluster keeps its collar (records fade there).
+  'gallows-sands': [
+    { id: 'gallows-knoll-scarp', kind: 'scarp', path: [[-36, -20], [-6, -30]], height: 6, face: 2, reach: 18, taper: 6 },
+    { id: 'gallows-shelf-north', kind: 'rock_shelf', center: [-10, -42], radius: 5, y: 0.5 },
+    { id: 'gallows-shelf-east', kind: 'rock_shelf', center: [52, 4], radius: 5, y: 0.5 },
+  ],
+  // Widow's Watch: the seaward cliff on the east rim (raised side inland, the
+  // memorial stands at its edge), a cape spur to the north-east for the
+  // overhang kit, and a sea-arch site off the cape.
+  'widow-s-watch': [
+    { id: 'widow-sea-cliff', kind: 'scarp', path: [[70, -50], [70, 40]], height: 12, face: 2, reach: 40, taper: 12 },
+    { id: 'widow-cape', kind: 'headland', path: [[48, -50], [70, -72]], crestBaseY: 26, crestTipY: 22, topHalfWidth: 2.5, sideSlope: 2.2 },
+    { id: 'widow-sea-arch', kind: 'arch_site', center: [76, -78], radius: 7, heading: -0.79 },
   ],
 });
 

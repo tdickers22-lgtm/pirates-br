@@ -17,7 +17,7 @@
 //      baseRelief topography the cave generator reads; stamps stay authoritative.
 //   7. zero rng: Math.random throws during index build and every sample;
 //      evaluation is deterministic.
-// Part B, REPORT mode (enforced from b4.4h with --enforce): the PLAN 3.14
+// Part B, ENFORCED since b4.4h (--report for the report-only reading): the PLAN 3.14
 // D-table per island on a 2 m grid (land = y > 0.3): % land > 35 / > 60 deg,
 // peak, landform kinds, tiers split by >= 5 m measured steps, 60 x 60 m flat
 // windows (< 2 m relief, authored meadows/mesa tops exempt), the archipelago
@@ -25,7 +25,7 @@
 // calm crest + 0.3 m), a > 4 m sightline break within 40 m of every dock, and
 // the grid build time (<= 25 ms per island).
 //
-//   node --import tsx scripts/test-island-relief.mjs [--enforce]
+//   node --import tsx scripts/test-island-relief.mjs [--report] [--mutate=...]
 import { MapGenerator } from '../src/server/world/MapGenerator.ts';
 import {
   getIslandSurfaceY, getIslandCays, gerstnerHeight, WAVE_PARAMS,
@@ -35,7 +35,9 @@ import {
   landformStreamBedY, LANDFORM_MAX_PER_SAMPLE, LANDFORM_ROSTER,
 } from '../src/shared/landforms.ts';
 
-const ENFORCE = process.argv.includes('--enforce');
+// b4.4h: Part B is ENFORCED by default (all 14 islands clear the D-table);
+// --report keeps the old report-only reading for authoring work.
+const ENFORCE = !process.argv.includes('--report');
 let fails = 0, passes = 0;
 function expect(label, ok, detail = '') {
   if (ok) { passes++; console.log(`  ✓ ${label}${detail ? `  (${detail})` : ''}`); }
@@ -273,6 +275,13 @@ if (B44F_OFF) for (const id of B44F_IDS) overrideIslandLandforms(byId(id), []);
 const B44G_IDS = ['booty-bay', 'skull-cove', 'the-crooked-atoll', 'dead-man-shoals', 'crow-s-perch'];
 const B44G_OFF = process.argv.includes('--mutate=b44g-off');
 if (B44G_OFF) for (const id of B44G_IDS) overrideIslandLandforms(byId(id), []);
+// b4.4h RED proof: --mutate=b44h-off removes only the b4.4h records (the
+// b4.4e archetype records on Old Maw / Parley / Kraken stay).
+const B44H_IDS = ['kraken-tooth', 'gallows-sands', 'widow-s-watch', 'parley-point', 'old-maw-caldera'];
+const B44H_RECS = new Set(['old-maw-sea-cliff', 'old-maw-black-sand', 'parley-dunes', 'parley-tide-shelf', 'kraken-basalt-cliff',
+  'gallows-knoll-scarp', 'gallows-shelf-north', 'gallows-shelf-east', 'widow-sea-cliff', 'widow-cape', 'widow-sea-arch']);
+const B44H_OFF = process.argv.includes('--mutate=b44h-off');
+if (B44H_OFF) for (const id of B44H_IDS) overrideIslandLandforms(byId(id), getIslandLandforms(byId(id)).filter((r) => !B44H_RECS.has(r.id)));
 
 // ── Part B: the D-table, report mode ─────────────────────────────────────────
 console.log(`\nPart B: PLAN 3.14 relief table (${ENFORCE ? 'ENFORCED' : 'REPORT mode, enforced in b4.4h'})`);
@@ -802,6 +811,43 @@ for (const r of archRows) expect(`${r.id}: islet sand ring + dry 1:12 cays`, r.a
     spurMin = Math.min(spurMin, Y(cp, lx, lz) - Math.max(Y(cp, lx + nx * 12, lz + nz * 12), Y(cp, lx - nx * 12, lz - nz * 12)));
   }
   expect("crow-s-perch: roost spur >= 6 m over the ground 12 m either side", spurMin >= 6, `${spurMin.toFixed(1)} m`);
+
+  // ── Part H (b4.4h, islands-01): the last five islands, ENFORCED ────────────
+  //   every island clears its D-table row (Part B, now enforced for all 14);
+  //   Kraken Tooth: a >= 5 m basalt sea cliff on the west shore.
+  //   Gallows Sands: the knoll scarp >= 5 m, two tide shelves at 0.3-0.8 m.
+  //   Widow's Watch: the seaward cliff >= 8 m over the outer strip and >= 20 m
+  //     over the sea at its crest, the cape spur >= 6 m over the ground 12 m
+  //     either side, the sea-arch site.
+  //   Parley Point: the tide shelf at 0.3-0.8 m; Old Maw: the sea cliff >= 5 m.
+  // --mutate=b44h-off (b4.4h records removed before Part B) must FAIL this part.
+  console.log(`\nPart H: authored relief for Kraken Tooth, Gallows Sands, Widow's Watch, Parley Point, Old Maw (enforced)${B44H_OFF ? ' [mutate=b44h-off]' : ''}`);
+  for (const id of B44H_IDS) {
+    const row = rows.find((r) => r.id === id);
+    expect(`${id} clears its PLAN 3.14 row`, row && row.misses.length === 0, row ? (row.misses.join('; ') || `>35 ${row.p35.toFixed(1)}% >60 ${row.p60.toFixed(2)}% peak ${row.peak.toFixed(1)} kinds ${row.kinds} tiers ${row.tiers} build ${row.buildMs.toFixed(1)} ms`) : 'no row');
+  }
+  expect('all 14 islands clear the D-table (Part B enforced)', rows.length === 14 && rows.every((r) => r.misses.length === 0), rows.filter((r) => r.misses.length).map((r) => r.id).join(', ') || '14/14');
+  const kt = byId('kraken-tooth'), gs = byId('gallows-sands'), ww = byId('widow-s-watch'), pp = byId('parley-point'), om = byId('old-maw-caldera');
+  const dropRow = (isl, rid, min, label) => { const r = rec(isl, rid); const d = r ? scarpDrop(isl, r) : 0; expect(`${rid}: ${label} >= ${min} m`, d >= min, `${d.toFixed(1)} m`); };
+  dropRow(kt, 'kraken-basalt-cliff', 5, 'basalt sea cliff');
+  dropRow(gs, 'gallows-knoll-scarp', 5, 'knoll scarp');
+  shelfRow(gs, 'gallows-shelf-north'); shelfRow(gs, 'gallows-shelf-east');
+  dropRow(ww, 'widow-sea-cliff', 8, 'seaward cliff over the outer strip');
+  const wc = rec(ww, 'widow-sea-cliff');
+  let crest = 0;
+  if (wc) for (let t = 0.2; t <= 0.8; t += 0.1) crest = Math.max(crest, Y(ww, mixP(wc.path[0][0], wc.path[1][0], t) - 3, mixP(wc.path[0][1], wc.path[1][1], t)));
+  expect("widow-s-watch: the seaward cliff crest stands >= 20 m over the sea", crest >= 20, `${crest.toFixed(1)} m`);
+  const cape = rec(ww, 'widow-cape');
+  let capeMin = Infinity;
+  if (cape) for (let t = 0.2; t <= 0.8; t += 0.2) {
+    const [a, b] = cape.path, L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    const lx = mixP(a[0], b[0], t), lz = mixP(a[1], b[1], t), nx = (b[1] - a[1]) / L, nz = -(b[0] - a[0]) / L;
+    capeMin = Math.min(capeMin, Y(ww, lx, lz) - Math.max(Y(ww, lx + nx * 12, lz + nz * 12), Y(ww, lx - nx * 12, lz - nz * 12)));
+  }
+  expect("widow-cape: spur >= 6 m over the ground 12 m either side", capeMin >= 6, `${capeMin.toFixed(1)} m`);
+  expect("widow-s-watch: sea-arch site", !!rec(ww, 'widow-sea-arch'));
+  shelfRow(pp, 'parley-tide-shelf');
+  dropRow(om, 'old-maw-sea-cliff', 5, 'sea cliff');
 }
 
 console.log(`\n${passes} passed, ${fails} failed`);
