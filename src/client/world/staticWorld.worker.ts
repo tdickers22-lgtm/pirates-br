@@ -15,12 +15,15 @@ import { generateStaticWorld, hashStaticWorld } from '../../shared/staticWorld.j
 import { applyStaticWorldDeltas, staticWorldWire } from '../../server/core/snapshot.js';
 import type { Island, SeaRock, StaticWorldDelta } from '../../shared/types/index.js';
 import { sampleChartHeights, type ChartHeights } from './chartHeights.js';
+import { buildWorkerTerrainGrid, terrainGridBuildOrder } from '../../shared/terrainGrid.js';
 
 export interface StaticWorldJob {
   id: number;
   seed: number;
   version: number;
   deltas: StaticWorldDelta[];
+  /** b4.4c: the local ship's xz, so the nearest island's grid comes first. */
+  focus?: { x: number; z: number } | null;
 }
 
 export type StaticWorldResult =
@@ -48,4 +51,11 @@ scope.onmessage = (e: MessageEvent<StaticWorldJob>) => {
     result = { id: job.id, ok: false, error: String((err as Error)?.message ?? err).slice(0, 200), totalMs: performance.now() - t0 };
   }
   scope.postMessage(result, result.ok ? result.charts.map((c) => c.heights.buffer) : []);
+  // b4.4c: then every island's 2 m terrain grid, nearest first, one message
+  // each (TerrainMeshBuilder takes it instead of a 30-200 ms main-thread build).
+  if (result.ok) {
+    for (const island of terrainGridBuildOrder(result.islands, job.focus)) {
+      try { const g = buildWorkerTerrainGrid(job.id, island); scope.postMessage(g.msg, g.transfer); } catch { /* main thread builds it */ }
+    }
+  }
 };

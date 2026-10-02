@@ -12,6 +12,7 @@ import type {
 } from '../../shared/types/index.js';
 import { WORLD_VERSION } from '../../shared/staticWorld.js';
 import type { StaticWorldResult } from '../world/staticWorld.worker.js';
+import { adoptWorkerTerrainGrid } from '../../shared/terrainGrid.js';
 import { setPresampledCharts, presampledChartStats } from '../world/chartHeights.js';
 import { PROTOCOL_VERSION } from '../../shared/types/index.js';
 import { nextWaitMs, CONNECT_STEPS_MS, type ConnectProgress } from './connectPolicy.js';
@@ -590,7 +591,8 @@ export class NetworkClient {
     this.worldGate = { id, startedAt: Date.now(), playerId, shipId, snapshot, ref, buffered: [], reported: false, genMs: null, chartMs: null, workerMs: null };
     const worker = this.staticWorldWorker();
     if (!worker) { this.reportWorldHash(NetworkClient.NO_WORLD_HASH); return; }
-    worker.postMessage({ id, seed: ref.seed, version: ref.version, deltas: ref.deltas });
+    const ship = snapshot.ships?.find((sh) => sh.id === shipId);
+    worker.postMessage({ id, seed: ref.seed, version: ref.version, deltas: ref.deltas, focus: ship ? { x: ship.position.x, z: ship.position.z } : null });
   }
 
   /** Start the worker (module fetch + parse) when the player commits to a
@@ -604,7 +606,7 @@ export class NetworkClient {
     if (typeof Worker === 'undefined') return null;
     try {
       const w = new Worker(new URL('../world/staticWorld.worker.ts', import.meta.url), { type: 'module', name: 'static-world' });
-      w.onmessage = (e: MessageEvent<StaticWorldResult>) => this.onWorldResult(e.data);
+      w.onmessage = (e: MessageEvent<StaticWorldResult>) => { if (!adoptWorkerTerrainGrid(e.data)) this.onWorldResult(e.data); };
       w.onerror = (err) => {
         console.error('[Net] static world worker error:', err.message);
         this.worldWorker = null;
