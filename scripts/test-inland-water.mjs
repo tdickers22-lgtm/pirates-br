@@ -22,9 +22,15 @@ import { getIslandLandforms, getLandformPonds, landformStreamBedY } from '../src
 import {
   STREAM_DELTA_U, WADE_DEPTH_MAX_M, WADE_SPEED_MUL, getInlandStreams, getInlandWaterDepth,
   inlandWadeSpeedMul, streamDepthAt, streamSurfaceY,
+  streamHalfWidth,
 } from '../src/shared/locomotion.ts';
+import { STREAM_BANK_TOLERANCE_M, fitStreamBanks } from '../src/client/world/island/StreamBuilder.ts';
 
 const RAW = process.argv.includes('--mutate=raw-bed');
+// b4.7a2 RED proof: --mutate=no-bank puts every edge at the nominal trapezoid
+// width at the surface (the 930aafbb builder), which the live audit caught
+// hanging up to 1.46 m over the banks.
+const NO_BANK = process.argv.includes('--mutate=no-bank');
 let passes = 0, fails = 0;
 function expect(label, ok, detail = '') {
   if (ok) passes++; else fails++;
@@ -60,6 +66,36 @@ for (const isl of islands) for (const s of getInlandStreams(isl)) {
   expect(`${isl.id}/${s.id}: surface monotone to the sea (rise <= 1 mm)`, rise <= 1e-3, `max rise ${(rise * 1000).toFixed(2)} mm`);
   expect(`${isl.id}/${s.id}: 0.5-1.5 m of water over the bed along the run`, dMin >= 0.5 && dMax <= 1.5, `${dMin.toFixed(2)}-${dMax.toFixed(2)} m`);
   expect(`${isl.id}/${s.id}: reaches y < 0.2 at the coast`, surf(s, 1) < 0.2 && shore < 0.3, `mouth surface ${surf(s, 1).toFixed(2)} m, shore ${shore.toFixed(2)} m`);
+}
+
+console.log(`\nBank rows${NO_BANK ? ' [mutate=no-bank]' : ''}: every ribbon edge on its bank (<= ${STREAM_BANK_TOLERANCE_M} m over the ground, sea excluded)`);
+for (const isl of islands) for (const s of getInlandStreams(isl)) {
+  const ground = (lx, lz) => getIslandSurfaceY(isl, isl.position.x + lx, isl.position.z + lz);
+  const n = Math.max(8, Math.ceil(s.length / 1.2));
+  let worst = -Infinity, over = 0, edges = 0, at_ = '';
+  for (let k = 0; k <= n; k++) {
+    const u = k / n;
+    const y = streamSurfaceY(s, u);
+    if (y < 0.06 && k > 0) break;
+    const [px, pz] = at(s, u);
+    const t = Math.min(u * s.length, s.length - 1e-6);
+    let i = 1; while (i < s.path.length - 1 && s.cum[i] < t) i++;
+    const L = s.cum[i] - s.cum[i - 1];
+    const dx = (s.path[i][0] - s.path[i - 1][0]) / L, dz = (s.path[i][1] - s.path[i - 1][1]) / L;
+    const delta = Math.max(0, (u - (1 - STREAM_DELTA_U)) / STREAM_DELTA_U);
+    const hw = streamHalfWidth(s, Math.min(u, 1 - STREAM_DELTA_U)) * 1.12 * (1 + 2.2 * delta);
+    const bank = NO_BANK ? { w: [hw, hw], edgeY: [y, y] } : fitStreamBanks(ground, px, pz, -dz, dx, y, hw);
+    for (const [side, a] of [[0, -1], [1, 1]]) {
+      const ex = px - dz * a * bank.w[side], ez = pz + dx * a * bank.w[side];
+      const g = ground(ex, ez);
+      if (g < 0) continue;
+      const gap = Math.min(y, bank.edgeY[side]) + 0.03 - g;
+      edges++;
+      if (gap > STREAM_BANK_TOLERANCE_M) over++;
+      if (gap > worst) { worst = gap; at_ = `u=${u.toFixed(2)}`; }
+    }
+  }
+  expect(`${isl.id}/${s.id}: 0 ribbon edges hanging over the bank`, over === 0, `${over}/${edges} over, worst ${worst.toFixed(2)} m at ${at_}`);
 }
 
 console.log('\nRoster rows');

@@ -23,6 +23,7 @@ import { getIslandLandforms, getLandformPonds, type RockShelfLandform } from '..
 import {
   STREAM_DELTA_U, getInlandStreams, streamHalfWidth, streamSurfaceY, type InlandStream,
 } from '../../../shared/locomotion.js';
+import { getIslandSurfaceY } from '../../../shared/utils/index.js';
 import type { IslandBuildCtx } from './context.js';
 
 /** Same attribute layout as the waterfall WaterSink: aFlowA = (across or
@@ -79,7 +80,47 @@ export interface InlandWaterEmitter { kind: 'stream' | 'pond'; x: number; y: num
 
 const ACROSS = [-1, -0.5, 0, 0.5, 1];
 
-function sweepStream(sink: InlandWaterSink, s: InlandStream, seed: number, emitters: InlandWaterEmitter[], ox: number, oz: number) {
+/** Bank vertices may sit at most this far over the ground beside them. */
+export const STREAM_BANK_TOLERANCE_M = 0.25;
+
+/**
+ * Where the water meets each bank of one cross-section (b4.7a2).
+ *
+ * The nominal half width (flat bed + depth / wall slope) assumes a clean
+ * trapezoid cut. The real ground is not one: on the rapids, where the bed
+ * drops to the centreline ground, a bank can sit up to 1.5 m under the
+ * surface, and an edge at the nominal width hung a sheet of water in the
+ * air there (live audit at 930aafbb: 47/105 bank vertices on Smuggler's
+ * Rest and 79/177 on Crow's Perch over 0.25 m, worst 1.46 m). So each side
+ * walks out from the centreline until the ground reaches the surface and
+ * puts the waterline THERE (water spreads to its bank, out to 1.8x nominal);
+ * a side that never meets its bank keeps the nominal width and lays its
+ * edge on the ground (a thin skin, never a curtain).
+ */
+export function fitStreamBanks(
+  ground: (x: number, z: number) => number,
+  px: number, pz: number, nx: number, nz: number, y: number, hw: number,
+): { w: [number, number]; edgeY: [number, number] } {
+  const w: [number, number] = [hw, hw];
+  const edgeY: [number, number] = [y, y];
+  for (let side = 0; side < 2; side++) {
+    const sg = side === 0 ? -1 : 1;
+    const maxW = hw * 1.8;
+    let found = -1;
+    for (let t = 0.35; t <= maxW + 1e-6; t += 0.15) {
+      if (ground(px + nx * sg * t, pz + nz * sg * t) >= y - 0.02) { found = t; break; }
+    }
+    if (found > 0) { w[side] = found; continue; }
+    const g = ground(px + nx * sg * hw, pz + nz * sg * hw);
+    edgeY[side] = Math.min(y, g + 0.04);
+  }
+  return { w, edgeY };
+}
+
+function sweepStream(
+  sink: InlandWaterSink, s: InlandStream, seed: number, emitters: InlandWaterEmitter[], ox: number, oz: number,
+  ground: (lx: number, lz: number) => number,
+) {
   const n = Math.max(8, Math.ceil(s.length / 1.2));
   // Rocks that break the current: one every ~9 m, hashed off the stream id.
   const rocks: Array<{ u: number; a: number }> = [];
@@ -116,16 +157,20 @@ function sweepStream(sink: InlandWaterSink, s: InlandStream, seed: number, emitt
       const d = Math.abs(u * s.length - s.cum[i]);
       if (d < 4) bend = Math.max(bend, 1 - d / 4);
     }
+    const bank = fitStreamBanks(ground, p.x, p.z, -p.dz, p.dx, y, hw);
     const row: number[] = [];
     for (const a of ACROSS) {
+      const side = a < 0 ? 0 : 1;
+      const wa = bank.w[side];
       let aer = THREE.MathUtils.clamp(grade * 3.2, 0, 0.85) + bend * 0.35 * (0.5 + 0.5 * Math.abs(a)) + 0.08;
       for (const r of rocks) {
-        const ds = (u - r.u) * s.length, da = (a - r.a) * hw;
+        const ds = (u - r.u) * s.length, da = (a - r.a) * wa;
         aer += 0.75 * Math.exp(-(ds * ds + da * da) / 2.2);
       }
       aer = Math.min(1, aer + delta * 0.25);
       const alpha = last ? 0 : 1 - delta * 0.55;
-      row.push(sink.vert(p.x - p.dz * a * hw, y + 0.03, p.z + p.dx * a * hw, a, u * s.length, aer, 0, 6, hw, alpha));
+      const vy = Math.abs(a) === 1 ? Math.min(y, bank.edgeY[side]) + 0.03 : y + 0.03;
+      row.push(sink.vert(p.x - p.dz * a * wa, vy, p.z + p.dx * a * wa, a, u * s.length, aer, 0, 6, (bank.w[0] + bank.w[1]) / 2, alpha));
     }
     if (prevRow) for (let j = 0; j + 1 < row.length; j++) sink.quad(prevRow[j], prevRow[j + 1], row[j + 1], row[j]);
     prevRow = row;
@@ -142,7 +187,13 @@ function stillDisc(sink: InlandWaterSink, cx: number, y: number, cz: number, rad
     for (let i = 0; i < count; i++) {
       const a = (i / segs) * Math.PI * 2;
       const rr = f * radius;
-      row.push(sink.vert(cx + Math.cos(a) * rr, y, cz + Math.sin(a) * rr, f, rr, 0.1 + aerRim * f * f, 1, 3 + rr, radius, 1));
+      // b4.7a2: vm is a PLANAR coordinate and the impact distance a constant.
+      // Fed (radial, radial, 3 + r) like the waterfall's plunge pools, every
+      // noise term the shader draws was a function of the radius alone, and
+      // Old Maw's crater lake rendered as a white bullseye (live PNG at
+      // 930aafbb). A still pond has no impact to ring out from.
+      const px = Math.cos(a) * rr, pz = Math.sin(a) * rr;
+      row.push(sink.vert(cx + px, y, cz + pz, f, px * 0.8 + pz * 0.6, 0.1 + aerRim * f * f, 1, 6, radius, 1));
     }
     ids.push(row);
   }
@@ -165,7 +216,21 @@ export function buildInlandWater(ctx: IslandBuildCtx, getWaterMaterial: () => TH
   const sink = new InlandWaterSink();
   const emitters: InlandWaterEmitter[] = [];
   const ox = island.position.x, oz = island.position.z;
-  for (const s of getInlandStreams(island)) sweepStream(sink, s, strHash(s.id), emitters, ox, oz);
+  // The ground the banks are fitted to is the LOWER envelope of the terrain
+  // truth over a terrain-grid cell (5 taps, 2.5 m): the rendered terrain is a
+  // ~3 m grid of chords, and across a narrow cut those chords sag below the
+  // analytic bank. Against the analytic ground alone the live audit still had
+  // 17/177 Crow's Perch bank vertices over the RENDERED ground (to 1.16 m).
+  // Erring low only tucks a waterline under the grass, where it cannot show.
+  const ground = (lx: number, lz: number) => {
+    const x = ox + lx, z = oz + lz;
+    return Math.min(
+      getIslandSurfaceY(island, x, z),
+      getIslandSurfaceY(island, x + 2.5, z), getIslandSurfaceY(island, x - 2.5, z),
+      getIslandSurfaceY(island, x, z + 2.5), getIslandSurfaceY(island, x, z - 2.5),
+    );
+  };
+  for (const s of getInlandStreams(island)) sweepStream(sink, s, strHash(s.id), emitters, ox, oz, ground);
   for (const p of getLandformPonds(island)) {
     stillDisc(sink, p.x, p.y + 0.02, p.z, p.radius, 0.3, lowDetail ? 20 : 32);
     emitters.push({ kind: 'pond', x: p.x + ox, y: p.y, z: p.z + oz, scale: THREE.MathUtils.clamp(p.radius / 10, 0.4, 1.2) });
