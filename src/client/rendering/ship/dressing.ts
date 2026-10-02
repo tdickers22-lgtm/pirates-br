@@ -3,7 +3,6 @@
 // flags. Extracted verbatim from ShipRenderer (codehealth-03 phase 1,
 // HULLGEO-01 slice a); scripts/test-ship-geometry-hash.mjs pins the move.
 import * as THREE from 'three';
-import type { ShipType } from '../../../shared/types/index.js';
 import { CYLINDER_UP } from './geometry.js';
 
 export function makeWindowFrame(
@@ -149,66 +148,6 @@ export function makeBarrel(
   cap.position.y = -0.39;
   g.add(cap);
 
-  return g;
-}
-
-/** Per-type carved figurehead at the stem (bow = +Z). Body is gilded carved wood
- *  (goldMat), with the team accent on fins / tail / eyes so the ship reads at a
- *  glance. Deliberately low-poly — it merges into two static meshes per ship. */
-export function makeFigurehead(
-  type: ShipType,
-  goldMat: THREE.Material,
-  accentMat: THREE.Material,
-): THREE.Group {
-  const g = new THREE.Group();
-  const add = (
-    geo: THREE.BufferGeometry,
-    mat: THREE.Material,
-    x: number, y: number, z: number,
-    rx = 0, ry = 0, rz = 0,
-    sx = 1, sy = 1, sz = 1,
-  ) => {
-    const m = new THREE.Mesh(geo, mat);
-    m.position.set(x, y, z);
-    m.rotation.set(rx, ry, rz);
-    m.scale.set(sx, sy, sz);
-    m.castShadow = true;
-    g.add(m);
-    return m;
-  };
-
-  if (type === 'sloop') {
-    // Leaping fish arcing up and forward off the stem.
-    add(new THREE.SphereGeometry(0.16, 10, 8), goldMat, 0, 0.02, 0.12, -0.55, 0, 0, 0.72, 0.95, 1.9);
-    // Tail fluke (accent), swept down-aft
-    add(new THREE.ConeGeometry(0.19, 0.36, 8), accentMat, 0, -0.16, -0.16, 2.5, Math.PI * 0.25, 0, 1, 1, 0.22);
-    // Dorsal fin (accent)
-    add(new THREE.ConeGeometry(0.1, 0.22, 8), accentMat, 0, 0.2, 0.02, -0.3, 0, 0, 1, 1, 0.2);
-    // Eye
-    add(new THREE.SphereGeometry(0.035, 6, 5), accentMat, 0.09, 0.11, 0.28);
-    add(new THREE.SphereGeometry(0.035, 6, 5), accentMat, -0.09, 0.11, 0.28);
-  } else if (type === 'brigantine') {
-    // Mermaid silhouette: torso rising, head, and a curled tail below.
-    add(new THREE.ConeGeometry(0.12, 0.42, 8), goldMat, 0, 0.2, 0.08, -0.2, 0, 0, 1, 1, 0.7);
-    add(new THREE.SphereGeometry(0.1, 10, 8), goldMat, 0, 0.44, 0.12);
-    // Hair (accent)
-    add(new THREE.SphereGeometry(0.11, 8, 6), accentMat, 0, 0.5, 0.06, 0, 0, 0, 1, 0.7, 0.9);
-    // Curled fish tail (accent)
-    add(new THREE.ConeGeometry(0.14, 0.5, 8), accentMat, 0, -0.14, -0.02, 0.5, 0, 0, 0.5, 1, 1);
-    add(new THREE.ConeGeometry(0.2, 0.24, 8), accentMat, 0, -0.36, -0.16, 1.9, Math.PI * 0.25, 0, 1, 1, 0.22);
-  } else {
-    // Galleon: fierce sea-dragon head thrusting forward off the beakhead.
-    add(new THREE.CylinderGeometry(0.11, 0.15, 0.44, 8), goldMat, 0, 0.05, -0.04, Math.PI * 0.5 - 0.5, 0, 0); // neck
-    add(new THREE.BoxGeometry(0.2, 0.2, 0.42), goldMat, 0, 0.22, 0.2, -0.35, 0, 0); // skull
-    add(new THREE.ConeGeometry(0.11, 0.34, 8), goldMat, 0, 0.16, 0.42, Math.PI * 0.5 - 0.2, 0, 0); // snout
-    add(new THREE.BoxGeometry(0.18, 0.06, 0.24), accentMat, 0, 0.09, 0.42, -0.2, 0, 0); // lower jaw (accent)
-    // Horns (accent)
-    for (const s of [-1, 1]) add(new THREE.ConeGeometry(0.04, 0.24, 8), accentMat, s * 0.08, 0.36, 0.06, -0.9, 0, s * 0.3);
-    // Mane frills along the neck (accent)
-    for (let i = 0; i < 3; i++) add(new THREE.ConeGeometry(0.06, 0.18, 8), accentMat, 0, 0.02 - i * 0.06, -0.14 - i * 0.06, -0.3, 0, 0, 1, 1, 0.3);
-    // Eyes (accent)
-    for (const s of [-1, 1]) add(new THREE.SphereGeometry(0.035, 6, 5), accentMat, s * 0.09, 0.26, 0.34);
-  }
   return g;
 }
 
