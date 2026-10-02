@@ -300,7 +300,7 @@ def build_rock_arch_cave():
         return out
     recipe = dict(CAVE_SCULPT, macro=(0.03, 1.0), heights=((0, 1.6, 0.024), (1, 0.6, 0.010), (0, 0.25, 0.004)),
                   strata=dict(bed=0.30, amp=0.016, dip=(0.08, 0.0, 1.0)), chips=0.008)
-    return _rock_piece(name, parts, 6500, [('Rock_Cave', lambda z, nz: True)], 'floor', 13, recipe, 2)
+    return _rock_piece(name, parts, 3400, [('Rock_Cave', lambda z, nz: True)], 'floor', 13, recipe, 2)
 
 
 def build_cave_ledge():
@@ -319,7 +319,7 @@ def build_cave_ledge():
                 place(voronoi_cell('back', coll, 9, scale=(1.20, 0.20, 0.68), planes=10, reach=(0.66, 0.95)),
                       (0, 0.50, 0.66), (0, 0, 2))]
     recipe = dict(CAVE_SCULPT, strata=dict(bed=0.16, amp=0.010, dip=(0.05, 0.0, 1.0)))
-    return _rock_piece(name, parts, 5000, [('Rock_Cave', lambda z, nz: True)], 'floor', 5, recipe)
+    return _rock_piece(name, parts, 3200, [('Rock_Cave', lambda z, nz: True)], 'floor', 5, recipe)
 
 
 def build_cave_pool_rim():
@@ -338,7 +338,7 @@ def build_cave_pool_rim():
                              (math.cos(a) * r, math.sin(a) * r, h * 0.85), (0, 0, math.degrees(a))))
         return out
     recipe = dict(CAVE_SCULPT, strata=dict(bed=0.05, amp=0.004, dip=(0.0, 0.0, 1.0)))
-    return _rock_piece(name, parts, 5000, [('Rock_Flow', lambda z, nz: True)], 'floor', 23, recipe, 2)
+    return _rock_piece(name, parts, 3200, [('Rock_Flow', lambda z, nz: True)], 'floor', 23, recipe, 2)
 
 
 def build_crystal_vein(name, seed, shards, budget):
@@ -464,10 +464,10 @@ def main():
     clear_default_scene()
     out = {}
     builds = [
-        ('stalactite_cluster_a', lambda: build_dripstone('stalactite_cluster_a', False, 101, 7, 4500)),
-        ('stalactite_cluster_b', lambda: build_dripstone('stalactite_cluster_b', False, 103, 10, 6000)),
-        ('stalagmite_cluster_a', lambda: build_dripstone('stalagmite_cluster_a', True, 107, 6, 4500)),
-        ('stalagmite_cluster_b', lambda: build_dripstone('stalagmite_cluster_b', True, 109, 9, 6000)),
+        ('stalactite_cluster_a', lambda: build_dripstone('stalactite_cluster_a', False, 101, 7, 3200)),
+        ('stalactite_cluster_b', lambda: build_dripstone('stalactite_cluster_b', False, 103, 10, 3400)),
+        ('stalagmite_cluster_a', lambda: build_dripstone('stalagmite_cluster_a', True, 107, 6, 3200)),
+        ('stalagmite_cluster_b', lambda: build_dripstone('stalagmite_cluster_b', True, 109, 9, 3400)),
         ('rock_arch_cave', build_rock_arch_cave),
         ('cave_ledge', build_cave_ledge),
         ('crystal_vein_a', lambda: build_crystal_vein('crystal_vein_a', 113, 7, 800)),

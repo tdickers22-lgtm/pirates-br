@@ -44,7 +44,7 @@ BOXES = {
     'rock_arch': ((-4.032, -1.603, -0.286), (4.023, 1.593, 4.479)),
 }
 BANDS = {'crag': (10000, 16000), 'rock_arch': (20000, 30000)}
-TARGET = {'crag': 13000, 'rock_arch': 25000}
+TARGET = {'crag': 10500, 'rock_arch': 20500}  # band floors (+5%): rocks-cliffs wire row, rule 13
 
 
 def fit_box(objs, box):
