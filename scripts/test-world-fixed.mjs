@@ -3,7 +3,7 @@
 // roster islands present at their authored spots, with real sailing lanes
 // between them and everything inside the storm's opening ring.
 import { MapGenerator } from '../src/server/world/MapGenerator.ts';
-import { getIslandMaxRadius } from '../src/shared/utils/index.ts';
+import { getIslandMaxRadius, getIslandSurfaceY } from '../src/shared/utils/index.ts';
 import { WORLD } from '../src/shared/constants/index.ts';
 import { WORLD_VERSION, hashString } from '../src/shared/staticWorld.ts';
 
@@ -22,7 +22,20 @@ const worldSignature = (islands) => `v${WORLD_VERSION}|` + JSON.stringify(island
   bridges: island.bridges?.length ?? 0,
   props: island.props?.length ?? 0,
   dock: island.dock ? [island.dock.position.x, island.dock.position.z] : null,
+  // b4.4f: the pin covers the served GROUND and every prop spot, not just the
+  // counts. Before this a landform slice (b4.4f moved four islands by up to
+  // 15 m) passed the v3 pin unchanged: the gate could not see terrain.
+  terrain: terrainFingerprint(island),
+  propSpots: hashString((island.props ?? []).map((p) => `${p.type}:${p.x.toFixed(2)},${p.z.toFixed(2)}`).join(';')),
 })));
+// getIslandSurfaceY on an 8 m grid over the island's max radius + 10%, to 1 cm.
+function terrainFingerprint(island) {
+  const ext = getIslandMaxRadius(island) * 1.1, out = [];
+  for (let x = -ext; x <= ext; x += 8) for (let z = -ext; z <= ext; z += 8) {
+    out.push(getIslandSurfaceY(island, island.position.x + x, island.position.z + z).toFixed(2));
+  }
+  return hashString(out.join(','));
+}
 
 const a = new MapGenerator(12345).generateIslands();
 const b = new MapGenerator(99999).generateIslands();
@@ -42,7 +55,9 @@ expect('Old Maw Caldera anchors the center', (() => {
 // stale client a different world under the same name. One pin per version: a
 // world slice bumps WORLD_VERSION (src/shared/staticWorld.ts) and adds its row
 // in a re-pin commit that states the signature diff.
-const SIGNATURE_PINS = { 1: '83f3f8241a029ccb', 2: '4455b027bde69f13', 3: '5d5eee4df1675b8f' }; // v2: b4.4d islet beach rings + cays; v3: b4.4e archetype landforms + no global terracing
+// v1-v3 pin the counts-only signature (historical); from v4 the signature
+// also hashes the ground (terrainFingerprint) and every prop spot.
+const SIGNATURE_PINS = { 1: '83f3f8241a029ccb', 2: '4455b027bde69f13', 3: '5d5eee4df1675b8f', 4: '2dc05c3b8a07a858' }; // v2: b4.4d islet beach rings + cays; v3: b4.4e archetype landforms + no global terracing; v4: b4.4f Smuggler's Rest, Rumrunner Key, Mermaid's Folly, Castaway Reach landforms + ground in the signature
 const signatureHash = hashString(worldSignature(a));
 expect(`the fixed-world signature is pinned for WORLD_VERSION ${WORLD_VERSION}`,
   SIGNATURE_PINS[WORLD_VERSION] === signatureHash,
