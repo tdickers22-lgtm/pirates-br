@@ -238,8 +238,8 @@ export const RATCHET = [
   'cave_pool_rim:textures',
   'rock_arch_cave:textures',
   // buildings
-  'dock_mid:band', 'dock_mid:lods', 'dock_mid:textures',
-  'dock_end:band', 'dock_end:lods', 'dock_end:textures',
+  'dock_mid:lods', 'dock_mid:textures',
+  'dock_end:lods', 'dock_end:textures',
   'watchtower:band', 'watchtower:lods', 'watchtower:textures', 'watchtower:verts',
   'shipwreck:band', 'shipwreck:lods', 'shipwreck:textures', 'shipwreck:verts',
   'standing_stones:band', 'standing_stones:lods', 'standing_stones:textures', 'standing_stones:verts',

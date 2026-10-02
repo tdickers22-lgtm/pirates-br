@@ -142,6 +142,12 @@ def build_barrel(name, height=1.0, radius=0.38, woods=("Wood_Mid", "Wood_Mid",
     rng = random.Random(seed)
     parts = []
     gap_frac = 0.035  # angular gap between staves (thin shadow lines)
+    STAVE_SPLAY = 0.004   # max outward lean at the top: a hoop drawn tight leaves the staves only mm of play
+
+    def stave_r(z):
+        """Outer stave radius at height z (bulge profile + the widest splay): what a hoop must hug."""
+        t = min(1.0, max(0.0, z / height))
+        return radius * (1.0 + 0.16 * math.sin(t * math.pi)) + STAVE_SPLAY * t
     for j in range(n_staves):
         a0 = 2 * math.pi * j / n_staves
         span = 2 * math.pi / n_staves
@@ -149,30 +155,36 @@ def build_barrel(name, height=1.0, radius=0.38, woods=("Wood_Mid", "Wood_Mid",
         s = make_stave(coll, f"{name}_stave{j}", radius, height,
                        a0 + g / 2, a0 + span - g / 2, 0.045,
                        rng.choice(woods),
-                       splay=rng.uniform(0.0, 0.015),
+                       splay=rng.uniform(0.0, STAVE_SPLAY),
                        tilt=rng.uniform(-0.015, 0.015),
                        z_jit=rng.uniform(-0.010, 0.006))
         parts.append(s)
-    # iron bands, beveled, with rivet studs
+    # iron hoops driven tight: each band is a frustum whose inner face follows the stave bulge across
+    # its own width (r at the lower edge, r at the upper edge), 1.5 mm clear of the widest stave, so it
+    # sits ON the staves instead of standing off them (round1 turntable: 2.8 cm gap). Rivet heads are
+    # set into the band and stand 3 mm proud.
     band_rivets = []
+    BW, BT = 0.065, 0.016            # band width, band thickness (solidified outward)
     for bi, bt in enumerate(bands):
-        bulge = 1.0 + 0.16 * math.sin(bt * math.pi)
-        br = radius * bulge + 0.028
-        b = add_cyl(coll, f"{name}_band{bi}", br, br, 0.065,
-                    (0, 0, height * bt), band, segs=30, cap=False)
-        bevel_obj(b, width=0.008, segments=BEV_SEGS)
+        zc = height * bt
+        r_lo = stave_r(zc - BW / 2) + 0.0015
+        r_hi = stave_r(zc + BW / 2) + 0.0015
+        b = add_cyl(coll, f"{name}_band{bi}", r_lo, r_hi, BW,
+                    (0, 0, zc), band, segs=30, cap=False)
+        bevel_obj(b, width=0.005, segments=BEV_SEGS)
         sol = b.modifiers.new("Solid", 'SOLIDIFY')
-        sol.thickness = 0.016
+        sol.thickness = BT
         sol.offset = 1.0
         b.modifiers.move(len(b.modifiers) - 1, 0)
         apply_modifiers(b)
         parts.append(b)
+        r_out = (r_lo + r_hi) / 2 + BT
         for j in range(0, n_staves, rivet_every):
             a = 2 * math.pi * (j + 0.5) / n_staves
             n = Vector((math.cos(a), math.sin(a), 0))
             band_rivets.append(add_rivet(
                 coll, f"{name}_riv{bi}_{j}",
-                n * (br + 0.010) + Vector((0, 0, height * bt)), n, r=0.012, depth=0.03, segs=5))
+                n * (r_out + 0.0004) + Vector((0, 0, zc)), n, r=0.010, depth=0.0022, segs=5))
     parts += band_rivets
     # heads set into the croze: the staves stand proud above them as the chime (5 cm), and a dark
     # croze ring shows the groove the head boards are let into
@@ -375,55 +387,87 @@ def build_chest(name, open_lid=False):
                              (sx * (W / 2 + 0.02), 0, Hh * 0.62), "Rope",
                              segs=6, rot=Matrix.Rotation(math.pi / 2, 4, 'X')))
     if open_lid:
-        # coin hoard: a low gold mound as the fill, 170 modelled coins laid over it (each tilted to the
-        # mound's slope), a few spilled over the rim, and a goblet standing in the heap
+        # coin hoard (round2 fix: round1 read as crumpled foil = a flat-shaded, hard-displaced mound under
+        # 6 cm coins tilted up to 0.35). Now: a smooth low mound, 3.5-4 cm coins 2 mm thick with 8 sides,
+        # laid nearly flat on the slope (+-0.12), 215 on the mound, three short stacks, 8 spilled, a goblet.
         bm = bm_icosphere(0.33, 2)
         bmesh.ops.scale(bm, vec=Vector((1.25, 0.8, 0.42)), verts=bm.verts)
         bmesh.ops.transform(bm, matrix=Matrix.Translation((0, 0.03, Hh + 0.02)),
                             verts=bm.verts)
         _finish(bm)
-        o = obj_from_bmesh(f"{name}_gold", bm, coll, mat("Gold"), smooth=False)
-        displace_noise(o, strength=0.12, scale=0.14, seed=9)
+        o = obj_from_bmesh(f"{name}_gold", bm, coll, mat("Gold"), smooth=True)
+        displace_noise(o, strength=0.035, scale=0.14, seed=9)
         apply_modifiers(o)
         parts.append(o)
+        # coins sit on the REAL displaced mound (ray cast), not on an analytic dome: round2's analytic
+        # profile ran ~1 cm under the ellipsoid's mid-slope and buried every thin coin there
+        from mathutils.bvhtree import BVHTree
+        _mbm = bmesh.new()
+        _mbm.from_mesh(o.data)
+        _mbm.transform(o.matrix_world)
+        _mtree = BVHTree.FromBMesh(_mbm)
+        _mbm.free()
+
+        def mound_hit(x, y):
+            hit = _mtree.ray_cast(Vector((x, y, Hh + 1.0)), Vector((0, 0, -1)))
+            if hit[0] is None:
+                return Hh + 0.02, Vector((0, 0, 1))
+            n = hit[1] if hit[1].z > 0 else -hit[1]
+            return hit[0].z, n.normalized()
+
         def mound(x, y):
-            q = (x / 0.41) ** 2 + ((y - 0.03) / 0.27) ** 2
-            return Hh + 0.02 + 0.15 * max(0.0, 1.0 - q) ** 0.8
+            return mound_hit(x, y)[0]
         coin_bms = bmesh.new()
-        n_coin = 0
-        while n_coin < 170:
-            x = rng.uniform(-0.44, 0.44)
-            y = rng.uniform(-0.26, 0.29)
-            if (x / 0.44) ** 2 + ((y - 0.015) / 0.28) ** 2 > 1.0:
-                continue
-            z = mound(x, y)
-            gx = (mound(x + 0.01, y) - mound(x - 0.01, y)) / 0.02
-            gy = (mound(x, y + 0.01) - mound(x, y - 0.01)) / 0.02
-            nrm = Vector((-gx, -gy, 1.0)).normalized()
-            nrm = (nrm + Vector((rng.uniform(-0.35, 0.35), rng.uniform(-0.35, 0.35), 0))).normalized()
-            c = bm_cylinder(0.03, 0.03, 0.006, segs=6)
-            q = nrm.to_track_quat('Z', 'Y')
-            bmesh.ops.transform(c, matrix=Matrix.Translation((x, y, z + 0.004)) @ q.to_matrix().to_4x4() @
+        COIN_T = 0.002   # centre thickness (rim is sharp)
+
+        def put_coin(x, y, z, nrm, cap_bottom):
+            """One coin as a closed 16-tri lens: an 8-sided rim with a centre vertex 1 mm above and below
+            (2 mm thick at the middle, sharp milled rim). Closed and 4V/A ~1.3 mm, so build_lods can
+            cull it as a sub-pixel part at LOD2/far; 3.5-4 cm across, 8 sides (round1 read as foil)."""
+            r = rng.uniform(0.0175, 0.020)
+            c = bmesh.new()
+            rim = [c.verts.new((r * math.cos(2 * math.pi * k / 8), r * math.sin(2 * math.pi * k / 8), 0.0))
+                   for k in range(8)]
+            top = c.verts.new((0, 0, COIN_T / 2))
+            bot = c.verts.new((0, 0, -COIN_T / 2))
+            for k in range(8):
+                a, b = rim[k], rim[(k + 1) % 8]
+                c.faces.new((a, b, top))
+                c.faces.new((b, a, bot))
+            q = Vector(nrm).normalized().to_track_quat('Z', 'Y')
+            bmesh.ops.transform(c, matrix=Matrix.Translation((x, y, z + COIN_T / 2)) @ q.to_matrix().to_4x4() @
                                 Matrix.Rotation(rng.uniform(0, math.pi), 4, 'Z'), verts=c.verts)
             mesh_tmp = bpy.data.meshes.new("coin_tmp")
             c.to_mesh(mesh_tmp)
             c.free()
             coin_bms.from_mesh(mesh_tmp)
             bpy.data.meshes.remove(mesh_tmp)
+
+        def slope_n(x, y):
+            return mound_hit(x, y)[1]
+
+        n_coin = 0
+        while n_coin < 215:   # ~60% cover of the mound top: the hoard reads as coins, not a gold blob
+            x = rng.uniform(-0.44, 0.44)
+            y = rng.uniform(-0.26, 0.29)
+            if (x / 0.44) ** 2 + ((y - 0.015) / 0.28) ** 2 > 1.0:
+                continue
+            nrm = slope_n(x, y) + Vector((rng.uniform(-0.12, 0.12), rng.uniform(-0.12, 0.12), 0))
+            put_coin(x, y, mound(x, y) - 0.0005, nrm, False)
             n_coin += 1
+        for sx, sy, k in ((-0.22, -0.06, 7), (0.08, 0.12, 5), (-0.02, -0.14, 4)):   # short stacks
+            z = mound(sx, sy) - 0.001
+            nrm = slope_n(sx, sy)
+            for i in range(k):
+                put_coin(sx + rng.uniform(-0.003, 0.003), sy + rng.uniform(-0.003, 0.003),
+                         z + i * COIN_T * 1.02 * nrm.z, nrm + Vector((rng.uniform(-0.03, 0.03), rng.uniform(-0.03, 0.03), 0)),
+                         False)
         for i in range(8):   # spilled over the front rim and onto the ground
             x = rng.uniform(-0.40, 0.40)
-            y, z = (D / 2 + rng.uniform(0.03, 0.07), 0.004) if i < 6 else (D / 2 - 0.02, Hh + 0.01)
-            c = bm_cylinder(0.03, 0.03, 0.006, segs=6)
-            bmesh.ops.transform(c, matrix=Matrix.Translation((x, y, z)) @
-                                Matrix.Rotation(rng.uniform(-0.2, 0.2), 4, 'X'), verts=c.verts)
-            mesh_tmp = bpy.data.meshes.new("coin_tmp")
-            c.to_mesh(mesh_tmp)
-            c.free()
-            coin_bms.from_mesh(mesh_tmp)
-            bpy.data.meshes.remove(mesh_tmp)
+            y, z = (D / 2 + rng.uniform(0.03, 0.07), 0.0) if i < 6 else (D / 2 - 0.02, Hh + 0.008)
+            put_coin(x, y, z, (rng.uniform(-0.12, 0.12), rng.uniform(-0.12, 0.12), 1.0), True)
         _finish(coin_bms)
-        parts.append(obj_from_bmesh(f"{name}_coins", coin_bms, coll, mat("Gold"), smooth=False))
+        parts.append(obj_from_bmesh(f"{name}_coins", coin_bms, coll, mat("Gold"), smooth=True))   # pillowed rims; flat split 3 verts per tri (v/t 1.83)
         # goblet: lathed foot, knopped stem and bowl
         prof = [(0.0, 0.0), (0.045, 0.0), (0.05, 0.008), (0.02, 0.02), (0.012, 0.05), (0.022, 0.065),
                 (0.012, 0.08), (0.02, 0.095), (0.045, 0.12), (0.055, 0.17), (0.05, 0.172), (0.04, 0.125),
@@ -607,10 +651,101 @@ def build_campfire(name="campfire"):
 
 
 # ── dock modules ─────────────────────────────────────────────
+def _dense_box(w, d, h, nx, ny, nz):
+    """Closed box centred at the origin, cut into nx x ny x nz cells (bisect planes), so a surface
+    displacement has vertices to move (the buildings tier wants the wood grain IN the mesh)."""
+    bm = bm_box(w, d, h)
+    for axis, n, size in ((0, nx, w), (1, ny, d), (2, nz, h)):
+        for k in range(1, n):
+            co = [0.0, 0.0, 0.0]
+            co[axis] = -size / 2 + size * k / n
+            no = [0.0, 0.0, 0.0]
+            no[axis] = 1.0
+            bmesh.ops.bisect_plane(bm, geom=bm.verts[:] + bm.edges[:] + bm.faces[:],
+                                   plane_co=Vector(co), plane_no=Vector(no))
+    return bm
+
+
+def _pile(x, y, z0, z1, r0, r1, rng, seed, wet_top=0.62):
+    """One dock pile: 32-sided, ringed every 2 cm through the wet band and 6 cm above, with vertical
+    grain grooves, a weathered taper, a chamfered crown and barnacle crowns (raised rims with a
+    crater) displaced INTO the surface in the wet band: one closed part, so LOD decimation keeps it
+    one shape instead of 30 loose spheres."""
+    from mathutils import noise
+    segs = 32
+    zs = [z0 + k * 0.02 for k in range(int((wet_top - z0) / 0.02))]
+    zz = wet_top
+    while zz < z1 - 0.06:
+        zs.append(zz)
+        zz += 0.06
+    zs += [z1 - 0.035, z1]
+    bm = bmesh.new()
+    rings = []
+    barn = [(rng.uniform(0, 2 * math.pi), rng.uniform(z0 + 0.06, wet_top - 0.04), rng.uniform(0.018, 0.032))
+            for _ in range(rng.randint(11, 16))]
+    for zi, z in enumerate(zs):
+        t = (z - z0) / (z1 - z0)
+        rr = r0 + (r1 - r0) * t
+        if zi == len(zs) - 1:
+            rr -= 0.03                       # chamfered crown
+        ring = []
+        for k in range(segs):
+            a = 2 * math.pi * k / segs
+            groove = 0.006 * noise.noise(Vector((math.cos(a) * 3.0 + seed, math.sin(a) * 3.0, z * 0.6)))
+            split = -0.010 if (k % 11 == seed % 11 and 0.2 < t < 0.9) else 0.0
+            dr = groove + split
+            for ba, bz, brad in barn:
+                da = math.atan2(math.sin(a - ba), math.cos(a - ba)) * rr
+                dd = math.hypot(da, z - bz) / brad
+                if dd < 1.0:                   # volcano: rim up, crater down
+                    dr += brad * 0.55 * (math.sin(dd * math.pi) * 0.9 - (0.35 if dd < 0.35 else 0.0))
+            ring.append(bm.verts.new((x + (rr + dr) * math.cos(a), y + (rr + dr) * math.sin(a), z)))
+        rings.append(ring)
+    for r_a, r_b in zip(rings, rings[1:]):
+        for k in range(segs):
+            bm.faces.new((r_a[k], r_a[(k + 1) % segs], r_b[(k + 1) % segs], r_b[k]))
+    bm.faces.new(list(reversed(rings[0])))
+    top = bm.verts.new((x, y, z1 + 0.005))
+    for k in range(segs):
+        bm.faces.new((rings[-1][k], rings[-1][(k + 1) % segs], top))
+    _finish(bm)
+    return bm
+
+
+def _lashing(x, y, zc, rad, turns=3, pitch=0.045, rope_r=0.021, steps=30, sides=8):
+    """Rope lashing: a closed helical tube wound `turns` times round a pile (capped ends)."""
+    bm = bmesh.new()
+    n = int(turns * steps)
+    rings = []
+    for i in range(n + 1):
+        th = 2 * math.pi * i / steps
+        z = zc + pitch * (i / steps - turns / 2)
+        c = Vector((x + rad * math.cos(th), y + rad * math.sin(th), z))
+        tng = Vector((-math.sin(th) * rad * 2 * math.pi, math.cos(th) * rad * 2 * math.pi, pitch)).normalized()
+        nrm = Vector((math.cos(th), math.sin(th), 0))
+        bi = tng.cross(nrm).normalized()
+        nrm = bi.cross(tng).normalized()
+        twist = 0.004 * math.sin(i * 1.9)      # laid strands: the tube breathes a little
+        rings.append([bm.verts.new(c + (rope_r + twist) * (math.cos(2 * math.pi * k / sides) * nrm +
+                                                            math.sin(2 * math.pi * k / sides) * bi))
+                      for k in range(sides)])
+    for r_a, r_b in zip(rings, rings[1:]):
+        for k in range(sides):
+            bm.faces.new((r_a[k], r_a[(k + 1) % sides], r_b[(k + 1) % sides], r_b[k]))
+    bm.faces.new(list(reversed(rings[0])))
+    bm.faces.new(rings[-1])
+    _finish(bm)
+    return bm
+
+
 def build_dock(name, length=6.0, end_cap=False):
-    """Tiling dock module. CONTRACT: X extent exactly [-L/2, L/2], section
-    matches existing (posts at y=+/-1.4, rope wrap r=0.17 -> |y|max 1.57,
-    deck z=1.1, posts to z=1.85)."""
+    """Tiling dock module, buildings tier (25-60k, LOD chain). CONTRACT (it tiles, keep it EXACT):
+    X extent exactly [-L/2, L/2] (stringers + plank run), section as v1 (piles at y=+/-1.4, rope
+    lashing outer |y| <= 1.57, deck z=1.1, piles to z=1.85). v2: dense weathered planks (cupped,
+    grain-waved, chipped ends, gaps, nailed at both stringers), 32-sided piles with grain grooves,
+    splits and barnacle crowns in the wet band, 3-turn rope lashings, pile caps across each bent,
+    X-bracing along both sides and across each bent, cleats, and bollards on the end module."""
+    from mathutils import noise
     coll = asset_collection(name)
     rng = random.Random(len(name))
     parts = []
@@ -618,78 +753,94 @@ def build_dock(name, length=6.0, end_cap=False):
     width = 3.0
     n = round(length / 0.55)
     plank_w = length / n  # spacing covers the EXACT module length (tiling)
+    str_y = width / 2 - 0.35
     for i in range(n):
         x = -length / 2 + plank_w * (i + 0.5)
-        bm = bm_box(plank_w * 0.88, width * rng.uniform(0.95, 1.0), 0.09)
-        # chip a couple of plank ends
+        pw, pd, ph = plank_w * 0.88, width * rng.uniform(0.95, 1.0), 0.09
+        bm = _dense_box(pw, pd, ph, 6, 40, 2)
+        seed = rng.uniform(0, 100)
+        for v in bm.verts:
+            u = v.co.x / (pw / 2)                       # -1..1 across the plank
+            cup = 0.004 * u * u                          # weathered boards cup: edges rise
+            grain = 0.0025 * noise.noise(Vector((v.co.x * 9.0 + seed, v.co.y * 0.9, seed)))
+            if v.co.z > 0:
+                v.co.z += cup + grain
+            if abs(v.co.x) < pw / 2 - 1e-4:              # side faces stay put; inner verts may wander
+                continue
+            v.co.x += 0.0015 * noise.noise(Vector((seed, v.co.y * 1.7, v.co.z * 5.0)))
         if i in (1, n - 2):
             sy = 1 if i % 2 else -1
-            chip_corner(bm, (plank_w * 0.30, sy * width * 0.42, 0.012),
-                        (0.6, sy, 0.9))
-        rotz = Matrix.Rotation(rng.uniform(-0.018, 0.018), 4, 'Z')
-        rotx = Matrix.Rotation(rng.uniform(-0.02, 0.02), 4, 'X')
-        bmesh.ops.transform(bm, matrix=Matrix.Translation(
-            (x, rng.uniform(-0.01, 0.01), deck_z + rng.uniform(-0.015, 0.015)))
-            @ rotz @ rotx, verts=bm.verts)
+            chip_corner(bm, (pw * 0.30, sy * pd * 0.47, 0.012), (0.6, sy, 0.9))
+        y_off = rng.uniform(-0.01, 0.01)
+        M = (Matrix.Translation((x, y_off, deck_z + rng.uniform(-0.004, 0.004))) @
+             Matrix.Rotation(rng.uniform(-0.012, 0.012), 4, 'Z') @ Matrix.Rotation(rng.uniform(-0.004, 0.004), 4, 'X'))
+        bmesh.ops.transform(bm, matrix=M, verts=bm.verts)
         _finish(bm)
         m = "Wood_Bleached" if i % 3 else "Wood_Light"
         o = obj_from_bmesh(f"{name}_plank{i}", bm, coll, mat(m))
+        bevel_obj(o, width=0.010)
+        apply_modifiers(o)
+        parts.append(o)
+        for sy in (-1, 1):                               # two nails into each stringer, set on the
+            for dx in (-0.11, 0.11):                     # displaced top (same cup + grain function)
+                ly = sy * str_y - y_off
+                uu = dx / (pw / 2)
+                top_z = ph / 2 + 0.004 * uu * uu + 0.0025 * noise.noise(Vector((dx * 9.0 + seed, ly * 0.9, seed)))
+                parts.append(add_rivet(coll, f"{name}_nail{i}{sy}{dx:+.2f}",
+                                       M @ Vector((dx, ly, top_z + 0.0005)), M.to_3x3() @ Vector((0, 0, 1)),
+                                       r=0.008, depth=0.002, segs=6))
+    # piles (bents of two), each with a rope lashing under the deck lip
+    xs = [-length / 2 + 0.4, 0, length / 2 - 0.4]
+    py_ = width / 2 - 0.1
+    for xi, x in enumerate(xs):
+        for sy in (-1, 1):
+            py = sy * py_
+            seed = xi * 7 + (sy + 1)
+            bm = _pile(x, py, 0.0, deck_z + 0.75, 0.145, 0.115, rng, seed)
+            parts.append(obj_from_bmesh(f"{name}_pile{xi}{sy}", bm, coll, mat("Wood_Dark"), smooth=True))
+            zc = deck_z + 0.46
+            r_here = 0.145 + (0.115 - 0.145) * zc / (deck_z + 0.75)
+            parts.append(obj_from_bmesh(f"{name}_lash{xi}{sy}", _lashing(x, py, zc, r_here + 0.020),
+                                        coll, mat("Rope"), smooth=True))
+            # wet stain band: a thin dark sleeve would z-fight; the AO bake + barnacles carry it
+        # pile cap (header) across the bent, under the stringers
+        cap = _dense_box(0.20, 2 * py_ - 0.05, 0.18, 2, 16, 2)
+        bmesh.ops.transform(cap, matrix=Matrix.Translation((x, 0, deck_z - 0.29)), verts=cap.verts)
+        _finish(cap)
+        o = obj_from_bmesh(f"{name}_capb{xi}", cap, coll, mat("Wood_Dark"))
         bevel_obj(o, width=0.012)
         apply_modifiers(o)
         parts.append(o)
-    # posts: pairs, wet-darkened below waterline band, barnacles, rope wraps
-    xs = [-length / 2 + 0.4, 0, length / 2 - 0.4]
-    for xi, x in enumerate(xs):
-        for sy in (-1, 1):
-            py = sy * (width / 2 - 0.1)
-            lean = rng.uniform(-0.015, 0.015)
-            # wet lower section
-            parts.append(add_cyl(coll, f"{name}_postw{xi}{sy}", 0.145, 0.138,
-                                 0.5, (x, py, 0.25), "Wood_Wet", segs=8))
-            # dry upper section with chamfered top
-            top = add_cyl(coll, f"{name}_post{xi}{sy}", 0.138, 0.115,
-                          deck_z + 0.25, (x + lean, py, 0.5 + (deck_z + 0.25) / 2),
-                          "Wood_Dark", segs=8, bevel=0.025)
-            parts.append(top)
-            # barnacle band near waterline
-            for bi in range(3):
-                a = rng.uniform(0, 2 * math.pi)
-                bz = rng.uniform(0.12, 0.34)
-                br = 0.145
-                bm = bm_icosphere(rng.uniform(0.022, 0.034), 1)
-                bmesh.ops.scale(bm, vec=Vector((1, 1, 0.6)), verts=bm.verts)
-                quat = Vector((math.cos(a), math.sin(a), 0)).to_track_quat('Z', 'Y')
-                bmesh.ops.transform(bm, matrix=Matrix.Translation(
-                    (x + br * math.cos(a), py + br * math.sin(a), bz)) @
-                    quat.to_matrix().to_4x4(), verts=bm.verts)
-                _finish(bm)
-                parts.append(obj_from_bmesh(f"{name}_barn{xi}{sy}{bi}", bm,
-                                            coll, mat("Bone"), smooth=False))
-            # rope wrap: two stacked coils below deck lip (keeps |y|max 1.57)
-            for ri, rz in enumerate((deck_z + 0.42, deck_z + 0.50)):
-                parts.append(add_cyl(coll, f"{name}_rope{xi}{sy}{ri}", 0.17, 0.17,
-                                     0.075, (x, py, rz), "Rope", segs=10,
-                                     bevel=0.02))
+        # X-brace across the bent (between the two piles of the pair)
+        for k, (za, zb) in enumerate(((0.35, deck_z - 0.42), (deck_z - 0.42, 0.35))):
+            a = Vector((x + (0.16 if k == 0 else 0.21), -py_ + 0.1, za))
+            b = Vector((a.x, py_ - 0.1, zb))
+            v = b - a
+            # square 9 cm timbers, unbevelled 12-tri boxes: build_lods leaves them whole (a round
+            # brace collapsed flat and its area rescale stretched the LOD to |y| 1.84 vs 1.56)
+            parts.append(add_box(coll, f"{name}_xb{xi}{k}", 0.09, 0.09, v.length, (a + b) / 2, "Wood_Dark",
+                                 rot=v.to_track_quat('Z', 'Y').to_matrix().to_4x4(), bevel=0))
     # stringers (define the EXACT X extent)
     for sy in (-1, 1):
-        parts.append(add_box(coll, f"{name}_str{sy}", length, 0.18, 0.16,
-                             (0, sy * (width / 2 - 0.35), deck_z - 0.12),
-                             "Wood_Dark", bevel=0.015))
-    # diagonal cross-braces between post pairs (under deck)
-    for xi, x in enumerate(xs[:-1] if not end_cap else xs):
-        x2 = xs[xi + 1] if xi + 1 < len(xs) else None
-        if x2 is None:
-            continue
+        sb = _dense_box(length, 0.18, 0.16, 30, 2, 2)
+        bmesh.ops.transform(sb, matrix=Matrix.Translation((0, sy * str_y, deck_z - 0.12)), verts=sb.verts)
+        _finish(sb)
+        o = obj_from_bmesh(f"{name}_str{sy}", sb, coll, mat("Wood_Dark"))
+        bevel_obj(o, width=0.015)
+        apply_modifiers(o)
+        parts.append(o)
+    # X-bracing along both sides between neighbouring bents
+    for xi in range(len(xs) - 1):
+        x, x2 = xs[xi], xs[xi + 1]
         for sy in (-1, 1):
-            py = sy * (width / 2 - 0.1)
-            v = Vector((x2 - x, 0, deck_z - 0.35))
-            quat = v.to_track_quat('Z', 'Y')
-            parts.append(add_cyl(coll, f"{name}_brace{xi}{sy}", 0.05, 0.05,
-                                 v.length * 0.96,
-                                 ((x + x2) / 2, py, (0.25 + deck_z - 0.1) / 2),
-                                 "Wood_Dark", segs=6,
-                                 rot=quat.to_matrix().to_4x4()))
-    # mooring cleats on deck edges (T-shape, iron-dark wood)
+            py = sy * (py_ - 0.17)
+            for k, (za, zb) in enumerate(((0.25, deck_z - 0.40), (deck_z - 0.40, 0.25))):
+                a, b = Vector((x + 0.12, py, za)), Vector((x2 - 0.12, py + sy * 0.0, zb))
+                v = b - a
+                parts.append(add_box(coll, f"{name}_brace{xi}{sy}{k}", 0.10, 0.10, v.length,
+                                     (a + b) / 2 + Vector((0, sy * 0.05 * k, 0)), "Wood_Dark",
+                                     rot=v.to_track_quat('Z', 'Y').to_matrix().to_4x4(), bevel=0))
+    # mooring cleats on deck edges (T-shape)
     cleat_xs = [-length / 2 + 1.0, length / 2 - 1.0]
     for ci, cx in enumerate(cleat_xs):
         sy = -1 if ci % 2 else 1
@@ -697,29 +848,37 @@ def build_dock(name, length=6.0, end_cap=False):
         parts.append(add_box(coll, f"{name}_cleatb{ci}", 0.10, 0.10, 0.14,
                              (cx, cy, deck_z + 0.10), "Wood_Dark", bevel=0.012))
         parts.append(add_cyl(coll, f"{name}_cleatt{ci}", 0.045, 0.035, 0.34,
-                             (cx, cy, deck_z + 0.18), "Wood_Dark", segs=6,
-                             rot=Matrix.Rotation(math.pi / 2, 4, 'Y'),
-                             bevel=0.01))
+                             (cx, cy, deck_z + 0.18), "Wood_Dark", segs=12,
+                             rot=Matrix.Rotation(math.pi / 2, 4, 'Y'), bevel=0.01))
     if end_cap:
-        # end bumper board across the outer end (inside the exact length)
+        # end bumper board across the outer end (inside the exact length) + two bollards
         parts.append(add_box(coll, f"{name}_bumper", 0.10, width * 0.92, 0.28,
-                             (length / 2 - 0.05, 0, deck_z - 0.02),
-                             "Wood_Dark", bevel=0.015))
+                             (length / 2 - 0.05, 0, deck_z - 0.02), "Wood_Dark", bevel=0.015))
+        for sy in (-1, 1):
+            parts.append(add_cyl(coll, f"{name}_bollard{sy}", 0.12, 0.10, 0.42,
+                                 (length / 2 - 0.30, sy * 0.95, deck_z + 0.25), "Wood_Dark", segs=20,
+                                 bevel=0.02))
+            parts.append(add_cyl(coll, f"{name}_bollcap{sy}", 0.14, 0.14, 0.05,
+                                 (length / 2 - 0.30, sy * 0.95, deck_z + 0.47), "Metal_Iron", segs=20,
+                                 bevel=0.01))
     obj = join(parts, name)
     return coll, obj
 
 
 # ── build, bake, export, verify, render ──────────────────────
-BUILDS = [
-    build_barrel("barrel"),
-    build_keg("keg"),
-    build_chest("chest_closed", False),
-    build_chest("chest_open", True),
-    build_crate("crate"),
-    build_campfire("campfire"),
-    build_dock("dock_mid", 6.0),
-    build_dock("dock_end", 4.0, True),
+_ALL = [
+    ("barrel", lambda: build_barrel("barrel")),
+    ("keg", lambda: build_keg("keg")),
+    ("chest_closed", lambda: build_chest("chest_closed", False)),
+    ("chest_open", lambda: build_chest("chest_open", True)),
+    ("crate", lambda: build_crate("crate")),
+    ("campfire", lambda: build_campfire("campfire")),
+    ("dock_mid", lambda: build_dock("dock_mid", 6.0)),
+    ("dock_end", lambda: build_dock("dock_end", 4.0, True)),
 ]
+# PROPS_ONLY=barrel,chest_open rebuilds (and re-exports) only those keys; the rest stay on disk untouched.
+_ONLY = {k.strip() for k in os.environ.get("PROPS_ONLY", "").split(",") if k.strip()}
+BUILDS = [f() for k, f in _ALL if not _ONLY or k in _ONLY]
 
 for coll, obj in BUILDS:
     bake_ao(coll)
