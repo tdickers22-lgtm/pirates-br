@@ -2,7 +2,7 @@
   "note": "Baseline for scripts/test-ship-geometry-hash.mjs. Rebuild ONLY inside a slice that intends the geometry change, and name the moved families in the commit.",
   "hulls": {
     "sloop": {
-      "digest": "40eb0493",
+      "digest": "f6f48741",
       "meshCount": 92,
       "vertTotal": 111559,
       "families": {
@@ -261,7 +261,7 @@
         "ship-rigging-ratline": {
           "meshes": 1,
           "verts": 12,
-          "tris": 140,
+          "tris": 880,
           "hash": "6580bbdd",
           "box": [
             -0.951,
@@ -275,7 +275,7 @@
         "ship-rigging-rope": {
           "meshes": 1,
           "verts": 12,
-          "tris": 90,
+          "tris": 860,
           "hash": "6580bbdd",
           "box": [
             -0.951,
@@ -345,7 +345,7 @@
       }
     },
     "brigantine": {
-      "digest": "90b3d250",
+      "digest": "b4a4889a",
       "meshCount": 118,
       "vertTotal": 132572,
       "families": {
@@ -604,7 +604,7 @@
         "ship-rigging-ratline": {
           "meshes": 1,
           "verts": 12,
-          "tris": 280,
+          "tris": 1800,
           "hash": "6580bbdd",
           "box": [
             -0.951,
@@ -618,7 +618,7 @@
         "ship-rigging-rope": {
           "meshes": 1,
           "verts": 12,
-          "tris": 150,
+          "tris": 2440,
           "hash": "6580bbdd",
           "box": [
             -0.951,
@@ -688,7 +688,7 @@
       }
     },
     "galleon": {
-      "digest": "4b31e5a9",
+      "digest": "4f12460f",
       "meshCount": 152,
       "vertTotal": 161772,
       "families": {
@@ -947,7 +947,7 @@
         "ship-rigging-ratline": {
           "meshes": 1,
           "verts": 12,
-          "tris": 420,
+          "tris": 4320,
           "hash": "6580bbdd",
           "box": [
             -0.951,
@@ -961,7 +961,7 @@
         "ship-rigging-rope": {
           "meshes": 1,
           "verts": 12,
-          "tris": 190,
+          "tris": 3830,
           "hash": "6580bbdd",
           "box": [
             -0.951,
