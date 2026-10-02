@@ -48,7 +48,7 @@ function glbJson(file) {
   const b = readFileSync(`public/assets/models/${file}.glb`);
   return JSON.parse(b.subarray(20, 20 + b.readUInt32LE(12)).toString('utf8'));
 }
-const GLB = { ship_kit_a: glbJson('ship_kit_a'), ship_kit_b: glbJson('ship_kit_b') };
+const GLB = { ship_kit_a: glbJson('ship_kit_a'), ship_kit_b: glbJson('ship_kit_b'), ship_kit_a_lods: glbJson('ship_kit_a_lods'), ship_kit_b_lods: glbJson('ship_kit_b_lods') };
 
 /** Nearest spline point to p on side `side` (independent of the kit solver):
  *  coarse 60x40 scan, then two refinements around the best cell. */
@@ -171,6 +171,31 @@ for (const type of TYPES) {
   }
   const draws = kit.kitDrawCount(root);
   (bad === 0 ? ok : fail)(`[mount] ${type}: ${socks.length} sockets, ${root.children.length} instanced draws (${draws})`);
+
+  // LOD1/LOD2 (b4.3c): the level roots mount the kit's own <node>_LODk geometry on the SAME socket
+  // frames (instance matrices equal to LOD0), LOD0 materials bound by name; glass panes reuse LOD0.
+  for (const lvl of [1, 2]) {
+    const lr = kit.mountShipKit(mounted, stub, null, lvl);
+    if (!lr) { fail(`[lod${lvl}] ${type}: mountShipKit(level ${lvl}) returned null`); continue; }
+    let lodBad = 0;
+    const m0 = new THREE.Matrix4(), m1 = new THREE.Matrix4();
+    for (const im of lr.children) {
+      const node = im.name.replace(/^kit-/, '');
+      const ref = root.children.find((c) => c.name === im.name);
+      const file = mounted.find((s) => s.nodes.includes(node))?.file ?? (/^stern_gallery_galleon_upper/.test(node) ? 'ship_kit_a' : null);
+      const lodNode = file && stub.source(`${file}_lods`).scene.getObjectByName(`${node}_LOD${lvl}`);
+      if (/glass/.test(node)) { if (lodNode) { lodBad++; fail(`[lod${lvl}] ${type} ${node}: glass has a LOD node but the mount reused LOD0`); } continue; }
+      if (!lodNode) { lodBad++; fail(`[lod${lvl}] ${type} ${node}: no ${node}_LOD${lvl} in ${file}_lods`); continue; }
+      if (im.geometry !== lodNode.children[0]?.geometry) { lodBad++; fail(`[lod${lvl}] ${type} ${node}: drew LOD0 geometry, not ${node}_LOD${lvl}`); }
+      if (!ref || ref.count !== im.count) { lodBad++; fail(`[lod${lvl}] ${type} ${node}: ${im.count} instances vs LOD0 ${ref?.count}`); continue; }
+      for (let i = 0; i < im.count; i++) {
+        ref.getMatrixAt(i, m0); im.getMatrixAt(i, m1);
+        if (m0.elements.some((e, k) => Math.abs(e - m1.elements[k]) > 1e-5)) { lodBad++; fail(`[lod${lvl}] ${type} ${node} #${i}: frame differs from LOD0`); break; }
+      }
+    }
+    if (lr.children.length !== root.children.length) { lodBad++; fail(`[lod${lvl}] ${type}: ${lr.children.length} buckets vs LOD0 ${root.children.length}`); }
+    (lodBad === 0 ? ok : fail)(`[lod${lvl}] ${type}: ${lr.children.length} buckets on LOD${lvl} geometry, frames = LOD0`);
+  }
 }
 
 // --prove: the gate must be able to fail.
@@ -195,7 +220,12 @@ if (/makeFigurehead\(/.test(body)) fail('[source] buildShip still calls makeFigu
 if (/gunportFrame|gunportDoor|gunportOpening/.test(body)) fail('[source] buildShip still builds procedural gunport boxes');
 if (!/shipKitSockets\(/.test(sr) || !/mountShipKit\(/.test(sr)) fail('[source] ShipRenderer does not mount the kit (shipKitSockets/mountShipKit)');
 if (/export function makeFigurehead/.test(readFileSync('src/client/rendering/ship/dressing.ts', 'utf8'))) fail('[source] dressing.ts still exports makeFigurehead');
+if (!/mountShipKit\([^;]*, 1\)/.test(sr) || !/mountShipKit\([^;]*, 2\)/.test(sr)) fail('[source] ShipRenderer does not mount kit LOD1 + LOD2 in the level roots (figureheads/gunports pop off past 30 m)');
+const stern = readFileSync('src/client/rendering/ship/stern.ts', 'utf8');
+if (/makeWindowFrame|BoxGeometry\(0\.5, 0\.35|galleryRail/.test(stern)) fail('[source] stern.ts still draws the procedural stern windows / gallery rail under the kit gallery');
+if (/export function makeWindowFrame/.test(readFileSync('src/client/rendering/ship/dressing.ts', 'utf8'))) fail('[source] dressing.ts still exports makeWindowFrame');
 const lib = readFileSync('src/client/assets/AssetLibrary.ts', 'utf8');
+if (!/'ship_kit_a_lods'/.test(lib) || !/'ship_kit_b_lods'/.test(lib)) fail('[source] AssetLibrary does not stream ship_kit_a_lods/ship_kit_b_lods');
 if (!/'ship_kit_a'/.test(lib) || !/'ship_kit_b'/.test(lib)) fail('[source] AssetLibrary does not list ship_kit_a/ship_kit_b');
 const prims = (body.match(/new THREE\.(Box|Cylinder|Sphere|Torus|Cone|Circle|Plane)Geometry\(/g) ?? []).length;
 const primLine = `[primitives] buildShip ${prims} primitive constructors (ratchet ${PRIMITIVE_RATCHET}, target < ${PRIMITIVE_TARGET}${prims < PRIMITIVE_TARGET ? ' MET' : ' open'})`;

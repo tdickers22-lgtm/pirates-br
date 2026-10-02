@@ -22,6 +22,11 @@ import { rudderMount } from './stern.js';
 
 export type ShipKitFile = 'ship_kit_a' | 'ship_kit_b';
 export const SHIP_KIT_FILES: readonly ShipKitFile[] = ['ship_kit_a', 'ship_kit_b'];
+/** Per-node LOD1/LOD2 siblings (`<node>_LOD1` / `<node>_LOD2`, geometry only). */
+export type ShipKitLodFile = 'ship_kit_a_lods' | 'ship_kit_b_lods';
+export const SHIP_KIT_LOD_FILES: readonly ShipKitLodFile[] = ['ship_kit_a_lods', 'ship_kit_b_lods'];
+/** Kit level per hull LOD root: LOD0 in the detail root, LOD1/LOD2 in the level roots. */
+export type ShipKitLevel = 0 | 1 | 2;
 
 /** Which surface a socket sits on; the gate measures the distance to it. */
 export type KitSurface = 'hull' | 'stem' | 'transom' | 'deck' | 'post';
@@ -199,8 +204,8 @@ export function socketMatrix(s: KitSocket, target = new THREE.Matrix4()): THREE.
 
 /** What the mount needs from the asset library (a stub in node gates). */
 export interface ShipKitSource {
-  has(name: ShipKitFile): boolean;
-  source(name: ShipKitFile): { scene: THREE.Group } | null;
+  has(name: ShipKitFile | ShipKitLodFile): boolean;
+  source(name: ShipKitFile | ShipKitLodFile): { scene: THREE.Group } | null;
 }
 
 export const KIT_SHARED = 'hwShared';
@@ -215,20 +220,36 @@ export function mountShipKit(
   sockets: readonly KitSocket[],
   src: ShipKitSource,
   glassMat: THREE.Material | null,
+  level: ShipKitLevel = 0,
 ): THREE.Group | null {
   if (!SHIP_KIT_FILES.every((f) => !sockets.some((s) => s.file === f) || src.has(f))) return null;
+  if (level > 0 && !SHIP_KIT_FILES.every((f) => !sockets.some((s) => s.file === f) || src.has(`${f}_lods`))) return null;
+  // LOD nodes carry geometry only: bind the LOD0 material of the same name.
+  const matByName = new Map<string, THREE.Material>();
+  if (level > 0) {
+    for (const f of SHIP_KIT_FILES) {
+      src.source(f)?.scene.traverse((o) => {
+        const m = (o as THREE.Mesh).material as THREE.Material | undefined;
+        if ((o as THREE.Mesh).isMesh && m && !Array.isArray(m) && m.name && !matByName.has(m.name)) matByName.set(m.name, m);
+      });
+    }
+  }
   const buckets = new Map<string, { geo: THREE.BufferGeometry; mat: THREE.Material | THREE.Material[]; mats: THREE.Matrix4[]; name: string }>();
   const sockM = new THREE.Matrix4(), nodeM = new THREE.Matrix4(), meshM = new THREE.Matrix4(), hinge = new THREE.Matrix4();
-  const place = (scene: THREE.Object3D, nodeName: string, base: THREE.Matrix4, hingeX: number | undefined) => {
+  const place = (scene: THREE.Object3D, nodeName: string, base: THREE.Matrix4, hingeX: number | undefined, lodScene: THREE.Object3D | null) => {
     const node = scene.getObjectByName(nodeName);
     if (!node) return;
     node.updateMatrix();
     nodeM.copy(node.matrix);
     if (hingeX) nodeM.multiply(hinge.makeRotationX(hingeX));
     nodeM.premultiply(base);
-    node.updateMatrixWorld(true);
-    const nodeInv = new THREE.Matrix4().copy(node.matrixWorld).invert();
-    node.traverse((o) => {
+    // The LOD sibling supplies the geometry; the LOD0 node supplies the frame
+    // (origin at the mount, hinge pivots). Panes without a LOD node (glass)
+    // reuse the LOD0 mesh at every level.
+    const geoNode = (lodScene && level > 0 ? lodScene.getObjectByName(`${nodeName}_LOD${level}`) : null) ?? node;
+    geoNode.updateMatrixWorld(true);
+    const nodeInv = new THREE.Matrix4().copy(geoNode.matrixWorld).invert();
+    geoNode.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (!mesh.isMesh) return;
       meshM.multiplyMatrices(nodeInv, mesh.matrixWorld).premultiply(nodeM);
@@ -236,7 +257,8 @@ export function mountShipKit(
       let b = buckets.get(key);
       if (!b) {
         const m = mesh.material as THREE.Material;
-        const mat = glassMat && /glass/i.test(m?.name ?? '') ? glassMat : mesh.material;
+        const bound = geoNode !== node && m && !Array.isArray(m) ? matByName.get(m.name) ?? m : mesh.material;
+        const mat = glassMat && /glass/i.test(m?.name ?? '') ? glassMat : bound;
         b = { geo: mesh.geometry, mat, mats: [], name: nodeName };
         buckets.set(key, b);
       }
@@ -246,19 +268,20 @@ export function mountShipKit(
   for (const s of sockets) {
     const scene = src.source(s.file)?.scene;
     if (!scene) continue;
+    const lodScene = level > 0 ? src.source(`${s.file}_lods`)?.scene ?? null : null;
     socketMatrix(s, sockM);
-    for (const n of s.nodes) place(scene, n, sockM, s.hinge?.[n]);
+    for (const n of s.nodes) place(scene, n, sockM, s.hinge?.[n], lodScene);
     if (s.part === 'stern_gallery_galleon') {
       const seat = scene.getObjectByName('sock_stern_gallery_galleon_upper');
       if (seat) {
         seat.updateMatrix();
         const upper = new THREE.Matrix4().multiplyMatrices(sockM, seat.matrix);
-        for (const n of ['stern_gallery_galleon_upper', 'stern_gallery_galleon_upper_glass']) place(scene, n, upper, undefined);
+        for (const n of ['stern_gallery_galleon_upper', 'stern_gallery_galleon_upper_glass']) place(scene, n, upper, undefined, lodScene);
       }
     }
   }
   const root = new THREE.Group();
-  root.name = 'ship-kit';
+  root.name = level > 0 ? `ship-kit-lod${level}` : 'ship-kit';
   for (const b of buckets.values()) {
     const im = new THREE.InstancedMesh(b.geo, b.mat, b.mats.length);
     im.name = `kit-${b.name}`;

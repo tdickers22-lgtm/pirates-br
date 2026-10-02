@@ -64,8 +64,9 @@ export const ASSET_NAMES = [
   'cannon', 'wheel', 'capstan', 'ship_lantern',
   // Ship kit (b4.3a/b, build_ship_kit.py): figureheads, galleries, gunports,
   // rudder, barrels... mounted on spline sockets by ship/kit.ts (b4.3c).
-  // Streamed on demand (SHIP_KIT_ASSET_NAMES): shown inside the LOD0 band only.
-  'ship_kit_a', 'ship_kit_b',
+  // Streamed on demand (SHIP_KIT_ASSET_NAMES); the _lods siblings carry the
+  // per-node LOD1/LOD2 geometry the 30-250 m hull roots mount.
+  'ship_kit_a', 'ship_kit_b', 'ship_kit_a_lods', 'ship_kit_b_lods',
 ] as const;
 
 export type AssetName = (typeof ASSET_NAMES)[number];
@@ -188,7 +189,7 @@ export function storyPhoneProfile(): boolean {
 /** The 38 the world build needs, the menu does not, and that are not lazy. */
 /** b4.3c: the ship kit streams on the first hull inside the LOD0 band
  *  (ShipRenderer.kitReady -> ensure), never with the world set. */
-export const SHIP_KIT_ASSET_NAMES = ['ship_kit_a', 'ship_kit_b'] as const satisfies readonly AssetName[];
+export const SHIP_KIT_ASSET_NAMES = ['ship_kit_a', 'ship_kit_b', 'ship_kit_a_lods', 'ship_kit_b_lods'] as const satisfies readonly AssetName[];
 const SHIP_KIT_SET: ReadonlySet<string> = new Set<string>(SHIP_KIT_ASSET_NAMES);
 
 export const WORLD_ASSET_NAMES: readonly AssetName[] =

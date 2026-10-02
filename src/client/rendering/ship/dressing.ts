@@ -5,29 +5,6 @@
 import * as THREE from 'three';
 import { CYLINDER_UP } from './geometry.js';
 
-export function makeWindowFrame(
-  width: number,
-  height: number,
-  depth: number,
-  bar: number,
-  material: THREE.Material,
-): THREE.Group {
-  const g = new THREE.Group();
-  const addBar = (x: number, y: number, w: number, h: number) => {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, depth), material);
-    mesh.position.set(x, y, 0);
-    mesh.castShadow = true;
-    g.add(mesh);
-  };
-  addBar(0, height * 0.5, width + bar * 2, bar);
-  addBar(0, -height * 0.5, width + bar * 2, bar);
-  addBar(-width * 0.5, 0, bar, height + bar * 2);
-  addBar(width * 0.5, 0, bar, height + bar * 2);
-  addBar(0, 0, bar * 0.62, height * 0.82);
-  addBar(0, 0, width * 0.82, bar * 0.58);
-  return g;
-}
-
 export function makeCylinderBetween(
   start: THREE.Vector3,
   end: THREE.Vector3,
