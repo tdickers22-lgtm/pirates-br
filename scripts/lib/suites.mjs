@@ -318,6 +318,9 @@ export const LOGIC = [
   // always-on budgets, 10 contradiction rows, every UiRefs id has a writer, wiring.
   quick(tsx('test-hud-visibility.mjs')),
   quick(tsx('test-crew-palette.mjs')),
+  // b4.3e crew emblems (crossdevice-15, D33): 12 silhouettes, pairwise IoU <= 0.6 (and mirrored) at 24/48 px,
+  // no two crews of a match share one (deal, late joins, churn), real sailTexture/flagTexture paint it (~0.4 s).
+  quick(tsx('test-emblems.mjs')),
   quick(tsx('test-captions.mjs')),
   // b3.5f scoreboard + connection pill (vm:mechanicshud:4, D13): ordering, scheme icons, pill thresholds, wiring.
   quick(tsx('test-scoreboard.mjs')),
