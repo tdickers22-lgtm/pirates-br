@@ -1,0 +1,205 @@
+// test-ship-sockets (b4.3c, ships-07): the Blender ship kit sits ON the hull.
+//
+//   node --import tsx scripts/test-ship-sockets.mjs
+//
+// 1. Every socket of every class (ship/kit.ts shipKitSockets + deckKitSockets)
+//    is graded against the shared spline (sampleHullSurface) found by an
+//    INDEPENDENT nearest-point search, not the solver that placed it:
+//      hull     <= 3 cm from the spline, +Z within 5 deg of the outward normal
+//      stem/transom: on the centreline seat between the mirrored surfaces
+//               (<= 3 cm), +Z within 5 deg of the bisector normal
+//      post     rudder origin <= 3 cm from the sternpost chord, +Y within 5 deg of it
+//      deck     <= 3 cm from the deck slab top, +Y within 5 deg of deck up
+//    and gunports sit over their guns (|dz| <= 3 cm).
+// 2. mountShipKit on a stub library built from the GLB's own node table:
+//    every instance origin / axis equals its socket (the mount math) and the
+//    instance count per bucket equals the sockets that mount that node.
+// 3. Every node a socket names exists in the kit GLB.
+// 4. Source: buildShip mounts the kit (no makeFigurehead, no gunport boxes),
+//    makeFigurehead is gone from dressing.ts, the library knows both kit files,
+//    and the primitive constructors in buildShip ratchet down (target < 25).
+//
+// --prove: mutations that must go red (socket nudged 5 cm off the hull, axis
+// tilted 8 deg, a node renamed).
+import { readFileSync } from 'node:fs';
+
+const THREE = await import('three');
+const hull = await import('../src/shared/hull.ts');
+const kit = await import('../src/client/rendering/ship/kit.ts');
+const { rudderMount } = await import('../src/client/rendering/ship/stern.ts');
+const { SHIP_STATS } = await import('../src/shared/constants/index.ts');
+const { getCannonDeckLocalPosition } = await import('../src/shared/interactions.ts');
+const { getShipDeckY } = await import('../src/shared/utils/index.ts');
+
+const PROVE = process.argv.includes('--prove');
+const TOL_M = 0.03, TOL_DEG = 5;
+/** Primitive constructors (Box/Cylinder/Sphere/Torus/Cone/Circle/Plane) in
+ *  buildShip: 97 at the audit, 76 at b4.2h, ratcheted here. PLAN target < 25. */
+const PRIMITIVE_RATCHET = 73;
+const PRIMITIVE_TARGET = 25;
+
+let fails = 0;
+const fail = (m) => { fails++; console.log(`FAIL ${m}`); };
+const ok = (m) => console.log(`ok   ${m}`);
+const deg = (a, b) => Math.acos(Math.min(1, Math.max(-1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2]))) * 180 / Math.PI;
+const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+
+function glbJson(file) {
+  const b = readFileSync(`public/assets/models/${file}.glb`);
+  return JSON.parse(b.subarray(20, 20 + b.readUInt32LE(12)).toString('utf8'));
+}
+const GLB = { ship_kit_a: glbJson('ship_kit_a'), ship_kit_b: glbJson('ship_kit_b') };
+
+/** Nearest spline point to p on side `side` (independent of the kit solver):
+ *  coarse 60x40 scan, then two refinements around the best cell. */
+function nearestOnHull(profile, p, side) {
+  let best = { d: Infinity, u: 0, v: 0 };
+  const scan = (u0, u1, v0, v1, nu, nv) => {
+    for (let i = 0; i <= nu; i++) for (let j = 0; j <= nv; j++) {
+      const u = Math.min(1, Math.max(0, u0 + (u1 - u0) * i / nu));
+      const v = Math.min(1, Math.max(0, v0 + (v1 - v0) * j / nv));
+      const s = hull.sampleHullSurface(profile, u, v);
+      const d = dist(p, [side * s.x, s.y, s.z]);
+      if (d < best.d) best = { d, u, v };
+    }
+  };
+  scan(0, 1, 0, 1, 60, 40);
+  for (const w of [1 / 30, 1 / 300, 1 / 3000]) scan(best.u - w, best.u + w, best.v - w, best.v + w, 20, 20);
+  const s = hull.sampleHullSurface(profile, best.u, best.v);
+  return { d: best.d, n: [side * s.nx, s.ny, s.nz] };
+}
+function nearestOnCentreRow(profile, p, u) {
+  let best = { d: Infinity, v: 0 };
+  for (let j = 0; j <= 4000; j++) {
+    const v = j / 4000, s = hull.sampleHullSurface(profile, u, v);
+    const d = dist(p, [0, s.y, s.z]);
+    if (d < best.d) best = { d, v };
+  }
+  const s = hull.sampleHullSurface(profile, u, best.v);
+  const l = Math.hypot(s.ny, s.nz) || 1;
+  return { d: best.d, n: [0, s.ny / l, s.nz / l], halfBeam: Math.abs(s.x) };
+}
+
+function gradeSocket(type, s, tag) {
+  const profile = hull.getHullProfile(type);
+  let d, a, extra = '';
+  if (s.surface === 'hull') {
+    const r = nearestOnHull(profile, s.pos, s.side);
+    d = r.d; a = deg(s.out, r.n);
+  } else if (s.surface === 'stem' || s.surface === 'transom') {
+    const r = nearestOnCentreRow(profile, s.pos, s.surface === 'stem' ? 1 : 0);
+    d = r.d; a = deg(s.out, r.n); extra = ` half-beam at seat ${r.halfBeam.toFixed(3)} m`;
+  } else if (s.surface === 'post') {
+    const m = rudderMount(profile);
+    const ax = [0, m.top.y - m.foot.y, m.top.z - m.foot.z];
+    const l = Math.hypot(...ax); const dir = ax.map((c) => c / l);
+    const rel = [s.pos[0], s.pos[1] - m.foot.y, s.pos[2] - m.foot.z];
+    const t = rel[1] * dir[1] + rel[2] * dir[2];
+    d = Math.hypot(rel[0], rel[1] - t * dir[1], rel[2] - t * dir[2]);
+    a = deg(s.up, dir);
+  } else {
+    d = Math.abs(s.pos[1] - getShipDeckY(0, SHIP_STATS[type]));
+    a = deg(s.out, [0, 1, 0]);
+  }
+  const good = d <= TOL_M && a <= TOL_DEG;
+  (good ? ok : fail)(`${tag} ${type} ${s.part}${s.side ? (s.side > 0 ? ' stbd' : ' port') : ''} @(${s.pos.map((c) => c.toFixed(2)).join(',')}) ${s.surface}: ${(d * 100).toFixed(2)} cm, ${a.toFixed(2)} deg${extra}`);
+  return good;
+}
+
+const TYPES = ['sloop', 'brigantine', 'galleon'];
+const counts = {};
+for (const type of TYPES) {
+  const socks = [...kit.shipKitSockets(type), ...kit.deckKitSockets(type, [{ x: 0.5, z: 0.3, yaw: 0.7 }])];
+  counts[type] = socks.length;
+  let bad = 0;
+  for (const s of socks) if (!gradeSocket(type, s, '[socket]')) bad++;
+  // Gunports over their guns.
+  const stats = SHIP_STATS[type];
+  const per = Math.max(1, stats.cannonCount / 2);
+  const ports = socks.filter((s) => s.part === 'gunport');
+  if (ports.length !== stats.cannonCount) fail(`[gunport] ${type}: ${ports.length} gunports for ${stats.cannonCount} guns`);
+  ports.forEach((s, i) => {
+    const side = i < per ? 0 : 1, c = i % per;
+    const g = getCannonDeckLocalPosition(stats, side === 0 ? c : per + c);
+    if (Math.abs(g.z - s.pos[2]) > TOL_M || Math.sign(g.x) !== Math.sign(s.pos[0])) fail(`[gunport] ${type} #${i}: gun z ${g.z.toFixed(2)} x ${g.x.toFixed(2)} vs port z ${s.pos[2].toFixed(2)} x ${s.pos[0].toFixed(2)}`);
+  });
+  // Node table.
+  for (const s of socks) for (const n of s.nodes) {
+    if (!GLB[s.file].nodes.some((x) => x.name === n)) fail(`[nodes] ${type} ${s.part}: node ${n} not in ${s.file}.glb`);
+  }
+
+  // Mount math on a stub library from the GLB node table.
+  const scenes = new Map();
+  const stub = {
+    has: (f) => !!GLB[f],
+    source: (f) => {
+      if (scenes.has(f)) return scenes.get(f);
+      const j = GLB[f], scene = new THREE.Group();
+      for (const n of j.nodes) {
+        const o = new THREE.Object3D(); o.name = n.name;
+        if (n.translation) o.position.fromArray(n.translation);
+        if (n.rotation) o.quaternion.fromArray(n.rotation);
+        if (n.scale) o.scale.fromArray(n.scale);
+        if (n.mesh !== undefined) {
+          const mat = new THREE.MeshBasicMaterial(); mat.name = j.materials[j.meshes[n.mesh].primitives[0].material]?.name ?? '';
+          o.add(new THREE.Mesh(new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 1, 0, 1, 0], 3)), mat));
+        }
+        scene.add(o);
+      }
+      scenes.set(f, { scene });
+      return scenes.get(f);
+    },
+  };
+  const mounted = socks.filter((s) => s.part !== 'rudder');
+  const root = kit.mountShipKit(mounted, stub, null);
+  if (!root) { fail(`[mount] ${type}: mountShipKit returned null`); continue; }
+  const m = new THREE.Matrix4(), p = new THREE.Vector3(), q = new THREE.Quaternion(), sc = new THREE.Vector3();
+  for (const im of root.children) {
+    const node = im.name.replace(/^kit-/, '');
+    const want = mounted.filter((s) => s.nodes.includes(node));
+    if (/upper/.test(node)) continue; // rides the lower tier's socket
+    if (im.count !== want.length) fail(`[mount] ${type} ${node}: ${im.count} instances for ${want.length} sockets`);
+    if (/glass|lid|gudgeons/.test(node)) continue;
+    for (let i = 0; i < im.count; i++) {
+      im.getMatrixAt(i, m); m.decompose(p, q, sc);
+      const s = want[i];
+      const z = new THREE.Vector3(0, 0, 1).applyQuaternion(q), y = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
+      const dz = s.surface === 'deck' ? deg(y.toArray(), s.out) : deg(z.toArray(), s.out);
+      const dp = dist(p.toArray(), s.pos);
+      if (dp > 0.001 || dz > 0.1) { bad++; fail(`[mount] ${type} ${node} #${i}: origin ${(dp * 100).toFixed(2)} cm, axis ${dz.toFixed(2)} deg off its socket`); }
+    }
+  }
+  const draws = kit.kitDrawCount(root);
+  (bad === 0 ? ok : fail)(`[mount] ${type}: ${socks.length} sockets, ${root.children.length} instanced draws (${draws})`);
+}
+
+// --prove: the gate must be able to fail.
+if (PROVE) {
+  const s0 = kit.shipKitSockets('galleon').find((s) => s.part === 'gunport');
+  const nudged = { ...s0, pos: [s0.pos[0] + Math.sign(s0.pos[0]) * 0.05, s0.pos[1], s0.pos[2]] };
+  const tilted = { ...s0, out: [s0.out[0], s0.out[1] + Math.tan(8 * Math.PI / 180), s0.out[2]].map((c, _, a) => c / Math.hypot(...a)) };
+  const saved = fails;
+  const r1 = gradeSocket('galleon', nudged, '[prove 5 cm off]');
+  const r2 = gradeSocket('galleon', tilted, '[prove 8 deg]');
+  fails = saved;
+  if (r1 || r2) fail('[prove] a mutation stayed green'); else ok('[prove] 5 cm and 8 deg mutations go red');
+}
+
+// Source contract.
+const sr = readFileSync('src/client/rendering/ShipRenderer.ts', 'utf8');
+const start = sr.indexOf('  buildShip(ship: Ship): THREE.Group {');
+const end = sr.indexOf('  private hardwareReady(): boolean {');
+const body = start >= 0 && end > start ? sr.slice(start, end) : '';
+if (!body) fail('[source] buildShip not found');
+if (/makeFigurehead\(/.test(body)) fail('[source] buildShip still calls makeFigurehead');
+if (/gunportFrame|gunportDoor|gunportOpening/.test(body)) fail('[source] buildShip still builds procedural gunport boxes');
+if (!/shipKitSockets\(/.test(sr) || !/mountShipKit\(/.test(sr)) fail('[source] ShipRenderer does not mount the kit (shipKitSockets/mountShipKit)');
+if (/export function makeFigurehead/.test(readFileSync('src/client/rendering/ship/dressing.ts', 'utf8'))) fail('[source] dressing.ts still exports makeFigurehead');
+const lib = readFileSync('src/client/assets/AssetLibrary.ts', 'utf8');
+if (!/'ship_kit_a'/.test(lib) || !/'ship_kit_b'/.test(lib)) fail('[source] AssetLibrary does not list ship_kit_a/ship_kit_b');
+const prims = (body.match(/new THREE\.(Box|Cylinder|Sphere|Torus|Cone|Circle|Plane)Geometry\(/g) ?? []).length;
+const primLine = `[primitives] buildShip ${prims} primitive constructors (ratchet ${PRIMITIVE_RATCHET}, target < ${PRIMITIVE_TARGET}${prims < PRIMITIVE_TARGET ? ' MET' : ' open'})`;
+(prims <= PRIMITIVE_RATCHET ? ok : fail)(primLine);
+
+console.log(`\ntest-ship-sockets: ${Object.entries(counts).map(([t, n]) => `${t} ${n}`).join(', ')} sockets; ${fails} failed`);
+process.exit(fails ? 1 : 0);

@@ -62,6 +62,10 @@ export const ASSET_NAMES = [
   // and lanterns. World tier, not boot: the procedural hardware is the
   // fallback for the queue window, and a hull swaps once all four are in.
   'cannon', 'wheel', 'capstan', 'ship_lantern',
+  // Ship kit (b4.3a/b, build_ship_kit.py): figureheads, galleries, gunports,
+  // rudder, barrels... mounted on spline sockets by ship/kit.ts (b4.3c).
+  // Streamed on demand (SHIP_KIT_ASSET_NAMES): shown inside the LOD0 band only.
+  'ship_kit_a', 'ship_kit_b',
 ] as const;
 
 export type AssetName = (typeof ASSET_NAMES)[number];
@@ -182,8 +186,13 @@ export function storyPhoneProfile(): boolean {
 }
 
 /** The 38 the world build needs, the menu does not, and that are not lazy. */
+/** b4.3c: the ship kit streams on the first hull inside the LOD0 band
+ *  (ShipRenderer.kitReady -> ensure), never with the world set. */
+export const SHIP_KIT_ASSET_NAMES = ['ship_kit_a', 'ship_kit_b'] as const satisfies readonly AssetName[];
+const SHIP_KIT_SET: ReadonlySet<string> = new Set<string>(SHIP_KIT_ASSET_NAMES);
+
 export const WORLD_ASSET_NAMES: readonly AssetName[] =
-  ASSET_NAMES.filter((n) => !BOOT_ASSET_SET.has(n) && !LAZY_ASSET_SET.has(n));
+  ASSET_NAMES.filter((n) => !BOOT_ASSET_SET.has(n) && !LAZY_ASSET_SET.has(n) && !SHIP_KIT_SET.has(n));
 
 /** Assets that must be faceted even though their GLB carries smooth normals.
  *  Empty by design: the right place to force facets is the Blender builder
