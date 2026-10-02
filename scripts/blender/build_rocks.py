@@ -1,299 +1,193 @@
-# Builds stylized rocks: 3 island boulders + 3 eroded sea stacks.
-# Fidelity pass: boulders rebuilt at 2-4k tris (dual voronoi displacement,
-# decimated flat facets, distinct silhouettes: a=rounded, b=angular slab,
-# c=stacked/split with a crack). Sea stacks at 4-8k tris: high-res lathed
-# pillars with deep strata banding, lean, waterline undercut, companion
-# spires and a wet rubble skirt. Origin at ground center (waterline for sea
-# rocks). Each asset is post-fit to its legacy bbox so colliders/placement
-# stay valid. Baked vertex AO on everything.
-# Headless: Blender -b -P scripts/blender/build_rocks.py
-# Optional turntable renders: set env ROCKS_RENDER_DIR=<dir>
+# ROCK KIT v2 I (b4.5a; assets-08, assets-09; PLAN 3.12 + section 6 row 12): 3 island boulders and
+# 3 sea stacks on the shared rock core (_rock.py).
+#
+#   boulders a/b/c  LOD0 8-15k tris. Voronoi fracture cells unioned into one welded mass:
+#                   a = rounded water-worn dome on a bury skirt, b = tilted angular slab with a
+#                   leaning shard and a joint fissure, c = split stack (two lobes cleft by a deep
+#                   joint, capstone on top).
+#   searocks a/b/c  LOD0 15-25k tris. Layered sedimentary stacks: dipping bedding slabs (jointed
+#                   Voronoi outlines, soft beds set back into ledges), companion stacks, a rubble
+#                   skirt, vertical joint fissures and a wave-cut notch at the waterline; wet band,
+#                   weathered body and a sun-bleached crown.
+#
+# Every rock is a 300-600k HIGH sculpt (voxel remesh + multi-octave displacement from PolyHaven CC0
+# rock height maps, _rock.sculpt) collapse-decimated into its band as ONE welded surface with
+# face-area weighted normals (verts/tris ~0.5, was 3.00 split-vertex facets), fitted into the legacy
+# game-space AABB (_nature.NATURE_BOUNDS: colliders, propBaseLift, test-asset-bounds), AO + moss +
+# low wet band baked into COLOR_0, material names kept in the 'rock' detail family (the runtime
+# triplanar rock grain and the one-draw instancing collapse still apply).
+# `<name>_far.glb` is a ~2.5% decimation of the same welded LOD0, re-seated on its lowest point;
+# `<name>_lods.glb` (LOD1/LOD2/far nodes) comes from build_lods.py (BR_LODS_ONLY=<names>).
+#
+# Headless:  /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup -P scripts/blender/build_rocks.py
+# env: BR_EXPORT_DIR (output dir), ROCKS_ONLY=boulder_a,searock_b, ROCKS_RENDER_DIR=<dir> (turntables)
 import bpy
-import bmesh
+import json
 import math
-import random
 import os
-from mathutils import Vector, Matrix
+import random
+import sys
+import time
+from mathutils import Matrix, Vector
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 exec(open(os.path.join(HERE, "_helpers.py")).read())
 exec(open(os.path.join(HERE, "_ao.py")).read())
 exec(open(os.path.join(HERE, "_detail.py")).read())
 exec(open(os.path.join(HERE, "_nature.py")).read())
+exec(open(os.path.join(HERE, "_rock.py")).read())
 EXPORT_DIR = os.environ.get('BR_EXPORT_DIR', EXPORT_DIR)
-
 RENDER_DIR = os.environ.get("ROCKS_RENDER_DIR", "")
+ONLY = {s.strip() for s in os.environ.get('ROCKS_ONLY', '').split(',') if s.strip()}
 
-# Weathered rock tones for the stacks (lighter + warmer than the old near-black
-# Rock_Sea so they read as sun-and-salt-eroded stone, not flat grey cones).
 EXTRA = {
-    "Rock_Stack":  ((0.29, 0.27, 0.23, 1.0), 0.94, 0.0),  # weathered body
-    "Rock_Wet":    ((0.16, 0.17, 0.18, 1.0), 0.78, 0.0),  # dark wet base
-    "Rock_Pale":   ((0.45, 0.42, 0.35, 1.0), 0.95, 0.0),  # sun-bleached / guano crown
+    "Rock_Stack": ((0.29, 0.27, 0.23, 1.0), 0.94, 0.0),  # weathered body
+    "Rock_Wet":   ((0.16, 0.17, 0.18, 1.0), 0.78, 0.0),  # dark wet base
+    "Rock_Pale":  ((0.45, 0.42, 0.35, 1.0), 0.95, 0.0),  # sun-bleached / guano crown
 }
 for k, v in EXTRA.items():
     PALETTE.setdefault(k, v)
 
-
-# ── shared: fit final mesh into the legacy collider envelope ─────────────
-def fit_envelope(obj, target_r, target_top, target_bot):
-    """Uniformly rescale XY so the max horizontal half-extent == target_r,
-    rescale+shift Z so the mesh spans [target_bot, target_top]. Keeps every
-    asset's footprint/height identical to the legacy GLB (collider contract)."""
-    me = obj.data
-    r_now = max(max(abs(v.co.x), abs(v.co.y)) for v in me.vertices)
-    zmin = min(v.co.z for v in me.vertices)
-    zmax = max(v.co.z for v in me.vertices)
-    sxy = target_r / max(1e-6, r_now)
-    sz = (target_top - target_bot) / max(1e-6, zmax - zmin)
-    dz = target_bot - zmin * sz
-    for v in me.vertices:
-        v.co.x *= sxy
-        v.co.y *= sxy
-        v.co.z = v.co.z * sz + dz
+BANDS = {'boulder': (8000, 15000), 'searock': (15000, 25000)}
+TARGET = {'boulder': 11500, 'searock': 20000}
+FAR_RATIO = 0.025
 
 
-def finish(coll, obj, name, target_r, target_top, target_bot):
-    # Fit the unjoined parts so AO/tint see their individual materials and
-    # the final node has no leftover transform that could lift it off ground.
-    finish_nature(coll, name)
+# ── boulder forms (authored near final size; fit_bounds does the last few percent) ──────────
+def form_boulder_a(coll, seed):
+    main = place(voronoi_cell('ba_m', coll, seed, scale=(1.05, 0.95, 0.82), planes=13, reach=(0.66, 0.93)),
+                 (0, 0, 0.62), (0, 0, 17))
+    skirt = place(voronoi_cell('ba_s', coll, seed + 5, scale=(0.92, 0.80, 0.36), planes=8, reach=(0.62, 0.92)),
+                  (0.35, -0.25, 0.06), (4, -3, 40))
+    recipe = dict(macro=(0.06, 1.3), heights=((0, 2.4, 0.060), (1, 0.8, 0.030), (0, 0.3, 0.010)),
+                  strata=dict(bed=0.34, amp=0.016, dip=(0.12, 0.05, 1.0)), chips=0.022)
+    return [main, skirt], 3, recipe
 
 
-# ── boulders ──────────────────────────────────────────────────────────────
-def rock_lump(name, coll, r, squash, seed, material,
-              coarse=0.45, coarse_scale=1.4, fine=0.08, fine_scale=0.5,
-              subdiv=3, deci=0.6, stretch=(1.0, 1.0)):
-    """Icosphere -> dual voronoi displacement -> decimate to mixed flat facets."""
-    bm = bm_icosphere(r, subdiv)
-    carve_facets(bm, r, count=17, depth=(0.76, 0.96), seed=seed, softness=r * 0.07)
-    # Weathered bedding planes and a diagonal fault weather into the mesh;
-    # extra vertices describe relief instead of only subdividing flat faces.
-    for v in bm.verts:
-        p = v.co.copy()
-        band = math.sin(p.z * 17.0 / r + p.x * 1.7 / r + seed)
-        notch = max(0.0, band) ** 9 * 0.042
-        fault = math.exp(-((p.x + p.z * 0.22 - r * 0.18) / (r * 0.05)) ** 2) * 0.085
-        v.co *= 1.0 - notch - fault
-    bmesh.ops.scale(bm, vec=Vector((stretch[0], stretch[1], squash)), verts=bm.verts)
-    obj = obj_from_bmesh(name, bm, coll, mat(material), smooth=False)
-    # Small coherent weathering preserves the broad carved planes. Large
-    # normal displacement after carving folded adjacent facets into spikes.
-    displace_noise(obj, strength=r * coarse * 0.18, scale=coarse_scale, seed=seed)
-    displace_noise(obj, strength=fine * 0.35, scale=fine_scale, seed=seed + 31)
-    decimate(obj, deci)
-    apply_modifiers(obj)
-    return obj
+def form_boulder_b(coll, seed):
+    main = place(voronoi_cell('bb_m', coll, seed, scale=(1.45, 0.82, 0.50), planes=10, reach=(0.58, 0.90),
+                              up_bias=2.5), (0, 0, 0.62), (9, -16, 24))
+    shard = place(voronoi_cell('bb_sh', coll, seed + 9, scale=(0.40, 0.62, 0.50), planes=9, reach=(0.55, 0.88)),
+                  (0.95, 0.45, 0.42), (-18, 30, -40))
+    skirt = place(voronoi_cell('bb_s', coll, seed + 4, scale=(1.04, 0.84, 0.28), planes=8, reach=(0.6, 0.9)),
+                  (-0.45, -0.2, 0.0), (0, 0, 12))
+    recipe = dict(macro=(0.06, 1.6), heights=((1, 2.0, 0.065), (0, 0.7, 0.032), (1, 0.28, 0.011)),
+                  strata=dict(bed=0.26, amp=0.020, dip=(0.16, -0.28, 1.0)),
+                  joints=(((0.3, 0.1, 0.6), (0.85, 0.5, 0.15), 0.035, 0.09),), chips=0.03)
+    return [main, shard, skirt], 1, recipe
 
 
-def build_boulder_a(name, seed):
-    """Rounded weathered dome — soft silhouette, broad facets."""
-    coll = asset_collection(name)
-    main = rock_lump(f"{name}_m", coll, 1.0, 0.82, seed, "Rock_Grey",
-                     coarse=0.50, coarse_scale=1.0, fine=0.10, fine_scale=0.5,
-                     subdiv=5, deci=0.80)
-    main.location.z = 0.62
-    # small bury-skirt lump seating it into terrain
-    skirt = rock_lump(f"{name}_s", coll, 0.72, 0.42, seed + 5, "Rock_Grey",
-                      coarse=0.35, coarse_scale=1.1, fine=0.06, fine_scale=0.45,
-                      subdiv=4, deci=0.45, stretch=(1.25, 1.1))
-    skirt.location = Vector((0.35, -0.25, 0.02))
-    obj = [main, skirt]
-    finish(coll, obj, name, 1.443, 2.226, -0.083)
+def form_boulder_c(coll, seed):
+    lobe_l = place(voronoi_cell('bc_l', coll, seed, scale=(0.50, 0.62, 0.60), planes=11, reach=(0.66, 0.95)),
+                   (-0.33, 0.02, 0.52), (0, -8, 6))
+    lobe_r = place(voronoi_cell('bc_r', coll, seed + 3, scale=(0.48, 0.56, 0.60), planes=11, reach=(0.66, 0.95)),
+                   (0.34, -0.04, 0.50), (0, 10, -7))
+    cap = place(voronoi_cell('bc_t', coll, seed + 7, scale=(0.44, 0.40, 0.30), planes=10, reach=(0.62, 0.92),
+                             up_bias=2.0), (-0.05, 0.05, 1.12), (6, -5, 30))
+    recipe = dict(macro=(0.05, 0.9), heights=((0, 1.6, 0.045), (1, 0.6, 0.022), (0, 0.25, 0.008)),
+                  strata=dict(bed=0.22, amp=0.010, dip=(0.0, 0.1, 1.0)),
+                  # the split: a deep cleft on the lobes' meeting plane
+                  joints=(((0.0, 0.0, 0.5), (1.0, 0.0, 0.08), 0.045, 0.16),), chips=0.024)
+    return [lobe_l, lobe_r, cap], 1, recipe
 
 
-def build_boulder_b(name, seed):
-    """Angular tilted slab — hard chiseled facets, one leaning shard."""
-    coll = asset_collection(name)
-    main = rock_lump(f"{name}_m", coll, 1.0, 0.50, seed, "Rock_Grey",
-                     coarse=0.62, coarse_scale=2.3, fine=0.09, fine_scale=0.5,
-                     subdiv=5, deci=0.57, stretch=(1.45, 0.82))
-    main.rotation_euler = (math.radians(9), math.radians(-16), math.radians(24))
-    main.location.z = 0.62
-    shard = rock_lump(f"{name}_sh", coll, 0.55, 0.85, seed + 9, "Rock_Grey",
-                      coarse=0.55, coarse_scale=1.6, fine=0.08, fine_scale=0.5,
-                      subdiv=4, deci=0.5, stretch=(0.72, 1.15))
-    shard.rotation_euler = (math.radians(-18), math.radians(30), math.radians(-40))
-    shard.location = Vector((0.95, 0.45, 0.42))
-    skirt = rock_lump(f"{name}_s", coll, 0.8, 0.35, seed + 4, "Rock_Grey",
-                      coarse=0.4, coarse_scale=1.2, fine=0.06, fine_scale=0.45,
-                      subdiv=4, deci=0.45, stretch=(1.3, 1.05))
-    skirt.location = Vector((-0.45, -0.2, 0.0))
-    obj = [main, shard, skirt]
-    finish(coll, obj, name, 2.469, 3.013, -0.693)
-
-
-def build_boulder_c(name, seed):
-    """Split stack — two lobes with a dark crack, third capping stone on top."""
-    coll = asset_collection(name)
-    lobe_l = rock_lump(f"{name}_l", coll, 0.62, 0.95, seed, "Rock_Grey",
-                       coarse=0.38, coarse_scale=0.75, fine=0.08, fine_scale=0.45,
-                       subdiv=4, deci=0.98, stretch=(0.85, 1.05))
-    lobe_l.location = Vector((-0.34, 0.02, 0.52))
-    lobe_l.rotation_euler = (0, math.radians(-8), math.radians(12))
-    lobe_r = rock_lump(f"{name}_r", coll, 0.58, 1.0, seed + 3, "Rock_Grey",
-                       coarse=0.38, coarse_scale=0.7, fine=0.08, fine_scale=0.45,
-                       subdiv=4, deci=0.98, stretch=(0.9, 1.0))
-    lobe_r.location = Vector((0.36, -0.04, 0.50))
-    lobe_r.rotation_euler = (0, math.radians(10), math.radians(-15))
-    # dark crack core hidden in the split (smaller than both lobes so only the
-    # shadowed sliver shows through the gap)
-    core = obj_from_bmesh(f"{name}_k", bm_box(0.13, 0.55, 0.7), coll,
-                          mat("Rock_Dark"), smooth=False)
-    core.location = Vector((0.01, 0.0, 0.48))
-    core.rotation_euler = (0, math.radians(4), math.radians(-2))
-    cap = rock_lump(f"{name}_t", coll, 0.42, 0.72, seed + 7, "Rock_Grey",
-                    coarse=0.36, coarse_scale=0.7, fine=0.07, fine_scale=0.45,
-                    subdiv=4, deci=0.98, stretch=(1.1, 0.95))
-    cap.location = Vector((-0.05, 0.05, 1.12))
-    cap.rotation_euler = (math.radians(6), math.radians(-5), math.radians(30))
-    obj = [lobe_l, lobe_r, core, cap]
-    finish(coll, obj, name, 1.052, 1.907, -0.261)
-
-
-# ── sea stacks ────────────────────────────────────────────────────────────
-def bm_pillar(height, base_r, seed, segs=16, rings=18, taper=0.6,
-              strata=0.16, lean=0.05, cap_r=0.16,
-              undercut=0.0, undercut_z=0.55, undercut_w=0.55):
-    """A lathed, strata-banded, eroded rock column rising along +Z from 0.
-
-    - taper: how much the radius shrinks base->top (0.6 => top is 40% of base)
-    - strata: amplitude of the sedimentary radius banding
-    - lean: how far the column drifts off-axis over its height (fraction)
-    - cap_r: minimum radius fraction so the top isn't a needle point
-    - undercut: wave-eroded pinch just above the waterline (0..~0.3),
-      centered at undercut_z (m) with gaussian width undercut_w (m)
-    """
+# ── sea stacks ───────────────────────────────────────────────────────────────────────────────
+def form_searock(coll, seed, height, base_r, companions, squat):
     rng = random.Random(seed)
-    bm = bmesh.new()
-    ring_verts = []
-    lx = ly = 0.0
-    vx = rng.uniform(-0.02, 0.02)
-    vy = rng.uniform(-0.02, 0.02)
-    for j in range(rings + 1):
-        t = j / rings                       # 0 base .. 1 top
-        z = t * height
-        # radius profile: taper up, sedimentary strata bulges, gentle random wobble
-        prof = 1.0 - taper * t
-        band = 1.0 + strata * math.sin(t * math.pi * 4.5 + seed) \
-                   + strata * 0.55 * math.sin(t * math.pi * 9.0 + seed * 1.7) \
-                   + strata * 0.3 * math.sin(t * math.pi * 17.0 + seed * 2.3)
-        wob = 1.0 + rng.uniform(-0.05, 0.05)
-        r = max(base_r * cap_r, base_r * prof * band * wob)
-        if undercut > 0.0:
-            g = math.exp(-(((z - undercut_z) / undercut_w) ** 2))
-            r *= (1.0 - undercut * g)
-        # accumulate a slow lean so the stack isn't a perfect axis
-        vx = vx * 0.82 + rng.uniform(-0.02, 0.02)
-        vy = vy * 0.82 + rng.uniform(-0.02, 0.02)
-        lx += vx * (height / rings) * lean * 20.0
-        ly += vy * (height / rings) * lean * 20.0
-        verts = []
-        for s in range(segs):
-            a = (s / segs) * math.tau
-            # Continuous angular faults create coherent flutes and ledges;
-            # independent vertex jitter previously looked like crumpled foil.
-            flutes = 0.08 * math.sin(a * 5 + seed) + 0.055 * math.sin(a * 9 + t * 1.4)
-            fissure = max(0.0, math.cos(a * 3 + seed * 0.31 + t * 0.4)) ** 18 * 0.14
-            grain = (vnoise((math.cos(a) * r, math.sin(a) * r, z), 0.48, seed) - 0.5) * 0.045
-            rr = r * (1.0 + flutes - fissure + grain)
-            verts.append(bm.verts.new((lx + math.cos(a) * rr,
-                                       ly + math.sin(a) * rr, z)))
-        ring_verts.append(verts)
-    for j in range(rings):
-        a, b = ring_verts[j], ring_verts[j + 1]
-        for s in range(segs):
-            s2 = (s + 1) % segs
-            bm.faces.new((a[s], a[s2], b[s2], b[s]))
-    bm.faces.new(list(reversed(ring_verts[0])))   # bottom cap
-    bm.faces.new(list(ring_verts[-1]))            # top cap
-    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
-    return bm
-
-
-def build_searock(name, height, base_r, seed, companions, squat, envelope):
-    """Eroded sea stack: hi-res strata pillar w/ waterline undercut + companion
-    spires + wet rubble skirt. Fit to legacy bbox envelope."""
-    coll = asset_collection(name)
-    rng = random.Random(seed)
-    parts = []
-
-    # main pillar (weathered body, deep strata, waterline undercut)
-    bm = bm_pillar(height, base_r, seed,
-                   segs=34, rings=42,
-                   taper=0.5 if squat else 0.62,
-                   strata=0.24 if squat else 0.20,
-                   lean=0.04 if squat else 0.07,
-                   undercut=0.30, undercut_z=max(1.4, height * 0.18),
-                   undercut_w=max(0.6, height * 0.07))
-    main = obj_from_bmesh(f"{name}_main", bm, coll, mat("Rock_Stack"), smooth=False)
-    displace_noise(main, strength=base_r * 0.13, scale=base_r * 0.9, seed=seed)
-    displace_noise(main, strength=0.08, scale=0.5, seed=seed + 31)
-    apply_modifiers(main)
-    parts.append(main)
-
-    # a sun-bleached crown band near the top
-    crown = obj_from_bmesh(f"{name}_crown",
-                           bm_pillar(height * 0.18, base_r * (0.35 if not squat else 0.60),
-                                     seed + 91, segs=18, rings=6, taper=0.45, strata=0.10),
-                           coll, mat("Rock_Pale"), smooth=False)
-    crown.location.z = height * (0.80 if not squat else 0.58)
-    displace_noise(crown, strength=0.06, scale=0.45, seed=seed + 55)
-    apply_modifiers(crown)
-    parts.append(crown)
-
-    # companion spires clustered at the base
+    parts = sedimentary_stack('sr_main', coll, seed, height, base_r,
+                              taper=0.42 if squat else 0.58, crown=0.58 if squat else 0.30,
+                              lean=0.06 if squat else 0.11, dip_deg=rng.uniform(6, 13))
     for k in range(companions):
-        ch = height * rng.uniform(0.26, 0.55)
-        cr = base_r * rng.uniform(0.4, 0.6)
-        cbm = bm_pillar(ch, cr, seed + 200 + k, segs=16, rings=16,
-                        taper=0.6, strata=0.14, lean=0.09, cap_r=0.22,
-                        undercut=0.10, undercut_z=0.5, undercut_w=0.5)
-        spire = obj_from_bmesh(f"{name}_c{k}", cbm, coll, mat("Rock_Stack"), smooth=False)
         ang = rng.uniform(0, math.tau)
-        d = base_r * rng.uniform(0.9, 1.5)
-        spire.location = Vector((math.cos(ang) * d, math.sin(ang) * d, -0.4))
-        displace_noise(spire, strength=cr * 0.16, scale=cr * 0.9, seed=seed + k)
-        displace_noise(spire, strength=0.07, scale=0.5, seed=seed + 60 + k)
-        apply_modifiers(spire)
-        parts.append(spire)
+        d = base_r * rng.uniform(0.95, 1.45)
+        sub = sedimentary_stack(f'sr_c{k}', coll, seed + 200 + k, height * rng.uniform(0.24, 0.52),
+                                base_r * rng.uniform(0.38, 0.58), taper=0.6, crown=0.26, lean=0.14,
+                                dip_deg=rng.uniform(5, 15))
+        for s in sub:
+            s.data.transform(Matrix.Translation((math.cos(ang) * d, math.sin(ang) * d, 0)))
+        parts += sub
+    for k in range(7 + companions):  # wet rubble skirt at the waterline
+        ang = rng.uniform(0, math.tau)
+        d = base_r * rng.uniform(0.8, 1.55)
+        r = base_r * rng.uniform(0.16, 0.32)
+        parts.append(place(voronoi_cell(f'sr_rb{k}', coll, seed + 400 + k, scale=(r, r * 0.8, r * 0.55),
+                                        planes=8, reach=(0.6, 0.92), points=500),
+                           (math.cos(ang) * d, math.sin(ang) * d, rng.uniform(-0.9, -0.1)),
+                           (rng.uniform(-20, 20), rng.uniform(-20, 20), rng.uniform(0, 360))))
+    joints = []
+    for k in range(3):
+        a = rng.uniform(0, math.pi)
+        joints.append(((rng.uniform(-0.3, 0.3) * base_r, rng.uniform(-0.3, 0.3) * base_r, 0.0),
+                       (math.cos(a), math.sin(a), rng.uniform(-0.1, 0.1)), 0.10, 0.22 + 0.04 * k))
+    recipe = dict(macro=(0.30, 4.2), heights=((0, 3.4, 0.10), (1, 1.15, 0.040), (0, 0.42, 0.013)),
+                  strata=dict(bed=0.55, amp=0.05, dip=(0.10, 0.06, 1.0)), joints=tuple(joints),
+                  notch=dict(z=0.55, width=0.55 if squat else 0.62, depth=0.42 if squat else 0.55),
+                  chips=0.02)
+    return parts, 1, recipe
 
-    # wet rubble skirt grounding the cluster at the waterline
-    skirt_bm = bm_icosphere(base_r * 1.35, 4)
-    bmesh.ops.scale(skirt_bm, vec=Vector((1.0, 1.0, 0.26)), verts=skirt_bm.verts)
-    skirt = obj_from_bmesh(f"{name}_skirt", skirt_bm, coll, mat("Rock_Wet"), smooth=False)
-    skirt.location.z = base_r * 0.10
-    displace_noise(skirt, strength=base_r * 0.26, scale=base_r * 0.8, seed=seed + 7)
-    displace_noise(skirt, strength=0.08, scale=0.5, seed=seed + 71)
-    decimate(skirt, 0.5)
-    apply_modifiers(skirt)
-    parts.append(skirt)
 
-    rock = parts
-    finish(coll, rock, name, *envelope)
-    return coll, rock
+def build(name, kind, form):
+    t0 = time.time()
+    coll = asset_collection(name)
+    scratch = asset_collection(name + '_hi')
+    parts, smooth_iters, recipe = form(scratch)
+    high, voxel = fracture_cluster(parts, name + '_hi', smooth_iters=smooth_iters)
+    seed = sum(map(ord, name))
+    maxd = sculpt(high, seed, **recipe)
+    fit_bounds([high], name)
+    hi_tris = tri_count(high)
+    low = lod0(high, name, coll, TARGET[kind])
+    fit_bounds([low], name)
+    far_coll = asset_collection(name + '_far')
+    far = decimated_copy(low, name + '_far', far_coll, FAR_RATIO)
+    bpy.data.objects.remove(high, do_unlink=True)
+    is_sea = kind == 'searock'
+    zmin = min(v.co.z for v in low.data.vertices)
+    zmax = max(v.co.z for v in low.data.vertices)
+    if is_sea:
+        zones = [('Rock_Wet', lambda z, nz: z < 0.55),
+                 ('Rock_Pale', lambda z, nz, top=zmax: z > zmin + (top - zmin) * 0.80 and nz > 0.35),
+                 ('Rock_Stack', lambda z, nz: True)]
+    else:
+        zones = [('Rock_Grey', lambda z, nz: True)]
+    for c, o in ((coll, low), (far_coll, far)):
+        zone_materials(o, zones)
+        rock_finish(c, o.name, moss=0.30 if is_sea else 0.42,
+                    low_band=0.65, strata_freq=3.7 if is_sea else 9.0)
+    path = export_collection_vc(coll, name + '.glb')
+    fpath = export_collection_vc(far_coll, name + '_far.glb')
+    info, finfo = verify_glb(path), verify_glb(fpath)
+    lo, hi = BANDS[kind]
+    rep = dict(high_tris=hi_tris, voxel=round(voxel, 4), max_disp=round(maxd, 3), lod0_tris=info['tris'],
+               far_tris=finfo['tris'], materials=info['materials'], secs=round(time.time() - t0, 1))
+    print(f'ROCK {name} ' + json.dumps(rep, default=str), flush=True)
+    assert 300000 <= hi_tris <= 600000, (name, 'high sculpt', hi_tris)
+    assert lo <= info['tris'] <= hi, (name, info['tris'], BANDS[kind])
+    assert info['color0'], name
+    for c in (coll, far_coll):
+        for o in c.objects:
+            o.hide_render = True
+    return rep
 
 
 clear_default_scene()
-
-# legacy bbox envelopes (max horiz half-extent, top z, bottom z) — collider contract
-BOULDERS = [
-    ("boulder_a", 101, build_boulder_a),
-    ("boulder_b", 202, build_boulder_b),
-    ("boulder_c", 303, build_boulder_c),
+BUILDS = [
+    ('boulder_a', 'boulder', lambda c: form_boulder_a(c, 101)),
+    ('boulder_b', 'boulder', lambda c: form_boulder_b(c, 202)),
+    ('boulder_c', 'boulder', lambda c: form_boulder_c(c, 303)),
+    ('searock_a', 'searock', lambda c: form_searock(c, 404, 10.0, 3.4, 3, False)),
+    ('searock_b', 'searock', lambda c: form_searock(c, 505, 14.0, 4.2, 3, False)),
+    ('searock_c', 'searock', lambda c: form_searock(c, 606, 6.0, 2.6, 4, True)),
 ]
-# (name, authored height, base radius, seed, companion spires, squat, envelope)
-SEAROCKS = [
-    ("searock_a", 10.0, 3.4, 404, 3, False, (5.163, 10.050, -1.026)),
-    ("searock_b", 14.0, 4.2, 505, 3, False, (8.185, 14.156, -1.268)),
-    ("searock_c", 6.0, 2.6, 606, 4, True,  (4.560, 5.964, -0.785)),
-]
-
-for name, seed, builder in BOULDERS:
-    builder(name, seed)
-    print(f"built {name}")
-for name, h, br, seed, comp, squat, env in SEAROCKS:
-    build_searock(name, h, br, seed, comp, squat, env)
-    print(f"built {name}")
-
-render_nature(('boulder_b', 'searock_a'), RENDER_DIR)
+REPORT = {}
+for name, kind, form in BUILDS:
+    if ONLY and name not in ONLY:
+        continue
+    REPORT[name] = build(name, kind, form)
+print('ROCKS REPORT ' + json.dumps(REPORT, default=str))
+if RENDER_DIR:
+    for c in bpy.data.collections:
+        for o in c.objects:
+            o.hide_render = not (c.name in REPORT)
+    render_nature(tuple(n for n in ('boulder_b', 'searock_a') if n in REPORT), RENDER_DIR)
 print("ROCKS DONE")
