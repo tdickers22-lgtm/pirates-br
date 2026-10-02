@@ -86,6 +86,29 @@ export function planStands(world, filter = null) {
     },
   });
 
+  // THE SEA ARCH (b4.6d), from the water on the channel axis. Kit legs meet the
+  // ocean plane and the shore bands at the waterline, and the voussoir lining
+  // sits on the intrados; this is the stand that looks at both at once. The
+  // channel runs along the piece's local +Z, so the eye stands 46 m out on it
+  // at deck height and pitches up into the span. Needs world.kitArches (the
+  // gate reads island.kitPieces); without a kit arch the stand drops out.
+  const arch = (world.kitArches ?? [])[0];
+  if (arch) {
+    const dx = Math.sin(arch.yaw ?? 0);
+    const dz = Math.cos(arch.yaw ?? 0);
+    stands.push({
+      id: 'sea-arch',
+      label: 'sail-through sea arch (legs vs ocean, voussoirs on the intrados)',
+      cam: {
+        x: arch.x + dx * 46,
+        y: 3.2,
+        z: arch.z + dz * 46,
+        pitch: 0.24,
+        aimAt: { x: arch.x, z: arch.z },
+      },
+    });
+  }
+
   // ALONGSIDE THE HULL at water level: the waterline collar against the ocean
   // surface, plus the hole decals and plank patches at the distance a boarder
   // sees them.

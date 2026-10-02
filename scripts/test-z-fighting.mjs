@@ -121,6 +121,10 @@ async function main() {
     if (detached) console.log('  post chain detached for this run (it can smear a tie, not create one)');
 
     const world = await readWorld(page);
+    // The cliff kit (b4.6d) lives on island.kitPieces; readWorld is the shared
+    // perf reader and does not carry it, so the arch stand reads it here.
+    world.kitArches = await page.evaluate(() => (window.__piratesBR.state.islands ?? [])
+      .flatMap((i) => (i.kitPieces ?? []).filter((k) => k.key === 'sea_arch_a')));
     const stands = planStands(world, SCENE_FILTER);
     const tods = Object.entries(TIME_OF_DAY).filter(([k]) => !TOD_FILTER || TOD_FILTER.includes(k));
     console.log(`  ${stands.length} stands x ${tods.length} times of day x ${POSES} poses\n`);
