@@ -4,7 +4,7 @@ import { getHullContactChain, getHullWaterlineOutline, isPointInRiggingCanvas } 
 import { cargoBallastFactor } from '../../shared/cargo.js';
 import { truceSparesContact, truceBlocksBounty } from '../../shared/truce.js';
 import type { GangwayPlan } from '../../shared/interactions.js';
-import { DOCK_DECK_RISE, toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, getShipFloorYAt, getShipHoldHalfWidth, isInsideShipHoldFootprint, countOpenHoles, shipLocalUpY } from '../../shared/interactions.js';
+import { DOCK_DECK_RISE, toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, getShipFloorYAt, getShipHoldHalfWidth, getHelmWheelLocal, isInsideShipHoldFootprint, countOpenHoles, shipLocalUpY } from '../../shared/interactions.js';
 import { drawnIslandSurfaceY } from '../../shared/terrainGrid.js';
 import { beginShipFounder, floodListTargets, floodWaterMass, openShipHoles, stepShipFounder, updateShipFlooding } from './FloodSystem.js';
 import { floodSettle } from '../../shared/flooding/floodModel.js';
@@ -4015,7 +4015,7 @@ export class PhysicsSystem {
 
     // Helm furniture — the wheel post and the compass binnacle are solid, so you
     // can't stand inside the wheel or clip through the binnacle.
-    pushCircle(0, -stats.length * 0.315, PLAYER.RADIUS + 0.16);          // wheel post
+    pushCircle(0, getHelmWheelLocal(stats).z, PLAYER.RADIUS + 0.16);       // wheel post (b4.3f: shared with the drawn wheel)
     pushCircle(stats.width * 0.19, -stats.length * 0.205, PLAYER.RADIUS + 0.24); // binnacle
 
     // Companionway coamings — a thin wall on port, starboard and the AFT edge of

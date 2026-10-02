@@ -329,6 +329,28 @@ for (const type of ['sloop', 'brigantine', 'galleon']) {
     expect(`[k] ${type} ${kind}: grips ${hBand[0]}-${hBand[1]} m over the spline-hull deck`, above >= hBand[0] && above <= hBand[1], above.toFixed(3));
     expect(`[k] ${type} ${kind}: grips ${rBand[0]}-${rBand[1]} m from the shared stand spot`, reach >= rBand[0] && reach <= rBand[1], reach.toFixed(3));
   }
+  // [k] f2: the drawn wheel IS the server's wheel post (getHelmWheelLocal), every
+  // gun's muzzle still clears its gunport after the inboard pull, and the mast
+  // ladder's rung pitch stays within the climber's reach (<= 1.4 m) on every class.
+  const wheelZ = mesh.root.worldToLocal(mesh.wheel.getWorldPosition(new THREE.Vector3())).z;
+  expect(`[k] ${type}: wheel hub on getHelmWheelLocal (the server's wheel-post collider)`, Math.abs(wheelZ - inter.getHelmWheelLocal(stats).z) < 0.005, `${wheelZ.toFixed(3)} vs ${inter.getHelmWheelLocal(stats).z.toFixed(3)}`);
+  const ports = kit.shipKitSockets(type).filter((k) => k.part === 'gunport');
+  let worstClear = Infinity;
+  for (const cm of mesh.cannonMeshes) {
+    const box = new THREE.Box3();
+    cm.pitchPivot.traverse((o) => { if (o.isMesh && o.visible !== false) { o.geometry.computeBoundingBox(); box.union(o.geometry.boundingBox.clone().applyMatrix4(mesh.root.matrixWorld.clone().invert().multiply(o.matrixWorld))); } });
+    const c = box.getCenter(new THREE.Vector3());
+    const port = ports.reduce((b, k) => (Math.abs(k.pos[2] - c.z) + Math.abs(k.pos[0] - c.x) < Math.abs(b.pos[2] - c.z) + Math.abs(b.pos[0] - c.x) ? k : b), ports[0]);
+    const outer = Math.sign(port.pos[0]) > 0 ? box.max.x : -box.min.x;
+    worstClear = Math.min(worstClear, outer - Math.abs(port.pos[0]));
+  }
+  console.log(`  ${type}: worst muzzle clearance past its gunport ${worstClear.toFixed(3)} m`);
+  expect(`[k] ${type}: every muzzle pokes >= 0.15 m past its gunport`, worstClear >= 0.15, worstClear.toFixed(3));
+  const ladder = mesh.root.getObjectByName('mast-ladder-grips')?.userData?.ikGrips?.points ?? [];
+  const pitch = ladder.length >= 4 ? Math.max(...ladder.slice(2).map((p, i) => i % 2 ? 0 : p.y - ladder[i].y)) : Infinity;
+  expect(`[k] ${type}: mast ladder rung pitch <= 1.4 m`, pitch <= 1.4 + 1e-6, pitch.toFixed(3));
+  const physSrc = fs.readFileSync(path.join(ROOT, 'src/server/systems/PhysicsSystem.ts'), 'utf8');
+  expect(`[k] PhysicsSystem's wheel post reads getHelmWheelLocal`, /pushCircle\(0, getHelmWheelLocal\(stats\)\.z/.test(physSrc));
 }
 
 // ── [h] shared geometry survives clear() ────────────────────────────────────

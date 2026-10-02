@@ -431,6 +431,15 @@ export function getHelmControlLocal(stats: Pick<ShipStats, 'length'>): ShipLocal
   };
 }
 
+/** b4.3f: the wheel stands a fixed arm's reach FORWARD of the helm stand spot,
+ *  on every class (the old -0.315 L put it 0.66 / 0.88 / 1.21 m ahead of the
+ *  helmsman on sloop / brigantine / galleon, past what the IK lean can close).
+ *  Shared so the server's wheel-post collider and the drawn wheel agree. */
+export const HELM_WHEEL_REACH = 0.62;
+export function getHelmWheelLocal(stats: Pick<ShipStats, 'length'>): ShipLocalPoint {
+  return { x: 0, z: getHelmControlLocal(stats).z + HELM_WHEEL_REACH };
+}
+
 export function getSailControlLocal(stats: Pick<ShipStats, 'length' | 'mastCount' | 'width'>): ShipLocalPoint {
   return getSailStationLocal(stats);
 }

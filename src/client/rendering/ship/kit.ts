@@ -3,7 +3,7 @@ import { SHIP_STATS } from '../../../shared/constants/index.js';
 import type { ShipType } from '../../../shared/types/index.js';
 import { getHullProfile, hullSplineUAtZ, sampleHullSurface } from '../../../shared/hull.js';
 import type { HullProfile } from '../../../shared/hull.js';
-import { getCannonDeckLocalPosition } from '../../../shared/interactions.js';
+import { getCannonDeckLocalPosition, getHelmWheelLocal } from '../../../shared/interactions.js';
 import { getShipDeckY } from '../../../shared/utils/index.js';
 import { rudderMount } from './stern.js';
 
@@ -440,4 +440,24 @@ export function stationGripsFallback(kind: StationGripKind, spokes = 8, rimR = 0
     return { kind, points: Array.from({ length: 8 }, (_, i) => new THREE.Vector3(Math.cos(i / 8 * Math.PI * 2) * 0.66, 0.88, -Math.sin(i / 8 * Math.PI * 2) * 0.66)) };
   }
   return { kind, points: [new THREE.Vector3(-0.28, 0.1, 0.2), new THREE.Vector3(-0.28, 0.1, -0.2)] };
+}
+
+// ── Station holders on the spline hull (b4.3f2) ─────────────────────────────
+// Where the renderer hangs the wheel and the guns, derived from the SHARED stand
+// spots so a body standing on the spot can close its hands on the grips above.
+/** Cannon pivot (trunnions) sits this far outboard of the gunner's stand spot:
+ *  the brigantine's proven reach (rig-contacts green), now on every class. */
+export const CANNON_STAND_REACH = 1.2;
+export interface StationAnchors {
+  /** Ship-local z of the wheel hub (and its post): getHelmWheelLocal. */
+  helmWheelZ: number;
+  /** |x| of gun `index`'s pivot: on the rail (W/2 + 0.06), pulled inboard where
+   *  the deck narrows so the breech stays within reach of its stand spot. */
+  cannonX(index: number): number;
+}
+export function stationAnchors(stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS]): StationAnchors {
+  return {
+    helmWheelZ: getHelmWheelLocal(stats).z,
+    cannonX: (index) => Math.min(stats.width * 0.5 + 0.06, Math.abs(getCannonDeckLocalPosition(stats, index).x) + CANNON_STAND_REACH),
+  };
 }
