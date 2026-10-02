@@ -235,6 +235,11 @@ export const LOGIC = [
   // surface within 1 cm, LOD0/LOD1/LOD2/far tris + draws, low 60k and phone
   // 45k own-hull caps, LOD0 draw ratchet. ~1.5 s.
   quick(tsx('test-ship-lod-budget.mjs')),
+  // b4.2g / ships-03: GPU sail cloth model through its JS mirror (fill law,
+  // aback flip <= 0.4 s, belly 10-14% chord at 40% down, luff mean <= 2%,
+  // flutter 3-6 Hz at 2-4% chord, analytic = FD normals, hoist folds, tears,
+  // no CPU cloth / computeVertexNormals in the sail path). ~0.3 s.
+  quick(tsx('test-sail-cloth-model.mjs')),
   // PHYS-02 / physics-02: grounding sampled the KEEL LINE, so a hull laid
   // beam-on to a cliff sailed her whole broadside into the rock and the server
   // called it clear water. 30,240 placements round all 14 islands; ~4 s, so

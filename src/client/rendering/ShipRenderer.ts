@@ -43,7 +43,8 @@ import { applyPlankDetail, makePlankUniforms, addStrakeSpace, applyTimberEnvLift
 import { releaseShipGeometry } from './ship/geometry.js';
 import { selectShipLod, shipLodKey, SHIP_LOD_BANDS, SHIP_LOD_HYSTERESIS, type ShipLodLevel } from './ship/lod.js';
 import { buildRudder, buildSternCastle } from './ship/stern.js';
-import { buildRig, updateSailCloth } from './ship/sails.js';
+import { buildRig } from './ship/sails.js';
+import { SAIL_BELLY, SAIL_CLOTH_GRID, makeLodSailCard, sailFillTarget, sailLuff01, sailWind01, setSailClothUniforms, stepSailFill, type SailClothUniforms } from './ship/sailCloth.js';
 import { updateRigging, type Rigging } from './ship/rigging.js';
 import { buildWakeSurface, writeWakeSurface, setArmsVisible, makeWakeFrame, ARM_FACTOR_FLOOR, buildWaterlineCollar, seatWaterlineCollar, type WakeSurface, type WakeFrame } from './ship/wake.js';
 import { makeLoftedSlabGeometry, makeSheerRunGeometry, sheerHalfWidthAt, sheerZRange, makeHullStrakeGeometry, makeSplineHullGeometry, makeStairRampGeometry, makeWaterlineFoamTexture, mergeStaticMeshes, bakeVertexColorMerge, NO_MERGE_EXCLUDE } from './ship/geometry.js';
@@ -764,7 +765,8 @@ export class ShipRenderer {
     const slots = lodSailSlots(rigPlan);
     const sailMat = new THREE.MeshStandardMaterial({ color: 0xeadfbf, roughness: 0.8, side: THREE.DoubleSide, map: this.getTeamSailTexture(ship.teamColor) });
     sailMat.name = 'lod2-sail-canvas';
-    const sails = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), sailMat, slots.length);
+    // b4.2g: LOD2 sails are a 6x4 bellied card, not a flat board.
+    const sails = new THREE.InstancedMesh(makeLodSailCard(SAIL_CLOTH_GRID.lod2[0], SAIL_CLOTH_GRID.lod2[1], W * 0.09), sailMat, slots.length);
     sails.name = 'lod2-sails';
     sails.userData.lod2 = slots;
     group.add(sails);
@@ -815,15 +817,9 @@ export class ShipRenderer {
     const rigPlan = getShipRigPlan(stats);
     const mastStartZ = rigPlan[0].z;
     const slots = lodSailSlots(rigPlan);
-    // A bellied sail (forward bulge to 9% of the beam), not LOD2's flat card:
-    // a unit card scaled per instance, the belly in metres.
-    const sailGeo = new THREE.PlaneGeometry(1, 1, 6, 4);
-    const sp = sailGeo.attributes.position;
-    for (let i = 0; i < sp.count; i++) {
-      const x = sp.getX(i) / 0.5, y = sp.getY(i) / 0.5;
-      sp.setZ(i, W * 0.09 * (1 - x * x) * (1 - 0.6 * y * y));
-    }
-    sailGeo.computeVertexNormals();
+    // A bellied sail (forward bulge to 9% of the beam) on the LOD1 12x8 grid:
+    // a unit card scaled per instance, the belly in metres (b4.2g).
+    const sailGeo = makeLodSailCard(SAIL_CLOTH_GRID.lod1[0], SAIL_CLOTH_GRID.lod1[1], W * 0.09);
     const sailMat = new THREE.MeshStandardMaterial({ color: 0xeadfbf, roughness: 0.8, side: THREE.DoubleSide, map: this.getTeamSailTexture(ship.teamColor) });
     sailMat.name = 'lod1-sail-canvas';
     const sails = new THREE.InstancedMesh(sailGeo, sailMat, slots.length);
@@ -3702,6 +3698,12 @@ void main() {
         const hx = ship.position.x + hz * sn, hzw = ship.position.z + hz * c;
         helmView = (cameraPosition.x - hx) ** 2 + (cameraPosition.z - hzw) ** 2 < 1.6 * 1.6;
       }
+      // The wind the canvas FEELS (true wind minus the hull's own way): the
+      // sail cloth fill and the masthead flag below both read it.
+      const apparent = apparentWindLocal(
+        wind.direction, wind.strength, ship.rotation, ship.velocity.x, ship.velocity.z, this.apparentWind,
+      );
+      const clothWind01 = sailWind01(apparent.speed);
       for (let s = 0; s < mesh.sails.length; s++) {
         const sail = mesh.sails[s];
         const rigKind = sail.userData.rigKind as RigSailKind | undefined;
@@ -3741,21 +3743,44 @@ void main() {
           sail.rotation.y += angleWrap(targetSailYaw - sail.rotation.y) * sailAlpha;
         }
         sail.rotation.x = THREE.MathUtils.lerp(sail.rotation.x, targetSailPitch, sailAlpha);
-        sail.position.y = THREE.MathUtils.lerp(sail.position.y, targetSailY, sailAlpha);
-        sail.scale.y = THREE.MathUtils.lerp(sail.scale.y, deployedHeight, sailAlpha);
-        // Billow puffs the sail outward along its normal — that's the +Z axis in its
-        // own local frame (set up at construction). scale.z grows the billow depth.
-        const billow = Math.sin(t * 1.2 + phaseSeed * 0.3) * (0.12 + trimCatch * 0.2) * kindHeight * sailIntegrity;
-        sail.scale.z = THREE.MathUtils.lerp(sail.scale.z, 1 + billow, sailAlpha);
-        if (sail.visible) {
-          if (sail.userData.sailKind === 'stay') {
-            // Jib has no cloth grid — a leech shiver keeps it alive, stronger when
+        const cloth = sail.userData.sailCloth as SailClothUniforms | undefined;
+        if (cloth) {
+          // b4.2g GPU cloth (ship/sailCloth.ts): the belly is signed by the
+          // apparent wind against the DRAWN brace (taken aback = wind on the
+          // forward face, belly aft), chased at SAIL_FILL_RATE; the hoist
+          // gathers the cloth under the yard in the shader, so the mesh never
+          // moves or squashes; chainshot damage cuts holes from sailIntegrity.
+          const sailYaw = trimPivot ? trimPivot.rotation.y : sail.rotation.y;
+          const fillTarget = sailFillTarget(apparent.localYaw, apparent.speed, sailYaw, trimCatch, luffing);
+          const fill = stepSailFill(sail.userData.clothFill as number, fillTarget, dt);
+          sail.userData.clothFill = fill;
+          const prevHoist = typeof sail.userData.clothHoist === 'number' ? sail.userData.clothHoist : deployedHeight;
+          const hoist = Math.abs(prevHoist - deployedHeight) < 1e-4 ? deployedHeight : THREE.MathUtils.lerp(prevHoist, deployedHeight, sailAlpha);
+          sail.userData.clothHoist = hoist;
+          if (sail.visible) {
+            setSailClothUniforms(cloth, fill, sailLuff01(fill, luffing), hoist, t, clothWind01, sailIntegrity);
+            const trim = sail.userData.swiftTrim as THREE.Object3D | null;
+            if (trim && trim.visible) {
+              // Swift-sail paint rides the gathered cloth: top pinned at the
+              // yard, pushed out to the belly's mean depth.
+              trim.scale.y = hoist;
+              trim.position.y = hoistHeight * 0.5 * (1 - hoist);
+              trim.position.z = fill * SAIL_BELLY * cloth.uCloth1.value.w * hoist * 0.5;
+            }
+          }
+        } else {
+          sail.position.y = THREE.MathUtils.lerp(sail.position.y, targetSailY, sailAlpha);
+          sail.scale.y = THREE.MathUtils.lerp(sail.scale.y, deployedHeight, sailAlpha);
+          // Stay sails (jib, spanker) keep a scale.z belly, now steady and
+          // driven by the apparent wind and the trim, not a 5 s breathing clock.
+          const billow = (0.06 + 0.2 * trimCatch * clothWind01) * kindHeight * sailIntegrity;
+          sail.scale.z = THREE.MathUtils.lerp(sail.scale.z, 1 + billow, sailAlpha);
+          if (sail.visible) {
+            // A leech shiver keeps the stay sail alive, stronger when
             // depowered and hardest when luffing.
             const shiver = luffing ? 0.055 : 0.012 + (1 - trimCatch) * 0.028;
             const freq = luffing ? 13.5 : 7.4;
             sail.rotation.z = Math.sin(t * freq + phaseSeed * 0.5) * shiver * ship.sailHeight;
-          } else {
-            this.updateSailCloth(sail, t, wind.strength, trimCatch, ship.sailHeight, sailIntegrity, luffing);
           }
         }
       }
@@ -3776,9 +3801,6 @@ void main() {
       // a run at the wind's own speed kills the apparent wind, and ripple
       // harder the faster you sail and the worse the weather. Phase is per-ship
       // (id hash), so a fleet never flutters in unison.
-      const apparent = apparentWindLocal(
-        wind.direction, wind.strength, ship.rotation, ship.velocity.x, ship.velocity.z, this.apparentWind,
-      );
       const flagYaw = flagPivotYaw(apparent.localYaw);
       const slack = flagSlack(apparent.speed);
       mesh.flag.pivot.rotation.y = flagYaw;
@@ -4239,18 +4261,6 @@ void main() {
   }
 
   /** CPU cloth step (ship/sails.ts), staggered by this renderer's frame counter. */
-  private updateSailCloth(
-    sail: THREE.Mesh,
-    t: number,
-    windStrength: number,
-    trimCatch: number,
-    sailHeight: number,
-    sailIntegrity: number,
-    luffing = false,
-  ) {
-    updateSailCloth(sail, t, windStrength, trimCatch, sailHeight, sailIntegrity, luffing, this.frameIndex);
-  }
-
   private createFireParticles(): THREE.Points {
     const count = 50;
     const geo = new THREE.BufferGeometry();

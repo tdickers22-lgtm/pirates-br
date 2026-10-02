@@ -92,6 +92,13 @@ export function woodTexture(w: number, h: number, variant: WoodVariant = 'hull')
   return finishCanvasTexture(woodCanvas(w, h, variant));
 }
 
+/**
+ * Sail canvas (b4.2g): vertical cloth panels (about 0.6 m on a 12 m yard, so
+ * 20 across the 256 px canvas) with doubled seams, a bolt rope round the
+ * edge, two reef bands with reef points under the head, grime that darkens
+ * toward the foot, and the painted team band across the lower third. No
+ * blotches. The canvas top is the sail head (flipY maps it to v = 1).
+ */
 export function sailTexture(teamColor?: number, seed = 0x5a11 ^ ((teamColor ?? 0) >>> 0)): THREE.CanvasTexture {
   const rnd = textureRng(seed);
   const canvas = document.createElement('canvas');
@@ -99,24 +106,45 @@ export function sailTexture(teamColor?: number, seed = 0x5a11 ^ ((teamColor ?? 0
   const ctx = canvas.getContext('2d')!;
   ctx.fillStyle = '#EEE0B8';
   ctx.fillRect(0, 0, 256, 256);
-  // Worn patches
-  ctx.fillStyle = '#D8C890';
-  for (let i = 0; i < 6; i++) {
-    ctx.beginPath();
-    ctx.arc(rnd() * 256, rnd() * 256, 15 + rnd() * 28, 0, Math.PI * 2);
-    ctx.fill();
+  // Panels: each cloth strip a hair different in tone (bolts from different
+  // looms), then the seam: a darker overlap with a stitch line either side.
+  const panels = 20;
+  const pw = 256 / panels;
+  for (let i = 0; i < panels; i++) {
+    const tone = Math.round((rnd() - 0.5) * 10);
+    ctx.fillStyle = `rgb(${238 + tone},${224 + tone},${184 + tone})`;
+    ctx.fillRect(i * pw, 0, pw, 256);
   }
-  // Horizontal stitch lines
-  ctx.strokeStyle = '#B8A050';
-  ctx.lineWidth = 1.5;
-  for (let y = 28; y < 256; y += 28) {
-    ctx.beginPath();
-    ctx.moveTo(0, y + (rnd() - 0.5) * 4);
-    ctx.lineTo(256, y + (rnd() - 0.5) * 4);
-    ctx.stroke();
+  for (let i = 1; i < panels; i++) {
+    const x = i * pw + (rnd() - 0.5) * 0.6;
+    ctx.fillStyle = 'rgba(150,128,80,0.30)';
+    ctx.fillRect(x - 1, 0, 2, 256);
+    ctx.fillStyle = 'rgba(120,100,60,0.35)';
+    ctx.fillRect(x - 2.2, 0, 0.6, 256);
+    ctx.fillRect(x + 1.6, 0, 0.6, 256);
   }
-  // Team emblem: painted band across the lower third — team readability without
-  // tinting the whole canvas.
+  // Grime: weather and spray darken the foot and the clews.
+  const grime = ctx.createLinearGradient(0, 0, 0, 256);
+  grime.addColorStop(0, 'rgba(90,70,40,0.0)');
+  grime.addColorStop(0.55, 'rgba(90,70,40,0.04)');
+  grime.addColorStop(1, 'rgba(80,62,34,0.22)');
+  ctx.fillStyle = grime;
+  ctx.fillRect(0, 0, 256, 256);
+  for (const cx of [0, 256]) {
+    const g = ctx.createRadialGradient(cx, 256, 0, cx, 256, 70);
+    g.addColorStop(0, 'rgba(70,55,30,0.22)');
+    g.addColorStop(1, 'rgba(70,55,30,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 150, 256, 106);
+  }
+  // Reef bands under the head: a doubled cloth strip and a row of reef points.
+  for (const y of [34, 66]) {
+    ctx.fillStyle = 'rgba(160,138,90,0.30)';
+    ctx.fillRect(0, y - 3, 256, 6);
+    ctx.fillStyle = '#6b5836';
+    for (let x = 6; x < 256; x += 12.8) ctx.fillRect(x, y - 1, 1.6, 6 + rnd() * 2);
+  }
+  // Team emblem: painted band across the lower third (team read at distance).
   if (teamColor !== undefined) {
     const hex = `#${teamColor.toString(16).padStart(6, '0')}`;
     ctx.globalAlpha = 0.82;
@@ -126,6 +154,13 @@ export function sailTexture(teamColor?: number, seed = 0x5a11 ^ ((teamColor ?? 0
     ctx.fillRect(0, 210, 256, 7);
     ctx.globalAlpha = 1;
   }
+  // Bolt rope: the roped edge all round (drawn last so it sits on the band).
+  ctx.strokeStyle = '#8a7449';
+  ctx.lineWidth = 4;
+  ctx.strokeRect(2, 2, 252, 252);
+  ctx.strokeStyle = 'rgba(60,46,24,0.5)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(4.5, 4.5, 247, 247);
   return finishCanvasTexture(canvas);
 }
 
