@@ -81,6 +81,9 @@ export const ASSET_NAMES = [
   'basalt_columns_a_lods', 'searock_d_lods', 'searock_e_lods', 'searock_f_lods',
   'searock_g_lods', 'strata_slab_a_lods', 'strata_slab_b_lods', 'strata_slab_c_lods', 'spire_a_lods',
   'spire_b_lods', 'spire_c_lods', 'reef_a_lods', 'reef_b_lods', 'reef_c_lods',
+  // Climb kit (b4.7b, build_poi_kit.py): rail/rung/rope/knot/stake nodes Landmarks.buildRopeLadder
+  // instances along island.climbs. WORLD tier: the routes are mountable from tick 0.
+  'climb_kit',
 ] as const;
 
 export type AssetName = (typeof ASSET_NAMES)[number];
