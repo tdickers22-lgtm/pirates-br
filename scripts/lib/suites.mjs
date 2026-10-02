@@ -294,6 +294,8 @@ export const LOGIC = [
   // lush/tropical/crescent island, >= 3 ponds that hold water, >= 6 tide shelves, wading 0.7x, 0 new programs (~0.5 s).
   quick(tsx('test-inland-water.mjs')),
   quick(tsx('test-island-climb.mjs')),
+  // b4.7c POIs (islands-04): count per island by the radius table, footprints clear, reachable from the landing, stamp/loot/trail hooks (~2.5 s, two world gens).
+  tsx('test-island-props-poi.mjs'),
   // b4.6 cliff kit (islands-02/08/14): sea_arch_a sail-through + bridge deck from the GLBs, and the
   // b4.6c convex-hull colliders (budget, enclose, face, hitscan rays, walker marches, flat back
   // seated in the hill, galleon under the arch, client/server parity). ~2.8 s, not quick.

@@ -544,7 +544,7 @@ export function buildSecondaryWreck(ctx: IslandBuildCtx) {
 export function buildTrails(ctx: IslandBuildCtx) {
   const { island, group, rng, lowDetail, boulderGeo } = ctx;
   {
-    type WP = { x: number; z: number; kind: 'dock' | 'tavern' | 'npc' | 'upgrade' };
+    type WP = { x: number; z: number; kind: 'dock' | 'tavern' | 'npc' | 'upgrade' | 'poi' };
     const waypoints: WP[] = [];
     if (island.dock) waypoints.push({ x: island.dock.respawnPoint.x, z: island.dock.respawnPoint.z, kind: 'dock' });
     if (island.tavern) {
@@ -561,6 +561,10 @@ export function buildTrails(ctx: IslandBuildCtx) {
     for (const npc of island.npcs) {
       if (npc.role === 'bartender') continue; // bartender is inside the tavern
       waypoints.push({ x: npc.position.x, z: npc.position.z, kind: 'npc' });
+    }
+    // b4.7c trail links: every POI (server placement/pois.ts, island.pois) joins the path network at its entry.
+    for (const poi of (island as { pois?: ReadonlyArray<{ link: { x: number; z: number } }> }).pois ?? []) {
+      waypoints.push({ x: poi.link.x, z: poi.link.z, kind: 'poi' });
     }
 
     if (waypoints.length >= 2) {
