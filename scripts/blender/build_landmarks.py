@@ -719,82 +719,176 @@ def build_standing_stones(name="standing_stones"):
 # ═════════════════════════════════════════════════════════════
 # LANTERN POST — kept design, beveled + AO re-export
 # ═════════════════════════════════════════════════════════════
-def build_lantern_post(name="lantern_post"):
-    coll = asset_collection(name)
-    parts, bev = [], []
-    bm = bm_cylinder(0.09, 0.07, 2.3, segs=8)
-    bmesh.ops.transform(bm, matrix=Matrix.Translation((0, 0, 1.15)) @
-                        Matrix.Rotation(0.05, 4, 'X'), verts=bm.verts)
-    o = obj_from_bmesh(f"{name}_post", bm, coll, mat("Wood_Dark"), smooth=True)
-    parts.append(o); bev.append(o)
-    bm = bm_box(0.7, 0.08, 0.08)
-    bmesh.ops.transform(bm, matrix=Matrix.Translation((0.3, 0, 2.25)), verts=bm.verts)
-    o = obj_from_bmesh(f"{name}_arm", bm, coll, mat("Wood_Dark"))
-    parts.append(o); bev.append(o)
-    # small angled knee brace under the arm
-    o = box_beam(coll, f"{name}_knee", (0.06, 0, 1.95), (0.42, 0, 2.2), 0.05, 0.05, mat("Wood_Dark"))
-    parts.append(o); bev.append(o)
-    # ── the lantern itself ──────────────────────────────────────
-    # Was a SOLID 0.22 iron box with the glass hidden INSIDE it: dark albedo
-    # times zero visible glass = a featureless black box hanging off the arm
-    # (the "black prop family" audit). Rebuilt as a real caged lantern — glass
-    # is the outer surface, the iron is four corner bars + pan + roof, so the
-    # silhouette reads as an object from any angle.
-    LX, LZ = 0.62, 2.0
-    iron, glass = mat("Metal_Iron"), mat("Lantern_Glass")
+LP_BEV = 2
 
-    # glass body (the widest part — it is what you actually see)
+
+def _lp_box(coll, name, w, d, h, M, mname, bevel=0.012, cuts=0, jitter=0.0, seed=0, smooth=True):
+    """Bevelled smooth box (one shared vertex per corner after the 2-segment bevel); `cuts` loops
+    along its length and `jitter` give a hand-hewn, not machined, member."""
+    bm = bm_box(w, d, h)
+    if cuts:
+        ed = [e for e in bm.edges if abs(e.verts[0].co.z - e.verts[1].co.z) > h * 0.5]
+        bmesh.ops.subdivide_edges(bm, edges=ed, cuts=cuts, use_grid_fill=True)
+    if jitter:
+        rng = random.Random(seed)
+        rows = {}
+        for v in bm.verts:
+            rows.setdefault(round(v.co.z, 4), []).append(v)
+        for zk, vs in rows.items():
+            dx, dy = rng.uniform(-jitter, jitter), rng.uniform(-jitter, jitter)
+            for v in vs:
+                v.co.x += dx + rng.uniform(-0.3, 0.3) * jitter
+                v.co.y += dy + rng.uniform(-0.3, 0.3) * jitter
+    bmesh.ops.transform(bm, matrix=M, verts=bm.verts)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    o = obj_from_bmesh(name, bm, coll, mat(mname), smooth=smooth)
+    if bevel:
+        bevel_obj(o, width=bevel, segments=LP_BEV)
+        apply_modifiers(o)
+    return o
+
+
+def _lp_nail(coll, name, loc, normal, r=0.011, h=0.006):
+    """Forged square nail / rivet head, sitting ON the surface (not half buried)."""
+    bm = bm_cylinder(r, r * 0.7, h, segs=4)
+    q = Vector(normal).normalized().to_track_quat('Z', 'Y')
+    bmesh.ops.transform(bm, matrix=Matrix.Translation(Vector(loc) + Vector(normal).normalized() * (h / 2)) @
+                        q.to_matrix().to_4x4() @ Matrix.Rotation(math.pi / 4, 4, 'Z'), verts=bm.verts)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    return obj_from_bmesh(name, bm, coll, mat("Metal_Iron"), smooth=False)
+
+
+def _lp_torus(coll, name, R, r, M, mname, nu=16, nv=5, arc=2 * math.pi):
+    """Torus (or an open arc of one, capped) in the XZ plane before M."""
+    bm = bmesh.new()
+    closed = arc >= 2 * math.pi - 1e-6
+    nring = nu if closed else nu + 1
+    rows = []
+    for i in range(nring):
+        a = arc * i / nu
+        row = []
+        for j in range(nv):
+            b = 2 * math.pi * j / nv
+            rr = R + r * math.cos(b)
+            row.append(bm.verts.new((rr * math.cos(a), r * math.sin(b), rr * math.sin(a))))
+        rows.append(row)
+    for i in range(nu):
+        i2 = (i + 1) % nring
+        for j in range(nv):
+            j2 = (j + 1) % nv
+            bm.faces.new((rows[i][j], rows[i2][j], rows[i2][j2], rows[i][j2]))
+    if not closed:
+        bm.faces.new(rows[0])
+        bm.faces.new(list(reversed(rows[-1])))
+    bmesh.ops.transform(bm, matrix=M, verts=bm.verts)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    return obj_from_bmesh(name, bm, coll, mat(mname), smooth=True)
+
+
+def build_lantern_post(name="lantern_post"):
+    """Lantern post v2 (b4.5c, assets-10): a hand-hewn square post (adze facets along its length,
+    2-seg bevels, a chamfered cap and a flared foot), a hewn arm with a bevelled end, an angled knee
+    brace, an iron L-strap at the joint with forged nail heads, an S-hook on a ring; the lantern
+    is a real caged lantern: glass panes as the outer surface (Lantern_Glass, emissive), bevelled
+    corner bars, a mid cage band, a hinged door strap and latch, drip pan, flared hipped roof with
+    a vented flue and cap, and a round bail through the hook. A coil of rope hangs on a peg under
+    the arm. Smooth shared-vertex solids (verts/tris <= 1.3), ~3-4k tris, v1 bounds."""
+    coll = asset_collection(name)
+    parts = []
+    lean = Matrix.Rotation(0.012, 4, "X")   # v1 leaned 0.05 rad while the arm stayed upright: the arm missed the post top
+    # hewn post, flared foot and chamfered cap
+    parts.append(_lp_box(coll, f"{name}_post", 0.15, 0.15, 2.22, lean @ Matrix.Translation((0, 0, 1.13)),
+                         "Wood_Dark", bevel=0.018, cuts=7, jitter=0.006, seed=3))
+    parts.append(_lp_box(coll, f"{name}_foot", 0.2, 0.2, 0.16, Matrix.Translation((0, 0, 0.08)),
+                         "Wood_Dark", bevel=0.03, cuts=1, jitter=0.008, seed=4))
+    parts.append(_lp_box(coll, f"{name}_cap", 0.17, 0.17, 0.05, lean @ Matrix.Translation((0, 0, 2.265)),
+                         "Wood_Dark", bevel=0.02))
+    # arm (hewn, through the post) + knee brace
+    parts.append(_lp_box(coll, f"{name}_arm", 0.78, 0.085, 0.09, Matrix.Translation((0.31, 0, 2.2)),
+                         "Wood_Dark", bevel=0.014, cuts=0))
+    p1, p2 = Vector((0.07, 0, 1.9)), Vector((0.42, 0, 2.16))
+    dd = p2 - p1
+    parts.append(_lp_box(coll, f"{name}_knee", 0.055, 0.055, dd.length + 0.03,
+                         Matrix.Translation((p1 + p2) / 2) @ dd.to_track_quat('Z', 'Y').to_matrix().to_4x4(),
+                         "Wood_Mid", bevel=0.01))
+    # iron L-strap over the arm/post joint (both faces) + forged nail heads
+    for sy in (-1, 1):
+        yy = sy * 0.0465
+        parts.append(_lp_box(coll, f"{name}_strapv{sy}", 0.05, 0.006, 0.34,
+                             Matrix.Translation((0.0, yy * 1.62, 2.06)), "Metal_Iron", bevel=0.002))
+        parts.append(_lp_box(coll, f"{name}_straph{sy}", 0.3, 0.006, 0.05,
+                             Matrix.Translation((0.2, yy, 2.2)), "Metal_Iron", bevel=0.002))
+        for k, (x, z) in enumerate(((0.0, 1.93), (0.0, 2.02), (0.15, 2.2), (0.3, 2.2))):
+            yv = yy * 1.62 if x == 0.0 else yy
+            parts.append(_lp_nail(coll, f"{name}_nail{sy}{k}", (x, yv + sy * 0.003, z), (0, sy, 0)))
+    # rope coil on a peg under the arm
+    parts.append(_lp_box(coll, f"{name}_peg", 0.025, 0.025, 0.1, Matrix.Translation((0.24, 0, 2.11)), "Wood_Mid", bevel=0.005))
+    for c in range(3):
+        parts.append(_lp_torus(coll, f"{name}_coil{c}", 0.09 - c * 0.004, 0.011,
+                               Matrix.Translation((0.24 + 0.006 * c, 0.012 * (c - 1), 1.98 - 0.01 * c)) @
+                               Matrix.Rotation(0.15 * (c - 1), 4, 'Z'), "Rope", nu=22, nv=5))
+    # S-hook + ring at the arm end
+    LX, LZ = 0.62, 2.0
+    parts.append(_lp_torus(coll, f"{name}_eye", 0.02, 0.005, Matrix.Translation((LX, 0, 2.135)), "Metal_Iron", nu=10, nv=4))
+    parts.append(_lp_torus(coll, f"{name}_hook", 0.022, 0.0055, Matrix.Translation((LX, 0, 2.09)) @
+                           Matrix.Rotation(math.pi / 2, 4, 'Z'), "Metal_Iron", nu=10, nv=4, arc=1.6 * math.pi))
+    # the lantern: glass is the outer surface, iron cage outside it
+    glass = mat("Lantern_Glass")
     bm = bm_box(0.19, 0.19, 0.27)
     bmesh.ops.transform(bm, matrix=Matrix.Translation((LX, 0, LZ)), verts=bm.verts)
-    o = obj_from_bmesh(f"{name}_glass", bm, coll, glass)
-    parts.append(o); bev.append(o)
-    # subtle emissive rim: thin glass bands capping the panes top and bottom,
-    # so the lantern reads as lit glass even at noon against a bright sky
+    parts.append(obj_from_bmesh(f"{name}_glass", bm, coll, glass))
     for rz in (LZ + 0.145, LZ - 0.145):
         bm = bm_box(0.205, 0.205, 0.022)
         bmesh.ops.transform(bm, matrix=Matrix.Translation((LX, 0, rz)), verts=bm.verts)
         parts.append(obj_from_bmesh(f"{name}_rim{rz:.2f}", bm, coll, glass))
-    # four corner bars OUTSIDE the glass
     for sx in (-1, 1):
         for sy in (-1, 1):
-            bm = bm_box(0.030, 0.030, 0.31)
-            bmesh.ops.transform(bm, matrix=Matrix.Translation(
-                (LX + sx * 0.098, sy * 0.098, LZ)), verts=bm.verts)
-            o = obj_from_bmesh(f"{name}_bar{sx}{sy}", bm, coll, iron)
-            parts.append(o); bev.append(o)
-    # drip pan under the glass + a soot ring
-    bm = bm_box(0.25, 0.25, 0.045)
-    bmesh.ops.transform(bm, matrix=Matrix.Translation((LX, 0, LZ - 0.168)), verts=bm.verts)
-    o = obj_from_bmesh(f"{name}_pan", bm, coll, iron)
-    parts.append(o); bev.append(o)
-    bm = bm_cylinder(0.085, 0.062, 0.05, segs=8)
+            parts.append(_lp_box(coll, f"{name}_bar{sx}{sy}", 0.03, 0.03, 0.31,
+                                 Matrix.Translation((LX + sx * 0.098, sy * 0.098, LZ)), "Metal_Iron", bevel=0.006))
+    for k in range(4):   # mid cage band, one flat bar per face
+        a = k * math.pi / 2
+        parts.append(_lp_box(coll, f"{name}_band{k}", 0.2, 0.012, 0.018,
+                             Matrix.Translation((LX + 0.1 * math.cos(a), 0.1 * math.sin(a), LZ + 0.02)) @
+                             Matrix.Rotation(a + math.pi / 2, 4, 'Z'), "Metal_Iron", bevel=0.003))
+    # door: hinge strap on the front face + latch tab
+    parts.append(_lp_box(coll, f"{name}_hinge", 0.012, 0.016, 0.24, Matrix.Translation((LX + 0.104, -0.07, LZ)),
+                         "Metal_Iron", bevel=0.003))
+    parts.append(_lp_box(coll, f"{name}_latch", 0.014, 0.03, 0.022, Matrix.Translation((LX + 0.108, 0.075, LZ - 0.01)),
+                         "Metal_Iron", bevel=0.004))
+    # drip pan + base boss
+    parts.append(_lp_box(coll, f"{name}_pan", 0.25, 0.25, 0.045, Matrix.Translation((LX, 0, LZ - 0.168)),
+                         "Metal_Iron", bevel=0.01))
+    bm = bm_cylinder(0.085, 0.062, 0.05, segs=12)
     bmesh.ops.transform(bm, matrix=Matrix.Translation((LX, 0, LZ - 0.215)), verts=bm.verts)
-    parts.append(obj_from_bmesh(f"{name}_base", bm, coll, iron, smooth=True))
-    # vented roof: flared plate + short chimney + hanging bail
-    bm = bm_cylinder(0.145, 0.085, 0.075, segs=4)
-    bmesh.ops.transform(bm, matrix=Matrix.Translation((LX, 0, LZ + 0.19)) @
+    o = obj_from_bmesh(f"{name}_base", bm, coll, mat("Metal_Iron"), smooth=True)
+    bevel_obj(o, width=0.006, segments=LP_BEV)
+    apply_modifiers(o)
+    parts.append(o)
+    # flared hipped roof + flue + vent cap
+    bm = bm_cylinder(0.15, 0.07, 0.085, segs=4)
+    bmesh.ops.transform(bm, matrix=Matrix.Translation((LX, 0, LZ + 0.195)) @
                         Matrix.Rotation(math.radians(45), 4, 'Z'), verts=bm.verts)
-    o = obj_from_bmesh(f"{name}_roof", bm, coll, iron)
-    parts.append(o); bev.append(o)
-    bm = bm_cylinder(0.045, 0.055, 0.07, segs=8)
-    bmesh.ops.transform(bm, matrix=Matrix.Translation((LX, 0, LZ + 0.255)), verts=bm.verts)
-    parts.append(obj_from_bmesh(f"{name}_flue", bm, coll, iron, smooth=True))
-    # bail hoop up to the arm (thin torus quarter approximated with 6 links)
-    for k in range(7):
-        a = math.pi * k / 6
-        bm = bm_box(0.022, 0.022, 0.05)
-        bmesh.ops.transform(bm, matrix=Matrix.Translation(
-            (LX + 0.10 * math.cos(a), 0, LZ + 0.29 + 0.075 * math.sin(a))) @
-            Matrix.Rotation(a, 4, 'Y'), verts=bm.verts)
-        parts.append(obj_from_bmesh(f"{name}_bail{k}", bm, coll, iron))
-    finish(bev, width=0.012)
+    o = obj_from_bmesh(f"{name}_roof", bm, coll, mat("Metal_Iron"), smooth=True)
+    bevel_obj(o, width=0.008, segments=LP_BEV)
+    apply_modifiers(o)
+    parts.append(o)
+    bm = bm_cylinder(0.04, 0.045, 0.06, segs=12)
+    bmesh.ops.transform(bm, matrix=Matrix.Translation((LX, 0, LZ + 0.265)), verts=bm.verts)
+    parts.append(obj_from_bmesh(f"{name}_flue", bm, coll, mat("Metal_Iron"), smooth=True))
+    bm = bm_cylinder(0.065, 0.012, 0.035, segs=12)
+    bmesh.ops.transform(bm, matrix=Matrix.Translation((LX, 0, LZ + 0.31)), verts=bm.verts)
+    parts.append(obj_from_bmesh(f"{name}_ventcap", bm, coll, mat("Metal_Iron"), smooth=True))
+    # round bail from the roof lugs up through the hook
+    parts.append(_lp_torus(coll, f"{name}_bail", 0.1, 0.006, Matrix.Translation((LX, 0, LZ + 0.2)) ,
+                           "Metal_Iron", nu=18, nv=5, arc=math.pi))
     obj = join(parts, name)
     ship_and_export(coll, name, obj)
     return coll, obj
 
 
-build_watchtower()
-build_shipwreck()
-build_standing_stones()
-build_lantern_post()
+_ONLY = {k.strip() for k in os.environ.get("PBR_ONLY", "").split(",") if k.strip()}
+for _k, _fn in (("watchtower", build_watchtower), ("shipwreck", build_shipwreck),
+                ("standing_stones", build_standing_stones), ("lantern_post", build_lantern_post)):
+    if not _ONLY or _k in _ONLY:
+        _fn()
 print("LANDMARKS DONE")

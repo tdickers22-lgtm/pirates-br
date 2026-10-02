@@ -190,50 +190,130 @@ def build_tent(name):
 # ═════════════════════════════════════════════════════════════
 # BEDROLL — footprint ±0.31 x ±0.67, h ~0.46 (kept), ≤400 tris
 # ═════════════════════════════════════════════════════════════
-def build_bedroll(name):
-    coll = asset_collection(name)
-    parts, bev = [], []
-    # rolled blanket at the head, lying across the mat (axis along X)
-    lay = Matrix.Rotation(math.pi / 2, 4, 'Y') @ Matrix.Rotation(0.05, 4, 'X')
-    bm = bm_cylinder(0.185, 0.185, 0.58, segs=12)
-    bmesh.ops.scale(bm, vec=Vector((0.9, 1.0, 1.0)), verts=bm.verts)  # squash future-z
-    bmesh.ops.transform(bm, matrix=Matrix.Translation((0, -0.56, 0.205)) @ lay, verts=bm.verts)
-    o = obj_from_bmesh(f"{name}_roll", bm, coll, mat("Keg_Red"), smooth=True)
-    parts.append(o); bev.append(o)
-    # inner roll spiral hint: inset end discs
-    for sx in (-1, 1):
-        bm = bm_cylinder(0.125, 0.125, 0.015, segs=10)
-        bmesh.ops.scale(bm, vec=Vector((0.9, 1.0, 1.0)), verts=bm.verts)
-        bmesh.ops.transform(bm, matrix=Matrix.Translation((0, -0.56, 0.205)) @ lay @
-                            Matrix.Translation((0, 0, sx * 0.285)), verts=bm.verts)
-        parts.append(obj_from_bmesh(f"{name}_end{sx}", bm, coll, mat("Canvas_Dirty"), smooth=True))
-    # rope ties cinched around the roll
-    for tx in (-0.16, 0.14):
-        bm = bm_cylinder(0.20, 0.20, 0.032, segs=10, cap=False)
-        bmesh.ops.scale(bm, vec=Vector((0.9, 1.0, 1.0)), verts=bm.verts)
-        bmesh.ops.transform(bm, matrix=Matrix.Translation((0, -0.56, 0.205)) @ lay @
-                            Matrix.Translation((0, 0, tx)), verts=bm.verts)
-        parts.append(obj_from_bmesh(f"{name}_tie{tx:.2f}", bm, coll, mat("Rope"), smooth=True))
-    # ground mat: wrinkled blanket with a folded-back corner
+def _smooth_by(o, keep):
+    """Per-face shading after obj_from_bmesh: faces where keep(normal) is False go flat."""
+    for poly in o.data.polygons:
+        poly.use_smooth = bool(keep(poly.normal))
+
+
+def bm_torus(R, r, nu=24, nv=6, sx=1.0, sz=1.0):
+    """Closed torus in the XZ-plane-free form: ring in XY, tube radius r; (sx, sz) squash the ring."""
     bm = bmesh.new()
-    nx, ny = 6, 9
-    grid = {}
+    rows = []
+    for i in range(nu):
+        a = 2 * math.pi * i / nu
+        ca, sa = math.cos(a), math.sin(a)
+        row = []
+        for j in range(nv):
+            b = 2 * math.pi * j / nv
+            rr = R + r * math.cos(b)
+            row.append(bm.verts.new((rr * ca * sx, rr * sa, r * math.sin(b) * sz)))
+        rows.append(row)
+    for i in range(nu):
+        for j in range(nv):
+            i2, j2 = (i + 1) % nu, (j + 1) % nv
+            bm.faces.new((rows[i][j], rows[i2][j], rows[i2][j2], rows[i][j2]))
+    return bm
+
+
+def build_bedroll(name):
+    """Bedroll v2 (b4.5c, assets-10): the blanket is REALLY rolled: a thick spiral band (2.4 turns)
+    lofted along the roll axis, so both ends show the spiral and the outer flap steps on the
+    surface; it bulges at the middle, cinches under two rope ties (knotted on top) and carries a
+    wrinkle. The ground blanket is a solid with thickness, a hem lip and a folded-back corner.
+    Smooth shared-vertex solids (verts/tris <= 1.3), ~4.5k tris, same footprint as v1."""
+    coll = asset_collection(name)
+    parts = []
+    # ── rolled blanket: axis X, centre (y=CY, z=CZ) ─────────────────────────
+    CY, CZ, L = -0.56, 0.212, 0.60
+    R0, R1, TH, TURNS, NSP, RINGS = 0.05, 0.185, 0.026, 2.4, 60, 12
+    TIES = (-0.16, 0.14)
+
+    def squeeze(x):
+        u = (x + L / 2) / L
+        s = 1.0 + 0.035 * math.sin(math.pi * u)
+        for tx in TIES:
+            s -= 0.075 * math.exp(-((x - tx) / 0.035) ** 2)
+        return s
+    loop = []
+    for i in range(NSP + 1):          # outer edge of the band, spiralling out
+        t = i / NSP
+        loop.append((R0 + (R1 - R0 - TH) * t + TH, t * TURNS * 2 * math.pi))
+    for i in range(NSP, -1, -1):      # inner edge, back in
+        t = i / NSP
+        loop.append((R0 + (R1 - R0 - TH) * t, t * TURNS * 2 * math.pi))
+    bm = bmesh.new()
+    ring_vs = []
+    for k in range(RINGS):
+        x = -L / 2 + L * k / (RINGS - 1)
+        s = squeeze(x)
+        row = []
+        for (r, a) in loop:
+            w = 1.0 + 0.03 * math.sin(a * 3.0 + x * 17.0) * min(1.0, r / R1)
+            rr = r * s * w
+            row.append(bm.verts.new((x, CY + rr * math.cos(a + 0.4), CZ + 0.9 * rr * math.sin(a + 0.4))))
+        ring_vs.append(row)
+    n = len(loop)
+    for k in range(RINGS - 1):
+        for j in range(n):
+            j2 = (j + 1) % n
+            bm.faces.new((ring_vs[k][j], ring_vs[k][j2], ring_vs[k + 1][j2], ring_vs[k + 1][j]))
+    for k in (0, RINGS - 1):          # end caps: the spiral band's cross-section strip
+        row = ring_vs[k]
+        for i in range(NSP):
+            bm.faces.new((row[i], row[i + 1], row[n - 2 - i], row[n - 1 - i]))
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    o = obj_from_bmesh(f"{name}_roll", bm, coll, mat("Keg_Red"), smooth=True)
+    _smooth_by(o, lambda nv: abs(nv.x) < 0.85)
+    parts.append(o)
+    # ── rope ties cinched into the roll, a knot on top of each ──────────────
+    for tx in TIES:
+        rr = R1 * squeeze(tx) - 0.002   # cinched: the rope bites into the roll
+        bm = bm_torus(rr, 0.012, nu=28, nv=6, sx=1.0, sz=1.0)
+        bmesh.ops.scale(bm, vec=Vector((0.9, 1.0, 1.0)), verts=bm.verts)   # pre-rotation X becomes Z: squash like the roll
+        bmesh.ops.transform(bm, matrix=Matrix.Translation((tx, CY, CZ)) @ Matrix.Rotation(math.pi / 2, 4, 'Y'),
+                            verts=bm.verts)
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+        parts.append(obj_from_bmesh(f"{name}_tie{tx:.2f}", bm, coll, mat("Rope"), smooth=True))
+        bm = bm_icosphere(0.022, 1)
+        bmesh.ops.scale(bm, vec=Vector((1.3, 1.0, 0.8)), verts=bm.verts)
+        bmesh.ops.transform(bm, matrix=Matrix.Translation((tx, CY - 0.02, CZ + 0.9 * rr + 0.008)), verts=bm.verts)
+        parts.append(obj_from_bmesh(f"{name}_knot{tx:.2f}", bm, coll, mat("Rope"), smooth=True))
+        for e in (-1, 1):             # the two loose rope ends trailing off the knot
+            bm = bm_cylinder(0.009, 0.007, 0.07, segs=6)
+            bmesh.ops.transform(bm, matrix=Matrix.Translation((tx + e * 0.03, CY + 0.03, CZ + 0.9 * rr - 0.01)) @
+                                Matrix.Rotation(e * 0.9, 4, 'Y') @ Matrix.Rotation(0.5, 4, 'X'), verts=bm.verts)
+            parts.append(obj_from_bmesh(f"{name}_end{tx:.2f}{e}", bm, coll, mat("Rope"), smooth=True))
+    # ── ground blanket: solid, wrinkled, hem lip, folded-back corner ────────
+    nx, ny = 12, 20
+    bm = bmesh.new()
+    top, bot = {}, {}
     for iy in range(ny + 1):
         for ix in range(nx + 1):
             u, v = ix / nx, iy / ny
             x = (u - 0.5) * 0.62
             y = (v - 0.5) * 1.12 + 0.09
-            z = 0.045 + math.sin(v * 6.2 + u * 2) * 0.014 + math.cos(u * 9.1 - v * 3) * 0.012
-            # folded-back corner at the foot
-            if u > 0.6 and v > 0.8:
+            z = 0.032 + math.sin(v * 6.2 + u * 2) * 0.010 + math.cos(u * 9.1 - v * 3) * 0.008
+            if ix in (0, nx) or iy in (0, ny):
+                z -= 0.008             # hem lip rolls down at the edge
+            if u > 0.6 and v > 0.8:   # folded-back corner at the foot
                 z += (u - 0.6) * (v - 0.8) * 1.6
-            grid[(ix, iy)] = bm.verts.new((x, y, max(z, 0.02)))
+            top[(ix, iy)] = bm.verts.new((x, y, z))
+            bot[(ix, iy)] = bm.verts.new((x, y, max(0.002, z - 0.024)))
     for iy in range(ny):
         for ix in range(nx):
-            bm.faces.new((grid[(ix, iy)], grid[(ix + 1, iy)],
-                          grid[(ix + 1, iy + 1)], grid[(ix, iy + 1)]))
-    parts.append(obj_from_bmesh(f"{name}_mat", bm, coll, mat("Canvas_Dirty"), smooth=True))
-    finish(bev, width=0.01)
+            q = [(ix, iy), (ix + 1, iy), (ix + 1, iy + 1), (ix, iy + 1)]
+            bm.faces.new([top[c] for c in q])
+            bm.faces.new([bot[c] for c in reversed(q)])
+    border = [(ix, 0) for ix in range(nx)] + [(nx, iy) for iy in range(ny)] + \
+             [(ix, ny) for ix in range(nx, 0, -1)] + [(0, iy) for iy in range(ny, 0, -1)]
+    for i, c in enumerate(border):
+        d = border[(i + 1) % len(border)]
+        bm.faces.new((top[c], bot[c], bot[d], top[d]))
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    o = obj_from_bmesh(f"{name}_mat", bm, coll, mat("Canvas_Dirty"), smooth=True)
+    _smooth_by(o, lambda nv: abs(nv.z) > 0.4)
+    parts.append(o)
     obj = join(parts, name)
     ship_and_export(coll, name, obj)
     return obj
@@ -299,8 +379,11 @@ def build_rock_arch(name):
     return obj
 
 
-build_tent("tent_a")
-build_bedroll("bedroll")
+_ONLY = {k.strip() for k in os.environ.get("PBR_ONLY", "").split(",") if k.strip()}
+if not _ONLY or "tent_a" in _ONLY:
+    build_tent("tent_a")
+if not _ONLY or "bedroll" in _ONLY:
+    build_bedroll("bedroll")
 # rock_arch.glb moved to build_crag.py (b4.5b rock kit v2, carved from one mass); build_rock_arch()
 # above is the retired v1 builder and is no longer called, so the GLB has one writer.
 print("CAMP SET DONE")
