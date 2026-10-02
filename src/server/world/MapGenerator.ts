@@ -29,6 +29,7 @@ import {
   mulberry32,
 } from '../../shared/utils/index.js';
 import { BIOME_PALETTES, PROP_COLLIDERS, getPropSpacingRadius, radialFill, resolvePropCollision } from '../../shared/props.js';
+import { getIslandLandforms } from '../../shared/landforms.js';
 
 const SHIP_TYPES = ['sloop', 'brigantine', 'galleon'] as const;
 
@@ -345,6 +346,18 @@ interface StoryInlandSpec {
   /** Face the scene's authored front (game +Z at yaw 0) out to sea. */
   faceSeaward?: boolean;
 }
+/** b4.4h (PLAN 3.14 detail): story scenes that belong to an authored landform
+ *  sit on it instead of a random ring draw. Candidates are rings round the
+ *  record's centre (island-local), walked outward from `heading` in 15 deg
+ *  steps, through the same site checks as findLandmarkSite; no rng is drawn.
+ *  Parley's table on the mesa top (26 m, the parley is held ON the mesa), the
+ *  Old Maw mine head on the cone's outer slope east of the crater (55 m off
+ *  its centre, beyond the 50 m rim skirt), never on the rim crest. */
+const STORY_LANDFORM_ANCHOR: Partial<Record<LandmarkType, { record: string; rings: readonly number[]; heading: number }>> = {
+  parley_table: { record: 'parley-mesa', rings: [0, 8, 15], heading: 0 },
+  mine_head: { record: 'old-maw-crater', rings: [55, 52, 58], heading: 0 },
+};
+
 const STORY_INLAND: Partial<Record<LandmarkType, StoryInlandSpec>> = {
   smuggler_cache: { minY: 2.5, maxSlope: 0.5, dLo: 0.18, dHi: 0.42, stampRadius: 5.5, blend: 0.4, pad: 5 },
   skull_totem: { minY: 3, maxSlope: 0.55, dLo: 0.2, dHi: 0.5, stampRadius: 5, blend: 0.45, pad: 5, faceSeaward: true },
@@ -1632,6 +1645,29 @@ export class MapGenerator {
   // limits (spacing pads stay fixed so props never interpenetrate), then an
   // absolute fallback on the primary-hill flank — every island keeps its
   // authored landmarks.
+  /** STORY_LANDFORM_ANCHOR site, or null when the island has no such record
+   *  or every candidate fails the checks (then the ring draw takes over). */
+  private landformStorySite(island: Island, type: LandmarkType, limits: StoryInlandSpec): { x: number; z: number } | null {
+    const anchor = STORY_LANDFORM_ANCHOR[type];
+    if (!anchor) return null;
+    const rec = getIslandLandforms(island).find((r) => r.id === anchor.record);
+    if (!rec || !('center' in rec)) return null;
+    const step = Math.PI / 12;
+    for (const ring of anchor.rings) {
+      for (let k = 0; k < (ring === 0 ? 1 : 24); k++) {
+        const a = anchor.heading + (k % 2 === 0 ? 1 : -1) * Math.ceil(k / 2) * step;
+        const x = island.position.x + rec.center[0] + Math.cos(a) * ring;
+        const z = island.position.z + rec.center[1] + Math.sin(a) * ring;
+        const y = getIslandSurfaceY(island, x, z);
+        if (y < limits.minY || this.slopeAt(island, x, z) > limits.maxSlope) continue;
+        if (this.nearCave(island, x, z, 3.5) || this.nearStamp(island, x, z, limits.pad) || this.onTrail(island, x, z, limits.pad)) continue;
+        island.stamps!.push({ x, z, radius: limits.stampRadius, targetY: y, blend: limits.blend });
+        return { x, z };
+      }
+    }
+    return null;
+  }
+
   private findLandmarkSite(
     island: Island,
     rng: Rng,
@@ -1654,6 +1690,7 @@ export class MapGenerator {
         if (this.slopeAt(island, pos.x, pos.z) > limits.maxSlope * relax) continue;
         if (this.nearCave(island, pos.x, pos.z, 3.5)) continue;
         if (this.nearStamp(island, pos.x, pos.z, limits.pad)) continue;
+        if (this.onTrail(island, pos.x, pos.z, limits.pad)) continue;
         island.stamps!.push({ x: pos.x, z: pos.z, radius: limits.stampRadius, targetY: pos.y, blend: limits.blend });
         return { x: pos.x, z: pos.z };
       }
@@ -1663,7 +1700,7 @@ export class MapGenerator {
     for (let k = 0; k < 16; k++) {
       const angle = island.profile.primaryHillAngle + Math.PI + siteIndex * 2.1 + k * GOLDEN;
       const pos = getIslandSurfacePoint(island, (limits.dLo + limits.dHi) / 2, angle, 0);
-      if (k < 15 && this.nearStamp(island, pos.x, pos.z, limits.pad)) continue;
+      if (k < 15 && (this.nearStamp(island, pos.x, pos.z, limits.pad) || this.onTrail(island, pos.x, pos.z, limits.pad))) continue;
       island.stamps!.push({ x: pos.x, z: pos.z, radius: limits.stampRadius, targetY: pos.y, blend: limits.blend });
       return { x: pos.x, z: pos.z };
     }
@@ -1733,7 +1770,8 @@ export class MapGenerator {
     for (const type of entry.landmarks) {
       const inland = STORY_INLAND[type];
       if (inland) {
-        const s = this.findLandmarkSite(island, storyRng, sites.length, inland);
+        const s = this.landformStorySite(island, type, inland)
+          ?? this.findLandmarkSite(island, storyRng, sites.length, inland);
         // Skull Cove's totem glares over the inlet mouth; other seaward scenes
         // face outward from the island centre.
         const inlet = type === 'skull_totem' ? island.profile.inlets?.[0] : undefined;
@@ -2488,6 +2526,24 @@ export class MapGenerator {
       const lx = dx * cosR - dz * sinR;
       const lz = dx * sinR + dz * cosR;
       if (Math.abs(lx) < cave.interiorRadius + pad && lz < 1.0 + pad && lz > -cave.length - pad) return true;
+    }
+    return false;
+  }
+
+  /** b4.4h: within `pad` of an authored trail's crest (landform `trail`), where
+   *  a landmark pad would flatten the ramp into a step and its collider would
+   *  block the only way up. */
+  private onTrail(island: Island, x: number, z: number, pad: number): boolean {
+    const lx = x - island.position.x, lz = z - island.position.z;
+    for (const rec of getIslandLandforms(island)) {
+      if (rec.kind !== 'headland' || !rec.trail) continue;
+      const reach = rec.topHalfWidth + pad;
+      for (let i = 0; i + 1 < rec.path.length; i++) {
+        const [ax, az] = rec.path[i], [bx, bz] = rec.path[i + 1];
+        const ex = bx - ax, ez = bz - az;
+        const t = Math.max(0, Math.min(1, ((lx - ax) * ex + (lz - az) * ez) / (ex * ex + ez * ez || 1)));
+        if (Math.hypot(lx - ax - ex * t, lz - az - ez * t) < reach) return true;
+      }
     }
     return false;
   }

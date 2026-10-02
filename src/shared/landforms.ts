@@ -140,6 +140,8 @@ export interface HeadlandLandform extends LandformBase {
   readonly crestTipY: number;
   readonly topHalfWidth: number;
   readonly sideSlope?: number;
+  /** A walking trail (b4.4h): landmark pads keep off its crest (MapGenerator). */
+  readonly trail?: boolean;
 }
 
 export interface CalderaBreach {
@@ -207,6 +209,17 @@ export const LANDFORM_ROSTER: Readonly<Record<string, readonly Landform[]>> = Ob
     // inland) and black-sand dunes on the east beach, clear of the NE caves.
     { id: 'old-maw-sea-cliff', kind: 'scarp', path: [[-30, -86], [-78, -62]], height: 8, face: 2, reach: 26, taper: 10 },
     { id: 'old-maw-black-sand', kind: 'dune_field', path: [[112, -30], [112, 6]], width: 10, amplitude: 1.0, wavelength: 7 },
+    // b4.4h detail: the rim trail. A 4 m causeway that winds 2.2 rad round the
+    // cone's outer slope from the west shoulder (y 22, 66 m off the crater
+    // centre) up onto the rim crest (63 m) at its east side: 113 m of trail,
+    // steepest metre 0.82 (the walk limit is 1.15). Raise-only, so the ground
+    // above the crest line is untouched; without it the 62 m rim ring is an
+    // 818 m2 pocket nobody can stand on (test-bot-island-reach).
+    {
+      id: 'old-maw-rim-trail', kind: 'headland',
+      path: [[-90.9, 21.5], [-80.9, 26.1], [-71.6, 29.5], [-62.4, 31.5], [-53.5, 32.1], [-45.1, 31.3], [-37.4, 29.2], [-30.4, 26.1], [-24.4, 22.1], [-19.3, 17.4], [-15.4, 12.2], [-12.6, 6.7], [-10.8, 1.2], [-10.1, -4.3], [-10.3, -9.4]],
+      crestBaseY: 19, crestTipY: 63, topHalfWidth: 2, sideSlope: 2.2, trail: true,
+    },
   ],
   // Parley Point: a true mesa. Flat top at 26 m (radius 28 m, ~2,460 m2), a
   // 3 m cliff face over 10-17 m surrounding ground, two 46 m ramps (one toward
@@ -422,15 +435,17 @@ function nearestOnPolyline(pl: Polyline, px: number, pz: number): PolyHit {
     const ox = px - ax, oz = pz - az;
     const t = len2 > 0 ? Math.max(0, Math.min(1, (ox * dx + oz * dz) / len2)) : 0;
     const qx = ox - dx * t, qz = oz - dz * t;
-    const d = Math.hypot(qx, qz);
-    if (d < best) {
-      best = d;
+    // b4.4h: squared distance in the loop, one sqrt at the end (Math.hypot's
+    // overflow scaling cost ~1 ms of Old Maw's 25 ms grid build budget).
+    const d2 = qx * qx + qz * qz;
+    if (d2 < best) {
+      best = d2;
       const cross = dx * oz - dz * ox;
       bestSide = cross > 0 ? 1 : cross < 0 ? -1 : 0;
       bestS = pl.cum[i] + Math.sqrt(len2) * t;
     }
   }
-  hit.dist = best; hit.side = bestSide; hit.s = bestS;
+  hit.dist = Math.sqrt(best); hit.side = bestSide; hit.s = bestS;
   return hit;
 }
 

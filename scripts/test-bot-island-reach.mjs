@@ -79,6 +79,26 @@ if (MUT === 'wall-beach') {
   }
   console.log('[mutate=wall-beach] 14 m scarp raised 8 m inland of every dock');
 }
+// --mutate=no-rim-trail: Old Maw without its rim trail (Part C must go RED).
+if (MUT === 'no-rim-trail') {
+  const om = islands.find((i) => i.id === 'old-maw-caldera');
+  overrideIslandLandforms(om, getIslandLandforms(om).filter((r) => r.id !== 'old-maw-rim-trail'));
+  console.log('[mutate=no-rim-trail] old-maw-rim-trail removed');
+}
+
+/** Part C (b4.4h detail POIs): reached cells within `r` of a local point. */
+function reachedNear(island, g, parent, lx, lz, r, pred = () => true) {
+  let n = 0, hit = 0;
+  for (let dz = -r; dz <= r; dz += CELL) for (let dx = -r; dx <= r; dx += CELL) {
+    if (dx * dx + dz * dz > r * r) continue;
+    const k = cellOf(g, island.position.x + lx + dx, island.position.z + lz + dz);
+    if (k < 0 || !g.walk[k] || !pred(k, Math.hypot(dx, dz))) continue;
+    n++; if (parent[k] !== -2) hit++;
+  }
+  return { n, hit };
+}
+const findRec = (island, id) => getIslandLandforms(island).find((r) => r.id === id);
+const localOf = (island, p) => [p.x - island.position.x, p.z - island.position.z];
 
 function makePlayer(position) {
   return {
@@ -381,6 +401,43 @@ for (const island of islands) {
     .map((q) => `${q.n} m² @(${(q.x - island.position.x).toFixed(0)},${(q.z - island.position.z).toFixed(0)}) y${q.y.toFixed(1)}`);
   expect(`A ${name}: reaches ${(share * 100).toFixed(1)}% of ${g.walkable} m² walkable from the landing beach, wading/swimming allowed (>= ${REACH_MIN * 100}%)`,
     share >= REACH_MIN, pk.length ? `unreached: ${pk.join('; ')}` : '');
+
+  // Part C: the authored detail POIs sit on their landforms and are reachable.
+  if (island.id === 'parley-point') {
+    const mesa = findRec(island, 'parley-mesa');
+    const t = (island.props ?? []).find((p) => p.type === 'parley_table');
+    const [tx, tz] = t ? localOf(island, t) : [NaN, NaN];
+    const off = Math.hypot(tx - mesa.center[0], tz - mesa.center[1]);
+    const ty = t ? getIslandSurfaceY(island, t.x, t.z) : NaN;
+    expect(`C ${name}: parley_table stands on the mesa top (inside the cliff ring, at topY)`,
+      off <= mesa.radius - 6 && Math.abs(ty - mesa.topY) <= 0.5, `(${tx.toFixed(1)},${tz.toFixed(1)}) ${off.toFixed(1)} m off the mesa centre, y ${ty.toFixed(1)} vs ${mesa.topY}`);
+    const near = reachedNear(island, g, swimRes.parent, tx, tz, 5);
+    expect(`C ${name}: a pirate walks up to the parley table`, near.hit >= 10, `${near.hit}/${near.n} cells within 5 m reached`);
+  }
+  if (island.id === 'old-maw-caldera') {
+    const crater = findRec(island, 'old-maw-crater');
+    const m = (island.props ?? []).find((p) => p.type === 'mine_head');
+    const [mx, mz] = m ? localOf(island, m) : [NaN, NaN];
+    const d = Math.hypot(mx - crater.center[0], mz - crater.center[1]);
+    const my = m ? getIslandSurfaceY(island, m.x, m.z) : NaN;
+    const skirt = crater.rimRadius + (crater.outerRun ?? 30);
+    expect(`C ${name}: mine head on the cone's outer slope (beyond the rim skirt, well under the rim crest)`,
+      d >= skirt && d <= skirt + 20 && my <= crater.rimY - 15, `${d.toFixed(1)} m off the crater centre (skirt ${skirt}), y ${my.toFixed(1)} vs rim ${crater.rimY}`);
+    const nearM = reachedNear(island, g, swimRes.parent, mx, mz, 6);
+    expect(`C ${name}: a pirate walks up to the mine head`, nearM.hit >= 10, `${nearM.hit}/${nearM.n} cells within 6 m reached`);
+    // The rim crest ring (+-2 m of the rim radius) is walked from the beach.
+    const rim = reachedNear(island, g, swimRes.parent, crater.center[0], crater.center[1], crater.rimRadius + 2,
+      (_k, dist) => dist >= crater.rimRadius - 2);
+    expect(`C ${name}: the rim crest is reachable on foot (walk-in rim trail)`, rim.n > 100 && rim.hit / rim.n >= 0.8,
+      `${rim.hit}/${rim.n} rim cells reached`);
+    const trail = findRec(island, 'old-maw-rim-trail');
+    const onTrail = (island.props ?? []).filter((p) => {
+      if (!trail || !['watchtower', 'mine_head'].includes(p.type)) return false;
+      const [px, pz] = localOf(island, p);
+      return trail.path.some(([ax, az]) => Math.hypot(px - ax, pz - az) < trail.topHalfWidth + 5);
+    });
+    expect(`C ${name}: no landmark pad sits on the rim trail`, onTrail.length === 0, onTrail.map((p) => p.type).join(',') || 'none');
+  }
 
   // Physics runs start where the route starts (the BFS root of each target).
   const targets = pickTargets(g, parent, sd.cells[0]);
