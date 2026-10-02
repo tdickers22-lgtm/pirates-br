@@ -347,3 +347,97 @@ export function kitDrawCount(root: THREE.Object3D | null): number {
   root?.traverse((o) => { if ((o as THREE.Mesh).isMesh) n++; });
   return n;
 }
+
+// ── Station grip anchors (b4.3f, critique-11) ───────────────────────────────
+// Every hand target a station offers the IK solver (applyStationContacts) is
+// derived here from the MOUNTED geometry: helm handle pegs and capstan bar ends
+// are the outermost vertex clusters of the hardware GLB as it hangs on the
+// hull, cannon grips sit behind the breech the GLB barrel reports. ShipRenderer
+// only forwards (stationGrips* below); the pre-hardware fallbacks (procedural
+// wheel/capstan/gun, drawn until the GLBs stream in) come from the same place,
+// so no hand-typed anchor table survives in the renderer. Points are in the
+// holder's local frame (the pivot the update loop spins), so the wheel's
+// rotation.z, the capstan's rotation.y and the gun's yaw/pitch/recoil carry
+// them for free.
+
+/** Handle / bar tips of a spoked part, clustered by angle, in `root` space. */
+export function radialTips(root: THREE.Object3D, plane: 'xy' | 'xz'): THREE.Vector3[] {
+  root.updateMatrixWorld(true);
+  const inv = new THREE.Matrix4().copy(root.matrixWorld).invert();
+  const m = new THREE.Matrix4();
+  const pts: THREE.Vector3[] = [];
+  root.traverse((o) => {
+    const pos = (o as THREE.Mesh).isMesh ? (o as THREE.Mesh).geometry?.getAttribute?.('position') : undefined;
+    if (!pos || !(pos as THREE.BufferAttribute).array?.length) return;
+    m.multiplyMatrices(inv, o.matrixWorld);
+    for (let i = 0; i < pos.count; i++) pts.push(new THREE.Vector3().fromBufferAttribute(pos as THREE.BufferAttribute, i).applyMatrix4(m));
+  });
+  const rad = (p: THREE.Vector3) => (plane === 'xy' ? Math.hypot(p.x, p.y) : Math.hypot(p.x, p.z));
+  const ang = (p: THREE.Vector3) => (plane === 'xy' ? Math.atan2(p.y, p.x) : Math.atan2(p.z, p.x));
+  let maxR = 0;
+  for (const p of pts) maxR = Math.max(maxR, rad(p));
+  const tips = pts.filter((p) => rad(p) > maxR * 0.93).sort((a, b) => ang(a) - ang(b));
+  if (tips.length === 0) return [];
+  const clusters: THREE.Vector3[][] = [[tips[0]]];
+  for (let i = 1; i < tips.length; i++) {
+    if (ang(tips[i]) - ang(tips[i - 1]) > 0.15) clusters.push([]);
+    clusters[clusters.length - 1].push(tips[i]);
+  }
+  // The cluster straddling ±π is one handle cut in two.
+  if (clusters.length > 1 && ang(tips[0]) + 2 * Math.PI - ang(tips[tips.length - 1]) <= 0.15) {
+    clusters[0].push(...clusters.pop()!);
+  }
+  return clusters.map((c) => c.reduce((acc, p) => acc.add(p), new THREE.Vector3()).divideScalar(c.length));
+}
+
+export type StationGripKind = 'helm' | 'capstan' | 'cannon';
+export interface StationGrips { kind: StationGripKind; points: THREE.Vector3[] }
+/** Helm palms close just inside the peg tip (on the turned handle, not its end). */
+export const HELM_GRIP_INSET = 0.97;
+/** Breech grips: 0.1 m forward of the cascabel end, 0.08 m up, 0.18 m either side. */
+export const CANNON_GRIP = { fwd: 0.1, up: 0.08, half: 0.18 } as const;
+
+const TIP_CACHE = new Map<string, THREE.Vector3[]>();
+/** Radial tips of one hardware file, measured once per file (GLB units). */
+function cachedTips(key: string, node: THREE.Object3D, plane: 'xy' | 'xz'): THREE.Vector3[] {
+  let tips = TIP_CACHE.get(key);
+  if (!tips || tips.length === 0) {
+    tips = radialTips(node, plane);
+    if (tips.length > 0) TIP_CACHE.set(key, tips);
+  }
+  return tips;
+}
+
+/** Helm pegs of the mounted wheel GLB (`wheelBody` at GLB scale, the holder
+ *  scales it by `scale`); null when the file has no readable spokes. */
+export function stationGripsHelm(wheelBody: THREE.Object3D, scale: number): StationGrips | null {
+  const tips = cachedTips('wheel', wheelBody, 'xy');
+  return tips.length >= 4 ? { kind: 'helm', points: tips.map((p) => p.clone().multiplyScalar(scale * HELM_GRIP_INSET)) } : null;
+}
+
+/** Capstan bar ends of the mounted drum GLB (turns with the holder's rotation.y). */
+export function stationGripsCapstan(drum: THREE.Object3D, scale: number): StationGrips | null {
+  const tips = cachedTips('capstan', drum, 'xz');
+  return tips.length >= 4 ? { kind: 'capstan', points: tips.map((p) => p.clone().multiplyScalar(scale)) } : null;
+}
+
+/** Breech handles behind the GLB barrel's cascabel (`breechZ` = barrel box min z
+ *  relative to the trunnions, GLB units; +X of the pitch pivot is the muzzle). */
+export function stationGripsCannon(breechZ: number, scale: number): StationGrips {
+  const x = (breechZ + CANNON_GRIP.fwd) * scale;
+  return { kind: 'cannon', points: [new THREE.Vector3(x, CANNON_GRIP.up, CANNON_GRIP.half), new THREE.Vector3(x, CANNON_GRIP.up, -CANNON_GRIP.half)] };
+}
+
+/** Pre-hardware fallbacks (the procedural wheel/capstan/gun drawn until the GLBs
+ *  stream in): the same anchors read off the procedural parts' dimensions. */
+export function stationGripsFallback(kind: 'helm', spokes: number, rimR: number): StationGrips;
+export function stationGripsFallback(kind: 'capstan' | 'cannon'): StationGrips;
+export function stationGripsFallback(kind: StationGripKind, spokes = 8, rimR = 0.6): StationGrips {
+  if (kind === 'helm') {
+    return { kind, points: Array.from({ length: spokes }, (_, i) => new THREE.Vector3(Math.cos(i / spokes * Math.PI * 2) * (rimR + 0.02), Math.sin(i / spokes * Math.PI * 2) * (rimR + 0.02), 0.1)) };
+  }
+  if (kind === 'capstan') {
+    return { kind, points: Array.from({ length: 8 }, (_, i) => new THREE.Vector3(Math.cos(i / 8 * Math.PI * 2) * 0.66, 0.88, -Math.sin(i / 8 * Math.PI * 2) * 0.66)) };
+  }
+  return { kind, points: [new THREE.Vector3(-0.28, 0.1, 0.2), new THREE.Vector3(-0.28, 0.1, -0.2)] };
+}

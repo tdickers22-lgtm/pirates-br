@@ -89,12 +89,30 @@ async function installInPage() {
   const inter = await import('/src/shared/interactions.ts');
   const consts = await import('/src/shared/constants/index.ts');
   const me = g.state.players.find((p) => p.id === g.localPlayerId);
-  const ship = g.state.ships.find((s) => s.id === me.shipId);
-  const stats = consts.SHIP_STATS[ship.type];
-  const group = g.shipRenderer.getShipGroup(ship.id);
-  const V = group.position.constructor;
+  // b4.3f: the staged stations can be re-targeted onto ANY live hull (all three classes are graded
+  // on the spline hull), the free camera riding along so the hull and the body stay at full detail.
+  let ship, stats, group, follow = false;
   const holders = [];
-  group.traverse((o) => { if (o.userData?.ikGrips) holders.push(o); });
+  function retarget(id) {
+    ship = g.state.ships.find((s) => s.id === id) ?? window.__rcAudit?.fake[id];
+    stats = consts.SHIP_STATS[ship.type];
+    group = g.shipRenderer.getShipGroup(ship.id);
+    holders.length = 0;
+    group.traverse((o) => { if (o.userData?.ikGrips) holders.push(o); });
+    follow = id !== me.shipId;
+    if (follow) frame();
+    return { type: ship.type, hw: !!g.shipRenderer.shipMeshes?.get(id)?.hardware };
+  }
+  function frame() {
+    group.updateWorldMatrix(true, false);
+    const c = group.localToWorld(new V(0, 0, 0));
+    const eye = group.localToWorld(new V(9, 9, -6));
+    g.enableFreeCam(eye.x, eye.y, eye.z, Math.atan2(eye.x - c.x, eye.z - c.z), -0.55);
+  }
+  const V = g.shipRenderer.getShipGroup(me.shipId).position.constructor;
+  retarget(me.shipId);
+  window.__rcTarget = (id) => { const r = retarget(id); g.settleLod(); return r; };
+  window.__rcHw = (id) => !!g.shipRenderer.shipMeshes?.get(id)?.hardware;
   const gripWorld = (h) => { h.updateWorldMatrix(true, false); return h.userData.ikGrips.points.map((p) => p.clone().applyMatrix4(h.matrixWorld)); };
   const nearestHolder = (kind, w) => {
     let best = null, bd = Infinity;
@@ -199,6 +217,7 @@ async function installInPage() {
       st.last = holder ? { ...measure(mesh, holder), atHelm: player.atHelm, ship: shp?.type ?? null, clip: mesh.userData.rig.upper?.name ?? null } : { noWheel: true, ship: shp?.type ?? null };
       return;
     }
+    if (follow) frame();
     const { stand, holder } = stage(st.mode);
     if (!stand || !holder) { st.last = { noHolder: true }; return; }
     const c = centroid(gripWorld(holder));
@@ -212,8 +231,8 @@ async function installInPage() {
       atCapstan: st.mode === 'capstan', mastClimb: st.mode === 'ladder' ? 0.3 : null,
       state: 'alive', velocity: { x: 0, y: 0, z: 0 }, onShipId: ship.id,
     });
-    anim.__rcOrig(mesh, p, ship, dt, null);
-    st.last = { ...measure(mesh, holder), clip: mesh.userData.rig.upper?.name ?? null };
+    anim.__rcOrig(mesh, p, g.state.ships.find((s) => s.id === ship.id) ?? window.__rcAudit?.fake[ship.id] ?? ship, dt, null);
+    st.last = { ...measure(mesh, holder), clip: mesh.userData.rig.upper?.name ?? null, ship: ship.type };
   }
   const loop = () => { try { drive(); } catch (e) { st.last = { error: String(e?.stack ?? e) }; } requestAnimationFrame(loop); };
   requestAnimationFrame(loop);
@@ -226,7 +245,8 @@ async function installInPage() {
   }
   crew.sort((a, b) => Number(b.mine) - Number(a.mine));
   const counts = holders.reduce((o, h) => ((o[h.userData.ikGrips.kind] = (o[h.userData.ikGrips.kind] ?? 0) + 1), o), {});
-  return { ship: ship.type, crew, holders: counts };
+  const fleet = g.state.ships.filter((s) => (s.sinkProgress ?? 0) < 0.05).map((s) => ({ id: s.id, type: s.type }));
+  return { ship: ship.type, shipId: ship.id, crew, holders: counts, fleet };
 }
 
 async function run(page, mode, id) {
@@ -281,6 +301,22 @@ try {
     const r = window.__piratesBR.renderer.renderer;
     if (!r.__rcOrig) { r.__rcOrig = r.render.bind(r); r.render = () => {}; }
   });
+  // Solo only spawns sloops and Squads is disabled, so the brigantine and the galleon are AUDIT hulls
+  // (the ship-gallery mechanism): ShipRenderer.update gets one extra anchored hull per class, 45 m abeam
+  // of the own ship, built through the real buildShip + late hardware mount like any other hull.
+  await page.evaluate(() => {
+    const g = window.__piratesBR; const sr = g.shipRenderer; const orig = sr.update.bind(sr);
+    const a = window.__rcAudit = { types: [], fake: {} };
+    sr.update = (ships, players, t, dt, ...rest) => {
+      if (!a.types.length) return orig(ships, players, t, dt, ...rest);
+      const me = g.state.players.find((q) => q.id === g.localPlayerId);
+      const own = ships.find((s) => s.id === me?.shipId) ?? ships[0];
+      const extra = a.types.map((type, i) => (a.fake['audit-' + type] = { ...own, id: 'audit-' + type, type,
+        position: { ...own.position, x: own.position.x + 45 * (i + 1), z: own.position.z }, anchored: true,
+        velocity: { x: 0, y: 0, z: 0 }, hull: 9999, maxHull: 9999, waterLevel: 0, holes: [] }));
+      return orig(ships.concat(extra), players, t, dt, ...rest);
+    };
+  });
   const info = await page.evaluate(installInPage);
   report.ship = info.ship; report.holders = info.holders; report.crew = info.crew;
   console.log(`  ship ${info.ship}, grip holders ${JSON.stringify(info.holders)}, rigged remote bodies ${info.crew.length} (${info.crew.filter((c) => c.mine).length} on this ship) (${info.crew.filter((c) => c.atHelm).length} at the helm)`);
@@ -325,6 +361,38 @@ try {
       expect(`${kind}: right palm <= ${TOL} m from a grip`, m.r !== null && m.r <= TOL, fmt(m.r));
     }
     if (helmsmen.length) expect('at least one live helmsman graded at full detail (non-vacuous)', liveHelmGraded > 0, `${liveHelmGraded}`);
+
+    // b4.3f: every hull class on the spline hull, staged at all four stations (own hull first
+    // for its class). A class missing from the match is a FAIL (VACUOUS = FAIL).
+    const pick = {};
+    for (const s of info.fleet) if (!pick[s.type] || s.id === info.shipId) pick[s.type] = s.id;
+    const audit = ['sloop', 'brigantine', 'galleon'].filter((t) => !pick[t]);
+    if (audit.length) {
+      await page.evaluate((ts) => { window.__rcAudit.types = ts; }, audit);
+      for (const t of audit) {
+        const built = await page.waitForFunction((i) => !!window.__piratesBR.shipRenderer.getShipGroup(i), 'audit-' + t, { timeout: 30_000, polling: 500 }).then(() => true).catch(() => false);
+        if (built) pick[t] = 'audit-' + t;
+      }
+      console.log(`  audit hulls (no live hull of the class in Solo): ${audit.join(', ')}`);
+    }
+    report.classes = {};
+    for (const type of ['sloop', 'brigantine', 'galleon']) {
+      const sid = pick[type];
+      expect(`${type}: a live hull of the class in the match (non-vacuous)`, !!sid);
+      if (!sid) continue;
+      await page.evaluate((i) => window.__rcTarget(i), sid);
+      const hw = await page.waitForFunction((i) => window.__rcHw(i), sid, { timeout: 30_000, polling: 500 }).then(() => true).catch(() => false);
+      expect(`${type}: hardware GLBs mounted on the hull (grips from the kit, not the b3 table)`, hw);
+      report.classes[type] = { shipId: sid, hw, stations: {} };
+      for (const kind of ['helm', 'capstan', 'cannon', 'ladder']) {
+        const m = await run(page, kind, bodyId);
+        report.classes[type].stations[kind] = m;
+        if (!m || m.noHolder || m.noBody || m.error) { expect(`${type} ${kind}: holder found`, false, JSON.stringify(m)); continue; }
+        const fmt = (v) => (v === null ? 'no hand' : v.toFixed(3));
+        console.log(`  ${type} ${kind} [staged] clip ${m.clip}: palm l ${fmt(m.l)} r ${fmt(m.r)} m, grips f ${m.gripFromBody.f} y ${m.gripFromBody.y}`);
+        expect(`${type} ${kind}: both palms <= ${TOL} m from a grip`, m.l !== null && m.r !== null && m.l <= TOL && m.r <= TOL, `${fmt(m.l)} / ${fmt(m.r)}`);
+      }
+    }
   }
 } catch (e) {
   failures += 1;

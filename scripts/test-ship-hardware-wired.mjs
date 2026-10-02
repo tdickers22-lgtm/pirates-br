@@ -202,14 +202,14 @@ for (const type of Object.keys(SHIP_STATS)) {
 }
 
 // ── [c] wheel spin sign ─────────────────────────────────────────────────────
-{
-  const ship = fixtureShip('brigantine', 'hw-wheel');
+for (const type of ['sloop', 'brigantine', 'galleon']) {
+  const ship = fixtureShip(type, `hw-wheel-${type}`);
   ship.anchored = true;
   const { sr } = renderer('high', stubSource());
   settle(sr, ship, 5);
   const mesh = sr.shipMeshes.get(ship.id);
   const wb = named(mesh.wheel, 'wheel_body')[0];
-  expect('[c] wheel_body spins with mesh.wheel', !!wb);
+  expect(`[c] ${type}: wheel_body spins with mesh.wheel`, !!wb);
   if (wb) {
     const grips = mesh.wheel.userData.ikGrips?.points ?? [];
     const topLocal = grips.reduce((a, p) => (p.y > (a?.y ?? -Infinity) ? p : a), null) ?? new THREE.Vector3(0, 0.5, 0);
@@ -224,15 +224,15 @@ for (const type of Object.keys(SHIP_STATS)) {
     const over = mesh.wheel.rotation.z;
     let want = Math.sign(helmWheelRotZ(1));
     if (MUTATE === 'hw:wheelsign') want = -want;
-    console.log(`  rudder 0 -> +1: wheel.rotation.z ${rest.toFixed(3)} -> ${over.toFixed(3)} (convention sign ${Math.sign(helmWheelRotZ(1))}); top handle x ${topRest.x.toFixed(3)} -> ${topOver.x.toFixed(3)}`);
-    expect('[c] rudder +1 moves wheel.rotation.z with the helmWheelRotZ sign', Math.sign(over - rest) === want && Math.abs(over - rest) > 1);
-    expect('[c] the top handle of the GLB wheel goes to local -X (the bow\'s way)', topOver.x < topRest.x - 0.02 && want > 0);
+    console.log(`  ${type} rudder 0 -> +1: wheel.rotation.z ${rest.toFixed(3)} -> ${over.toFixed(3)} (convention sign ${Math.sign(helmWheelRotZ(1))}); top handle x ${topRest.x.toFixed(3)} -> ${topOver.x.toFixed(3)}`);
+    expect(`[c] ${type}: rudder +1 moves wheel.rotation.z with the helmWheelRotZ sign`, Math.sign(over - rest) === want && Math.abs(over - rest) > 1);
+    expect(`[c] ${type}: the top handle of the GLB wheel goes to local -X (the bow's way)`, topOver.x < topRest.x - 0.02 && want > 0);
   }
 }
 
 // ── [d] capstan ─────────────────────────────────────────────────────────────
-{
-  const ship = fixtureShip('sloop', 'hw-capstan');
+for (const type of ['sloop', 'brigantine', 'galleon']) {
+  const ship = fixtureShip(type, `hw-capstan-${type}`);
   const { sr } = renderer('high', stubSource());
   settle(sr, ship, 1);
   const mesh = sr.shipMeshes.get(ship.id);
@@ -244,11 +244,11 @@ for (const type of Object.keys(SHIP_STATS)) {
     const d0 = mesh.anchorCapstan.rotation.y; const b0 = yaw(base);
     for (let i = 0; i < 10; i++) sr.update([ship], [], 2 + i * 0.016, 0.016, 0, near);
     const d1 = mesh.anchorCapstan.rotation.y; const b1 = yaw(base);
-    console.log(`  raising: capstan rotation.y ${d0.toFixed(3)} -> ${d1.toFixed(3)}; base yaw ${b0.toFixed(3)} -> ${b1.toFixed(3)}`);
-    expect('[d] the drum is on the rotating capstan holder', drum.parent === mesh.anchorCapstan);
-    expect('[d] raising the anchor turns the drum +Y', d1 - d0 > 0.3);
-    expect('[d] the base stays on the deck (does not turn)', Math.abs(b1 - b0) < 1e-6);
-  } else expect('[d] capstan drum + base mounted', false);
+    console.log(`  ${type} raising: capstan rotation.y ${d0.toFixed(3)} -> ${d1.toFixed(3)}; base yaw ${b0.toFixed(3)} -> ${b1.toFixed(3)}`);
+    expect(`[d] ${type}: the drum is on the rotating capstan holder`, drum.parent === mesh.anchorCapstan);
+    expect(`[d] ${type}: raising the anchor turns the drum +Y`, d1 - d0 > 0.3);
+    expect(`[d] ${type}: the base stays on the deck (does not turn)`, Math.abs(b1 - b0) < 1e-6);
+  } else expect(`[d] ${type}: capstan drum + base mounted`, false);
 }
 
 // ── [e] far sibling at farSwapDistance ──────────────────────────────────────
@@ -281,9 +281,24 @@ for (const type of Object.keys(SHIP_STATS)) {
   expect(`[f] ${type} low: draws do not rise`, glb.draws <= proc.draws, `${glb.draws} > ${proc.draws}`);
 }
 
-// ── [g] IK grips from the GLB ───────────────────────────────────────────────
+// ── [g] IK grips from the GLB, [k] station anchors on the spline hull (b4.3f) ──
+// The grips come from kit.ts (stationGrips*: the mounted GLB's peg / bar-end
+// clusters, the breech behind the GLB barrel), on every class, and in SHIP
+// space they sit where a body standing at the shared station spot can close
+// its hands: the hull re-spline moved the deck, so this pins them to it.
+const kit = await import('../src/client/rendering/ship/kit.ts');
+const inter = await import('../src/shared/interactions.ts');
+const sharedUtils = await import('../src/shared/utils/index.ts');
+expect('[k] kit.ts exports the station grip anchors (stationGripsHelm/Capstan/Cannon/Fallback)',
+  ['stationGripsHelm', 'stationGripsCapstan', 'stationGripsCannon', 'stationGripsFallback', 'radialTips'].every((n) => typeof kit[n] === 'function'));
 {
-  const ship = fixtureShip('galleon', 'hw-grips');
+  const src = fs.readFileSync(path.join(ROOT, 'src/client/rendering/ShipRenderer.ts'), 'utf8');
+  const typed = (src.match(/IK_GRIPS_KEY\]\s*=\s*\{/g) ?? []).length;
+  expect('[k] ShipRenderer forwards to kit.ts: no hand-typed grip table, no own radialTips', typed === 0 && !/function radialTips/.test(src), `${typed} literal grip sets`);
+}
+for (const type of ['sloop', 'brigantine', 'galleon']) {
+  const stats = SHIP_STATS[type];
+  const ship = fixtureShip(type, `hw-grips-${type}`);
   srHigh.buildShip(ship);
   const mesh = srHigh.shipMeshes.get(ship.id);
   const helm = mesh.wheel.userData.ikGrips; const cap = mesh.anchorCapstan.userData.ikGrips;
@@ -291,10 +306,29 @@ for (const type of Object.keys(SHIP_STATS)) {
   const radius = (p, plane) => (plane === 'xy' ? Math.hypot(p.x, p.y) : Math.hypot(p.x, p.z));
   const hr = helm?.points?.map((p) => radius(p, 'xy')) ?? [];
   const cr = cap?.points?.map((p) => radius(p, 'xz')) ?? [];
-  console.log(`  helm ${hr.length} grips r ${Math.min(...hr).toFixed(3)}..${Math.max(...hr).toFixed(3)} (rim ${mesh.wheelRimR.toFixed(3)}); capstan ${cr.length} grips r ${Math.min(...cr).toFixed(3)}..${Math.max(...cr).toFixed(3)}; breech grip x ${gun?.points?.[0]?.x?.toFixed(3)}`);
-  expect('[g] helm grips are the GLB handle tips (>= 6, past the rim)', hr.length >= 6 && Math.min(...hr) > mesh.wheelRimR);
-  expect('[g] capstan grips are the GLB bar ends (>= 4, same radius)', cr.length >= 4 && Math.max(...cr) - Math.min(...cr) < 0.08);
-  expect('[g] cannon grips sit behind the trunnions at the breech', !!gun && gun.points.every((p) => p.x < -0.3));
+  console.log(`  ${type}: helm ${hr.length} grips r ${Math.min(...hr).toFixed(3)}..${Math.max(...hr).toFixed(3)} (rim ${mesh.wheelRimR.toFixed(3)}); capstan ${cr.length} grips r ${Math.min(...cr).toFixed(3)}..${Math.max(...cr).toFixed(3)}; breech grip x ${gun?.points?.[0]?.x?.toFixed(3)}`);
+  expect(`[g] ${type}: helm grips are the GLB handle tips (>= 6, past the rim)`, hr.length >= 6 && Math.min(...hr) > mesh.wheelRimR);
+  expect(`[g] ${type}: capstan grips are the GLB bar ends (>= 4, same radius)`, cr.length >= 4 && Math.max(...cr) - Math.min(...cr) < 0.08);
+  expect(`[g] ${type}: cannon grips sit behind the trunnions at the breech`, !!gun && gun.points.every((p) => p.x < -0.3));
+  // [k] ship-space placement against the deck slab and the shared stand spots.
+  mesh.root.updateMatrixWorld(true);
+  const toShip = (holder, p) => mesh.root.worldToLocal(holder.localToWorld(p.clone()));
+  const centroid = (holder, pts) => pts.map((p) => toShip(holder, p)).reduce((a, p) => a.add(p), new THREE.Vector3()).multiplyScalar(1 / pts.length);
+  const deckAt = (x, z) => sharedUtils.getShipDeckY(0, stats) + sharedUtils.getShipDeckRaiseAt({ x, z }, stats);
+  const rows = [
+    ['helm', mesh.wheel, helm, inter.getHelmControlLocal(stats), [0.7, 1.5], [0.3, 0.75]],
+    ['capstan', mesh.anchorCapstan, cap, inter.getAnchorControlLocal(stats), [0.45, 1.2], [0, 1.6]],
+    ['cannon', mesh.cannonMeshes[0].pitchPivot, gun, inter.getCannonDeckLocalPosition(stats, 0), [0.25, 1.1], [0, 0.75]],
+  ];
+  for (const [kind, holder, grips, spot, hBand, rBand] of rows) {
+    if (!grips?.points?.length) { expect(`[k] ${type} ${kind}: grips present`, false); continue; }
+    const c = centroid(holder, grips.points);
+    const above = c.y - deckAt(c.x, c.z);
+    const reach = Math.hypot(c.x - spot.x, c.z - spot.z);
+    console.log(`  ${type} ${kind}: grip centroid (${c.x.toFixed(2)}, ${c.y.toFixed(2)}, ${c.z.toFixed(2)}) ${above.toFixed(2)} m over the deck, ${reach.toFixed(2)} m from the stand spot`);
+    expect(`[k] ${type} ${kind}: grips ${hBand[0]}-${hBand[1]} m over the spline-hull deck`, above >= hBand[0] && above <= hBand[1], above.toFixed(3));
+    expect(`[k] ${type} ${kind}: grips ${rBand[0]}-${rBand[1]} m from the shared stand spot`, reach >= rBand[0] && reach <= rBand[1], reach.toFixed(3));
+  }
 }
 
 // ── [h] shared geometry survives clear() ────────────────────────────────────
