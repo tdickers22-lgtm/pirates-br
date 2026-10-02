@@ -156,6 +156,62 @@ function addSubmergedSkirt(group: THREE.Group, radius: number, lowDetail: boolea
   group.add(skirt);
 }
 
+/** No match-stream sea stack repeats its silhouette inside this distance (islands-14; the kit
+ *  stacks searock_d..g follow the same rule in src/server/world/placement/cliffKit.ts). */
+export const SEA_ROCK_REPEAT_M = 250;
+const SEA_ROCK_TIERS = ['searock_c', 'searock_a', 'searock_b'] as const;
+export type SeaRockSilhouette = { asset: (typeof SEA_ROCK_TIERS)[number]; mirror: boolean };
+type PlacedSilhouette = { id: string; x: number; z: number; key: string };
+
+/** The size tier the server envelope asks for (unchanged rule), then the neighbouring tiers, then
+ *  the mirrored set: the first candidate no stack inside SEA_ROCK_REPEAT_M already shows wins.
+ *  Pure; `placed` is every stack already drawn. A crowd that has used all six takes the
+ *  least-repeated one. */
+export function pickSeaRockSilhouette(
+  rock: Pick<SeaRock, 'height' | 'position'>,
+  placed: readonly { x: number; z: number; key: string }[],
+): SeaRockSilhouette {
+  const pref = rock.height > 26 ? 2 : rock.height > 13 ? 1 : 0;
+  const order = [pref, pref === 2 ? 1 : pref + 1, pref === 0 ? 2 : pref - 1].filter((v, i, a) => a.indexOf(v) === i);
+  for (const t of [0, 1, 2]) if (!order.includes(t)) order.push(t);
+  const cands: SeaRockSilhouette[] = [
+    ...order.map((t) => ({ asset: SEA_ROCK_TIERS[t], mirror: false })),
+    ...order.map((t) => ({ asset: SEA_ROCK_TIERS[t], mirror: true })),
+  ];
+  const r2 = SEA_ROCK_REPEAT_M * SEA_ROCK_REPEAT_M;
+  const near = new Map<string, number>();
+  for (const p of placed) {
+    const dx = p.x - rock.position.x;
+    const dz = p.z - rock.position.z;
+    if (dx * dx + dz * dz < r2) near.set(p.key, (near.get(p.key) ?? 0) + 1);
+  }
+  let best = cands[0];
+  let bestN = Infinity;
+  for (const c of cands) {
+    const n = near.get(silhouetteKey(c)) ?? 0;
+    if (n === 0) return c;
+    if (n < bestN) { best = c; bestN = n; }
+  }
+  return best;
+}
+
+export const silhouetteKey = (s: SeaRockSilhouette): string => `${s.asset}${s.mirror ? '~m' : ''}`;
+
+/** Stacks already drawn this session (bounded; a rebuilt rock keeps its silhouette by id). */
+const drawnSilhouettes = new Map<string, PlacedSilhouette>();
+function silhouetteFor(rock: SeaRock): SeaRockSilhouette {
+  const prev = drawnSilhouettes.get(rock.id);
+  if (prev && prev.x === rock.position.x && prev.z === rock.position.z) {
+    const [asset, m] = prev.key.split('~');
+    return { asset: asset as SeaRockSilhouette['asset'], mirror: m === 'm' };
+  }
+  drawnSilhouettes.delete(rock.id);
+  const pick = pickSeaRockSilhouette(rock, [...drawnSilhouettes.values()]);
+  drawnSilhouettes.set(rock.id, { id: rock.id, x: rock.position.x, z: rock.position.z, key: silhouetteKey(pick) });
+  if (drawnSilhouettes.size > 512) drawnSilhouettes.delete(drawnSilhouettes.keys().next().value as string);
+  return pick;
+}
+
 export function buildSeaRockMesh(rock: SeaRock, host: IslandBuilderCtx) {
   const group = new THREE.Group();
   group.name = `sea-rock-${rock.id}`;
@@ -165,7 +221,11 @@ export function buildSeaRockMesh(rock: SeaRock, host: IslandBuilderCtx) {
 
   // GLB sea spires by size tier, fitted inside the server collider envelope
   // (main collider cylinder) so visuals never exceed the collision size.
-  const tier: AssetName = rock.height > 26 ? 'searock_b' : rock.height > 13 ? 'searock_a' : 'searock_c';
+  // islands-14: the size tier picks first, but no two stacks within SEA_ROCK_REPEAT_M share a
+  // silhouette (a neighbouring tier, then the mirror image, takes over).
+  const silhouette = silhouetteFor(rock);
+  const tier: AssetName = silhouette.asset;
+  const mirrorX = silhouette.mirror ? -1 : 1;
   const rockClone = assets.clone(tier);
   const rockBounds = assets.bounds(tier);
   if (rockClone && rockBounds) {
@@ -174,7 +234,7 @@ export function buildSeaRockMesh(rock: SeaRock, host: IslandBuilderCtx) {
     const mainColliderTop = rock.height * (rock.variant === 1 ? 0.84 : 0.94) - 1.3;
     const sxz = mainColliderRadius / assetHoriz;
     const sy = Math.max(0.4, mainColliderTop / Math.max(rockBounds.max.y, 0.001));
-    rockClone.scale.set(sxz, sy, sxz);
+    rockClone.scale.set(sxz * mirrorX, sy, sxz);
     const seaRockMat = getSeaRockMaterial();
     const dress = (root: THREE.Object3D) => root.traverse((o) => {
       if (o instanceof THREE.Mesh) {
@@ -191,7 +251,7 @@ export function buildSeaRockMesh(rock: SeaRock, host: IslandBuilderCtx) {
     // same material, same envelope fit, so the silhouette does not move.
     const farClone = assets.cloneFar(tier);
     if (farClone) {
-      farClone.scale.set(sxz, sy, sxz);
+      farClone.scale.set(sxz * mirrorX, sy, sxz);
       dress(farClone);
       farClone.visible = false;
       group.add(farClone);

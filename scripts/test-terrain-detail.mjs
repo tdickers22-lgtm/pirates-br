@@ -345,6 +345,49 @@ const copy = JSON.parse(JSON.stringify(booty));
 expect('Cays survive serialization with identical collision heights',
   getIslandSurfaceY(copy, cay.x, cay.z) === getIslandSurfaceY(booty, cay.x, cay.z));
 
+// b4.6d (islands-02/08/12): the rock features are the Blender cliff kit now, placed by
+// src/server/world/placement/cliffKit.ts and drawn by CliffKitBuilder. No primitive rock
+// (Box/Cone/Dodecahedron geometry, or the shared boulder dodecahedron) is left in
+// TerrainFeatures, every island of the roster carries kitPieces from generateIslands, and the
+// strata hook really hands the island to the kit builder.
+{
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../src/client/world/island/TerrainFeatures.ts', import.meta.url), 'utf8');
+  const prim = src.match(/new THREE\.(Box|Cone|Dodecahedron)Geometry|\bboulderGeo\b/g) ?? [];
+  expect('TerrainFeatures builds no Box/Cone/Dodecahedron rock primitives', prim.length === 0, prim.join(', '));
+  expect('TerrainFeatures hands the island to the cliff kit builder', /buildCliffKit\(ctx\)/.test(src));
+  const withKit = roster.filter((i) => (i.kitPieces ?? []).length > 0).length;
+  const total = roster.reduce((n, i) => n + (i.kitPieces ?? []).length, 0);
+  expect('generateIslands places the cliff kit (kitPieces on the served islands)', withKit >= Math.ceil(roster.length * 0.6) && total >= 100,
+    `${withKit}/${roster.length} islands, ${total} pieces`);
+}
+
+// islands-14: no match-stream sea stack repeats its silhouette within 250 m of another
+// (SeaRockBuilder.pickSeaRockSilhouette, drawn in build order), and the kit stacks d..g placed with
+// the islands obey the same rule among themselves.
+{
+  const { pickSeaRockSilhouette, silhouetteKey, SEA_ROCK_REPEAT_M } = await import('../src/client/world/island/SeaRockBuilder.ts');
+  const { generateStaticWorld } = await import('../src/shared/staticWorld.ts');
+  const world = generateStaticWorld(20260801);
+  const placed = [];
+  for (const rock of world.seaRocks) {
+    placed.push({ x: rock.position.x, z: rock.position.z, key: silhouetteKey(pickSeaRockSilhouette(rock, placed)) });
+  }
+  const repeats = (list) => {
+    let n = 0;
+    for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
+      if (list[i].key === list[j].key && Math.hypot(list[i].x - list[j].x, list[i].z - list[j].z) < SEA_ROCK_REPEAT_M) n++;
+    }
+    return n;
+  };
+  const rockRepeats = repeats(placed);
+  const naive = repeats(world.seaRocks.map((r) => ({ x: r.position.x, z: r.position.z, key: r.height > 26 ? 'b' : r.height > 13 ? 'a' : 'c' })));
+  expect(`sea stacks: no silhouette repeats within ${SEA_ROCK_REPEAT_M} m (${world.seaRocks.length} stacks; size-tier only had ${naive})`,
+    world.seaRocks.length > 0 && rockRepeats === 0, `${rockRepeats} repeat pair(s)`);
+  const kitStacks = world.islands.flatMap((i) => (i.kitPieces ?? []).filter((p) => /^searock_[d-g]$/.test(p.key)));
+  expect(`kit sea stacks d..g: no silhouette repeats within ${SEA_ROCK_REPEAT_M} m (${kitStacks.length})`, kitStacks.length > 0 && repeats(kitStacks) === 0);
+}
+
 if (failures > 0) {
   console.error(`\n${failures} terrain contract check(s) failed`);
   process.exit(1);
