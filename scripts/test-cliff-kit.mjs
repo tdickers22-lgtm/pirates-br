@@ -260,18 +260,17 @@ for (const key of KIT) {
   // [back]
   if (/^cliff_(face|overhang)_/.test(key)) {
     let hits = 0, gapped = 0, worst = 0;
+    const at = [];
     for (let gx = lo[0] + 0.25; gx < hi[0]; gx += 0.5) for (let gy = 0.25; gy < hi[1] * 0.7; gy += 0.5) {
       const t = meshRay(tris, [gx, gy, -5], [0, 0, 1]);
       if (t === Infinity) continue;
-      hits++; const z = t - 5; worst = Math.max(worst, z); if (z > 0.25) gapped++;
+      hits++; const z = t - 5; worst = Math.max(worst, z); if (z > 0.25) { gapped++; at.push(`(${gx.toFixed(1)},${gy.toFixed(1)}):${z.toFixed(2)}`); }
     }
-    // KNOWN RED on the b4.6a face GLBs (10-17 of ~250 rays, worst 1.2-1.4 m): the drawn back of
-    // cliff_face_a/b/c is not flush with its back plane. Fix = slice b4.6c2 (build_cliff_kit.py face
-    // backs). Until then it reports PENDING; CLIFF_BACK_STRICT=1 (b4.6c2 flips the default) fails it.
+    // Strict since b4.6c2 (was PENDING on the b4.6a faces: 10-17 of ~250 rays gapped, worst 1.2-1.4 m at
+    // the face ends and under face_a's crest; fixed by the backer slab in build_cliff_kit.py).
     const pass = hits > 50 && gapped === 0;
-    const label = `[back] ${key}: back within 0.25 m of the flat back plane (lower 70 %)`, detail = `${hits} rays, ${gapped} gapped, worst ${worst.toFixed(2)} m`;
-    if (!pass && /^cliff_face_/.test(key) && process.env.CLIFF_BACK_STRICT !== '1') console.log(`PENDING ${label}  ${detail} (b4.6c2)`);
-    else ok(pass, label, detail);
+    const label = `[back] ${key}: back within 0.25 m of the flat back plane (lower 70 %)`, detail = `${hits} rays, ${gapped} gapped, worst ${worst.toFixed(2)} m${at.length ? ` at (x,y):gap ${at.slice(0, process.env.CLIFF_BACK_DEBUG ? 99 : 6).join(' ')}` : ''}`;
+    ok(pass, label, detail);
   }
 }
 

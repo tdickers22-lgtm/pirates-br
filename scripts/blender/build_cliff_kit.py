@@ -184,6 +184,23 @@ def back_wall(coll, tag, seed, half=(6.0, 1.0, 4.4), loc=(0, 0.5, 3.3)):
     return block(coll, f'{tag}_back', seed, half, loc, planes=4, vplanes=2, top=3)
 
 
+def backer(coll, tag, seed, parts, y, cover=0.80):
+    """The hill seat (b4.6c2): a plain capped slab with NO fracture planes, sized from the other
+    parts' world extents so it is the widest thing in X by 0.5 m (more than the sculpt's side relief;
+    fit_box maps it onto the box edges) and
+    reaches `cover` of the height (test-cliff-kit [back] grades the lower 70 %). flatten_back() then
+    clamps one unbroken plane. Without it the back_wall's vplanes/top planes chamfer its own corners
+    and the front blocks overhang its ends: 0.4-1.4 m daylight gaps at x = +-5.8 and under face_a's
+    crest (test-cliff-kit [back], b4.6c1)."""
+    bpy.context.view_layer.update()
+    ws = [o.matrix_world @ v.co for o in parts for v in o.data.vertices]
+    x0, x1 = min(w.x for w in ws) - 0.50, max(w.x for w in ws) + 0.50
+    z0, z1 = min(w.z for w in ws), max(w.z for w in ws)
+    top = z0 + cover * (z1 - z0)
+    return block(coll, f'{tag}_backer', seed, (0.5 * (x1 - x0), 0.5 * (y[1] - y[0]), 0.5 * (top - z0)),
+                 (0.5 * (x0 + x1), 0.5 * (y[0] + y[1]), 0.5 * (top + z0)), planes=0)
+
+
 # ── cliff faces ──────────────────────────────────────────────────────────────────────────────
 def form_face_a(coll, seed=6101):
     """Columnar: a rank of hexagonal jointed columns along X, BOTH ends capped (no spindle tips),
@@ -208,6 +225,7 @@ def form_face_a(coll, seed=6101):
                            (rng.uniform(60, 95), rng.uniform(-20, 20), rng.uniform(0, 180)),
                            sides=6, planes=2, reach=(0.62, 0.74)))
     parts += rubble(coll, 'fa', seed, 4, 5.0, (-2.9, -1.9))
+    parts.append(backer(coll, 'fa', seed + 5, parts, (0.45, 1.55)))
     joints = tuple((((-5.0 + 1.0 * k), -1.0, 3.5), (0.97, 0.22, 0.0), 0.035, 0.12) for k in range(0, 11, 2))
     recipe = dict(macro=(0.06, 1.6), heights=((0, 2.0, 0.045), (1, 0.7, 0.020), (0, 0.27, 0.007)),
                   strata=dict(bed=0.9, amp=0.030, dip=(0.04, 0.02, 1.0)), joints=joints, chips=0.018)
@@ -243,6 +261,7 @@ def form_face_b(coll, seed=6211):
         z += t * 0.92
         k += 1
     parts += rubble(coll, 'fb', seed, 7, 5.2, (-3.0, -2.0), size=(0.25, 0.55))
+    parts.append(backer(coll, 'fb', seed + 5, parts, (0.5, 1.5)))
     recipe = dict(macro=(0.07, 1.8), heights=((0, 2.4, 0.050), (1, 0.8, 0.022), (0, 0.30, 0.008)),
                   strata=dict(bed=0.45, amp=0.035, dip=(0.07, 0.02, 1.0)), chips=0.02,
                   joints=(((-2.4, -1.0, 3.5), (0.96, 0.28, 0.0), 0.04, 0.14), ((2.9, -1.0, 3.0), (0.95, -0.3, 0.0), 0.04, 0.12)))
@@ -271,6 +290,7 @@ def form_face_c(coll, seed=6337):
                            (rng.uniform(-4.6, 4.6), rng.uniform(-2.9, -2.3), sz * 0.3),
                            (rng.uniform(-20, 20), rng.uniform(-20, 20), rng.uniform(0, 90)), planes=6))
     parts += rubble(coll, 'fc', seed, 4, 5.0, (-3.0, -2.0), size=(0.30, 0.6))
+    parts.append(backer(coll, 'fc', seed + 5, parts, (0.5, 1.5)))
     recipe = dict(macro=(0.10, 2.2), heights=((0, 2.6, 0.055), (1, 0.9, 0.024), (0, 0.33, 0.009)),
                   strata=dict(bed=1.1, amp=0.025, dip=(0.12, 0.05, 1.0)), chips=0.024,
                   joints=(((-0.9, -1.0, 4.0), (0.99, 0.1, 0.0), 0.05, 0.16), ((3.6, -1.0, 3.0), (0.93, 0.35, 0.0), 0.04, 0.12)))
