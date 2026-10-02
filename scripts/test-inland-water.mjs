@@ -24,7 +24,8 @@ import {
   inlandWadeSpeedMul, streamDepthAt, streamSurfaceY,
   streamHalfWidth,
 } from '../src/shared/locomotion.ts';
-import { STREAM_BANK_TOLERANCE_M, fitStreamBanks } from '../src/client/world/island/StreamBuilder.ts';
+import * as THREE from 'three';
+import { STREAM_BANK_TOLERANCE_M, buildInlandWater, fitStreamBanks } from '../src/client/world/island/StreamBuilder.ts';
 
 const RAW = process.argv.includes('--mutate=raw-bed');
 // b4.7a2 RED proof: --mutate=no-bank puts every edge at the nominal trapezoid
@@ -114,6 +115,39 @@ for (const { i, p } of ponds) {
 }
 const shelves = islands.flatMap((i) => getIslandLandforms(i).filter((r) => r.kind === 'rock_shelf' && r.y >= 0.3 && r.y <= 0.8));
 expect('>= 6 tide-pool shelves', shelves.length >= 6, `${shelves.length}`);
+
+// b4.7a3: the BUILT mesh, not a re-derivation. Every stream's open edges
+// (both banks and the spring's head row across the channel) must lie on the
+// ground. Live run 3 (b6acbf00) still had the head row standing at full depth
+// over the ground: Booty 1.20 m, Crow 1.14, Castaway 1.13, Rumrunner 0.64.
+// RED: the same check at b6acbf00 fails on the head rows.
+console.log(`\nBuilt mesh: stream head rows and bank edges on the ground (<= ${STREAM_BANK_TOLERANCE_M} m over it)`);
+for (const isl of islands) {
+  const streams = getInlandStreams(isl);
+  if (!streams.length) continue;
+  const group = new THREE.Group();
+  buildInlandWater({ island: isl, group, lowDetail: false }, () => new THREE.MeshBasicMaterial());
+  const mesh = group.getObjectByName('inland-water');
+  const pos = mesh.geometry.getAttribute('position');
+  const gap = (v) => pos.getY(v) - getIslandSurfaceY(isl, isl.position.x + pos.getX(v), isl.position.z + pos.getZ(v));
+  let v0 = 0;
+  for (const s of streams) {
+    const n = Math.max(8, Math.ceil(s.length / 1.2));
+    let rows = 0;
+    for (let k = 0; k <= n; k++) { rows++; if (streamSurfaceY(s, k / n) < 0.06 && k > 0) break; }
+    let headWorst = -Infinity, edgeWorst = -Infinity, edgeOver = 0;
+    for (let j = 0; j < 5; j++) headWorst = Math.max(headWorst, gap(v0 + j));
+    for (let r = 0; r < rows; r++) for (const j of [0, 4]) {
+      const v = v0 + r * 5;
+      const x = isl.position.x + pos.getX(v + j), z = isl.position.z + pos.getZ(v + j);
+      if (getIslandSurfaceY(isl, x, z) < 0.05) continue; // the delta runs out onto the wet beach
+      const g = gap(v + j); edgeWorst = Math.max(edgeWorst, g); if (g > STREAM_BANK_TOLERANCE_M) edgeOver++;
+    }
+    expect(`${isl.id}/${s.id}: spring head row lies on the ground`, headWorst <= STREAM_BANK_TOLERANCE_M, `worst ${headWorst.toFixed(2)} m`);
+    expect(`${isl.id}/${s.id}: built bank edges on the ground`, edgeOver === 0, `${edgeOver} over, worst ${edgeWorst.toFixed(2)} m`);
+    v0 += rows * 5;
+  }
+}
 
 console.log('\nWading');
 const rk = islands.find((i) => i.id === 'rumrunner-key');

@@ -271,7 +271,14 @@ try {
   async function look(p, t) {
     await page.evaluate(([p, t]) => {
       const dx = t[0] - p[0], dy = t[1] - p[1], dz = t[2] - p[2], L = Math.hypot(dx, dy, dz) || 1;
-      window.__piratesBR.enableFreeCam(p[0], p[1], p[2], Math.atan2(dx / L, dz / L), Math.asin(dy / L));
+      const g = window.__piratesBR;
+      g.enableFreeCam(p[0], p[1], p[2], Math.atan2(dx / L, dz / L), Math.asin(dy / L));
+      // Settle at EVERY placement: the waiting->playing transition re-raises the
+      // load guard, which holds every unpaid material (island terrain included)
+      // out of the frame while the already-paid waterfall program still draws.
+      // Run 3 shot Smuggler's valley in that window: sea plus a bare ribbon,
+      // 'state waiting', 72 draws. settleLod reads the camera and drops the guard.
+      g.settleLod?.(2);
     }, [p, t]);
   }
   async function shoot(name) {

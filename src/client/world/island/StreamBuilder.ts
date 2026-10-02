@@ -145,6 +145,7 @@ function sweepStream(
   })());
 
   function emitRow(u: number, y: number, last: boolean) {
+    const head = prevRow === null;
     const p = along(s, u);
     const du = 1.5 / s.length;
     const grade = (streamSurfaceY(s, u - du) - streamSurfaceY(s, u + du)) / 3;
@@ -169,8 +170,15 @@ function sweepStream(
       }
       aer = Math.min(1, aer + delta * 0.25);
       const alpha = last ? 0 : 1 - delta * 0.55;
-      const vy = Math.abs(a) === 1 ? Math.min(y, bank.edgeY[side]) + 0.03 : y + 0.03;
-      row.push(sink.vert(p.x - p.dz * a * wa, vy, p.z + p.dx * a * wa, a, u * s.length, aer, 0, 6, (bank.w[0] + bank.w[1]) / 2, alpha));
+      const vx = p.x - p.dz * a * wa, vz = p.z + p.dx * a * wa;
+      let vy = Math.abs(a) === 1 ? Math.min(y, bank.edgeY[side]) + 0.03 : y + 0.03;
+      // The spring's head row is an open edge across the channel: at full
+      // depth it stood 0.6 m (valley) to 1.2 m (gorge) over the ground as a
+      // little cliff of water (live run 3: Booty 1.20, Crow 1.14, Castaway
+      // 1.13, Rumrunner/Smuggler 0.64, all on the head row). The spring wells
+      // out of the ground instead, so the head row lies on it.
+      if (head) vy = Math.min(vy, ground(vx, vz) + 0.03);
+      row.push(sink.vert(vx, vy, vz, a, u * s.length, aer, 0, 6, (bank.w[0] + bank.w[1]) / 2, alpha));
     }
     if (prevRow) for (let j = 0; j + 1 < row.length; j++) sink.quad(prevRow[j], prevRow[j + 1], row[j + 1], row[j]);
     prevRow = row;
