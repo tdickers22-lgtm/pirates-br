@@ -18,6 +18,7 @@ import {
 } from '../../shared/cargo.js';
 import { MapGenerator } from '../world/MapGenerator.js';
 import type { HullImpactKind } from '../systems/PhysicsSystem.js';
+import { ClimbSystem } from '../systems/ClimbSystem.js';
 import { PhysicsSystem, applyShipRudderSteering, stormSeaState, FOUNDER_WADE_DEPTH } from '../systems/PhysicsSystem.js';
 import { FOUNDER, founderPlan, pickRepairTargetHole, takeFounderStages } from '../systems/FloodSystem.js';
 import { holeRepairTime } from '../../shared/flooding/floodModel.js';
@@ -430,9 +431,6 @@ type EliminationCause = DamageSource | 'ship_sunk' | 'killed' | 'lost_at_sea';
  *  positional reading is the better answer. Deaths land within a tick or two of
  *  the blow that caused them; this is deliberately generous to bleed-out. */
 const DAMAGE_SOURCE_WINDOW_SECONDS = 12;
-/** Mast ladder climb rate — fraction of the full ladder per second (W up, S
- *  down). ~1.8s deck→nest on a sloop keeps the nest a commitment, not a snap. */
-const MAST_CLIMB_RATE = 0.55;
 /** Biggest crew the roster allows (Squads: 3-4 on a Man-o'-War). */
 const CREW_MAX_MEMBERS = 4;
 /** Hard ceiling on hulls in one match: ten piers x two berths (netcode-10), and
@@ -602,6 +600,8 @@ export class Match {
 
   // Systems
   private physics = new PhysicsSystem();
+  /** b4.7b: the one climb verb (mast ladder + island routes). */
+  private climbs = new ClimbSystem();
   /** RNG-01: the match's seeded gameplay stream (see makeMatchRng). */
   private readonly rng: () => number;
   private weapons: WeaponSystem;
@@ -2484,7 +2484,7 @@ export class Match {
     if (player.isBot) return false; // bots have no ladder AI — keep them off it
     if (this.isStationOccupied(ship, 'crow', player.id)) return false;
     this.clearStationFlags(player);
-    player.mastClimb = 0;
+    this.climbs.mountMast(player);
     return true;
   }
 
@@ -2670,6 +2670,7 @@ export class Match {
       this.state.seaRocks,
       this.state.storm,
     );
+    this.climbs.pin(this.state.players);
     // The relay runs FIRST so bullets and cannonballs name themselves; whatever
     // health is still missing after it was drowning, fire or the ground.
     this.relayPendingCombatEvents();
@@ -3012,25 +3013,10 @@ export class Match {
     // ── Mast ladder climb: captive mode. W/S slides mastClimb along the ladder
     // (PhysicsSystem pins the body each tick); [X] lets go mid-climb and drops
     // back to the deck. Nothing else — no weapons, no stations — while aloft.
+    // b4.7b: island routes share this captive mode ([X]/jump = jump-off there).
     if (player.mastClimb !== null) {
-      if (input.interact && this.consumeOneShot(client, 'interact', input.seq)) {
-        player.mastClimb = null;
-        return;
-      }
-      if (!ship || player.onShipId !== ship.id || ship.sinking) {
-        player.mastClimb = null;
-        return;
-      }
-      const climbDir = (input.forward ? 1 : 0) - (input.back ? 1 : 0);
-      player.mastClimb = clamp(player.mastClimb + climbDir * MAST_CLIMB_RATE * dt, 0, 1);
-      if (player.mastClimb >= 1) {
-        // Top of the ladder — step into the (walkable) basket.
-        player.mastClimb = null;
-        player.atCrowNest = true;
-      } else if (player.mastClimb <= 0 && climbDir < 0) {
-        // Back at the base — release standing on deck at the ladder foot.
-        player.mastClimb = null;
-      }
+      const letGo = input.interact && this.consumeOneShot(client, 'interact', input.seq);
+      this.climbs.applyInput(player, input, ship, dt, letGo);
       return;
     }
 
@@ -5987,6 +5973,8 @@ export class Match {
         if (this.boardLatchUntil.has(player.id)) return true;
         return this.refuse('no_ladder');
       }
+      case 'climb':
+        return this.climbs.tryMount(player, this.state.islands) || this.refuse('out_of_reach');
       case 'dock':
         return this.tryClimbIslandDockFromWater(player) || this.refuse('out_of_reach');
       case 'mermaid':

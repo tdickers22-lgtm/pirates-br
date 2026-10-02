@@ -43,7 +43,7 @@ import { angleWrap, clamp } from '../../shared/utils/index.js';
 export const VALID_INTERACT_INTENTS: ReadonlySet<InteractIntent> = new Set<InteractIntent>([
   'barrel', 'chest', 'board', 'dock', 'mermaid', 'keg_diffuse', 'upgrade',
   'gold_hoarder', 'stow_chest', 'helm', 'sails', 'brace',
-  'crow', 'anchor', 'repair', 'bail', 'revive', 'cannon', 'ammo',
+  'crow', 'climb', 'anchor', 'repair', 'bail', 'revive', 'cannon', 'ammo',
 ]);
 
 /** Longest string any inbound field may carry. Names/codes/ids are far shorter;

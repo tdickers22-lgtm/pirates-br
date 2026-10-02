@@ -1464,6 +1464,7 @@ export type InteractIntent =
   | 'sails'
   | 'brace'
   | 'crow'
+  | 'climb'
   | 'anchor'
   | 'repair'
   | 'bail'
