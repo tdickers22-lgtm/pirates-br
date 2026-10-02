@@ -4,6 +4,7 @@
  * between the island's stops, the rope bridges between peaks, and the ruin.
  */
 import * as THREE from 'three';
+import { climbLength, climbPointAt, islandClimbs } from '../../../shared/interactions.js';
 import { getBridgeSpanY, getIslandSurfaceY } from '../../../shared/utils/index.js';
 import { MAX_METALNESS_NO_ENV, MIN_ALBEDO_VALUE } from '../../assets/materialAudit.js';
 import type { IslandBuildCtx } from './context.js';
@@ -357,93 +358,46 @@ export function buildStoneIdols(ctx: IslandBuildCtx) {
   }
 }
 
-/** Rope cliff ladder dangling from a high terrace down toward the beach. */
+/** b4.7b: the island's climb routes (island.climbs, placed by the static
+ *  world), drawn along the same draped polyline the server pins climbers to.
+ *  The old decorative ladder (random site, no server presence) is gone. Rails +
+ *  rungs for ladders, one hawser for ropes, nothing extra for scrambles (the
+ *  rock steps come from the face itself). GLB kit pieces replace these lines
+ *  when build_poi_kit.py ships them. */
 export function buildRopeLadder(ctx: IslandBuildCtx) {
-  const { island, group, rng, lowDetail, surfacePoint, isSolidDecorPoint, islandSeed, SURFACE_ABOVE_WATER } = ctx;
-  if (!lowDetail && island.profile.heightProfile > 0.32 && rng(islandSeed * 991) > 0.25) {
-    const ladderAngle = island.profile.ridgeAxis + Math.PI + (rng(islandSeed * 997) - 0.5) * 0.8;
-    const top = surfacePoint(0.4, ladderAngle, 0);
-    const bottom = surfacePoint(0.78, ladderAngle, 0);
-    const dropY = top.y - bottom.y;
-    if (dropY > 2.5 && isSolidDecorPoint(top, SURFACE_ABOVE_WATER, -0.2) && isSolidDecorPoint(bottom, SURFACE_ABOVE_WATER, -0.15)) {
-      const dx = bottom.x - top.x;
-      const dz = bottom.z - top.z;
-      const horiz = Math.hypot(dx, dz);
-      if (horiz > 0.5) {
-        const len = Math.hypot(horiz, dropY);
-        const yaw = Math.atan2(dx, dz);
-        // Perpendicular horizontal direction (for ladder width)
-        const perpX = Math.cos(yaw); // = dz/horiz
-        const perpZ = -Math.sin(yaw); // = -dx/horiz
-        // AUDIT P0 (floating-props): this was a dead-straight chord from a
-        // terrace to the beach, so 82 of 114 rungs hung up to 3.1m in open air
-        // over Crow's Perch while 27 more were buried in the hill. The ladder
-        // now DRAPES: every rung and both rope polylines are sampled against
-        // the shared terrain, so it lies on a sheer face like a hanging ladder
-        // and follows a broken slope like a laid rope run.
-        const rungCount = Math.max(8, Math.round(len / 0.5));
-        /** Draped centreline sample: the DRAWN terrain surface. The analytic
-         * field runs above its triangle chords at terrace lips; sampling that
-         * field left the first rungs visibly hovering over the mesh. */
-        const drapePoint = (t: number) => {
-          const px = top.x + dx * t;
-          const pz = top.z + dz * t;
-          const gy = drawnGroundAt(ctx, px, pz);
-          return { x: px, y: gy, z: pz };
-        };
-        const ropeMat = new THREE.LineBasicMaterial({ color: 0xc8b27a });
-        // Two parallel rope polylines through the SAME sampled points, so the
-        // rails follow every terrace and lip the rungs sit on.
-        for (const sx of [-1, 1] as const) {
-          const ox = perpX * sx * 0.22;
-          const oz = perpZ * sx * 0.22;
-          const ropePts: number[] = [];
-          const ropeSteps = Math.max(6, Math.round(len / 1.0));
-          for (let s = 0; s <= ropeSteps; s++) {
-            const p = drapePoint(s / ropeSteps);
-            ropePts.push(p.x + ox, p.y + 0.19, p.z + oz);
-          }
-          const ropeGeo = new THREE.BufferGeometry();
-          ropeGeo.setAttribute('position', new THREE.Float32BufferAttribute(ropePts, 3));
-          group.add(new THREE.Line(ropeGeo, ropeMat));
-        }
-        // Rungs: seated on the surface (<=0.25m clearance) and pitched to the
-        // local grade so they lie flat on the rock rather than stepping.
-        const rungMat2 = new THREE.MeshStandardMaterial({ color: 0x6e4c25, roughness: 0.95 });
-        const rungGeo = new THREE.BoxGeometry(0.5, 0.045, 0.06);
-        const rungs = new THREE.InstancedMesh(rungGeo, rungMat2, rungCount);
-        rungs.name = 'ladder-rung';
-        const rungObj = new THREE.Object3D();
-        for (let r2 = 0; r2 < rungCount; r2++) {
-          const t = (r2 + 0.5) / rungCount;
-          const here = drapePoint(t);
-          const ahead = drapePoint(Math.min(1, t + 0.5 / rungCount));
-          const behind = drapePoint(Math.max(0, t - 0.5 / rungCount));
-          const runDist = Math.max(0.05, Math.hypot(ahead.x - behind.x, ahead.z - behind.z));
-          const pitch = Math.atan2(behind.y - ahead.y, runDist);
-          rungObj.position.set(here.x, here.y + 0.14, here.z);
-          rungObj.rotation.set(0, yaw, 0);
-          rungObj.rotateX(-pitch);
-          rungObj.scale.setScalar(1);
-          rungObj.updateMatrix();
-          rungs.setMatrixAt(r2, rungObj.matrix);
-        }
-        rungs.instanceMatrix.needsUpdate = true;
-        group.add(rungs);
-        // Anchor stakes at the top of the run
-        const anchorStakeMat = new THREE.MeshStandardMaterial({ color: 0x3d2614, roughness: 1 });
-        const head = drapePoint(0);
-        for (const sx of [-1, 1] as const) {
-          const ox = perpX * sx * 0.3;
-          const oz = perpZ * sx * 0.3;
-          const stake = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 0.6, 5), anchorStakeMat);
-          stake.position.set(head.x + ox, head.y + 0.1, head.z + oz);
-          stake.castShadow = true;
-          group.add(stake);
-        }
+  const { island, group } = ctx;
+  const routes = islandClimbs(island);
+  if (routes.length === 0) return;
+  const ox = island.position.x; const oy = island.position.y; const oz = island.position.z;
+  const rails: number[] = [];
+  const rungs: number[] = [];
+  for (const c of routes) {
+    if (c.kind === 'scramble') continue;
+    const len = climbLength(c);
+    const n = Math.max(2, Math.ceil(len / 0.4));
+    const px = -c.nz; const pz = c.nx; // across the face
+    const half = c.kind === 'rope' ? 0 : 0.24;
+    let prev: { x: number; y: number; z: number } | null = null;
+    for (let i = 0; i <= n; i++) {
+      const p = climbPointAt(c, i / n);
+      const x = p.x - ox - c.nx * 0.25; const y = p.y - oy + 0.05; const z = p.z - oz - c.nz * 0.25;
+      if (prev) {
+        for (const s of half ? [-half, half] : [0]) rails.push(prev.x + px * s, prev.y, prev.z + pz * s, x + px * s, y, z + pz * s);
       }
+      if (half && i > 0 && i < n) rungs.push(x - px * half, y, z - pz * half, x + px * half, y, z + pz * half);
+      prev = { x, y, z };
     }
   }
+  const add = (pos: number[], color: number): void => {
+    if (!pos.length) return;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    const seg = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color }));
+    seg.name = 'climb-routes';
+    group.add(seg);
+  };
+  add(rails, 0xc8b27a);
+  add(rungs, 0x7a5a36);
 }
 
 /** Secondary smaller wreck on bigger islands so they feel storied. (Skipped

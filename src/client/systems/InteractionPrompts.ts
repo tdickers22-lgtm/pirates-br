@@ -26,6 +26,7 @@
  *     take it back. No sailing station ever can.
  */
 import * as THREE from 'three';
+import { climbLabel, findClimbMount } from '../../shared/interactions.js';
 import { bailPoseOf, canScoop, throwLanding } from '../../shared/flooding/bail.js';
 import { ECONOMY, HARVEST, PLAYER, SHIP_STATS, UPGRADE_COSTS } from '../../shared/constants/index.js';
 import { BROKER_NAME, BROKER_NAME_PLURAL } from '../ui/DisplayNames.js';
@@ -428,6 +429,22 @@ export class InteractionPrompts {
           `${glyph('interact')} Climb Dock Ladder`,
           'Swim up to the wooden dock',
           'dock',
+        );
+      }
+    }
+
+    // b4.7b: island ladders, ropes and scrambles: the same shared mount query
+    // the server's [X] grant runs, so the prompt never offers a refused climb.
+    if (!player.onShipId) {
+      const mount = findClimbMount(this.view.state?.islands ?? [], player.position.x, player.position.y, player.position.z);
+      if (mount) {
+        const c = mount.climb;
+        const end = mount.t === 0 ? new THREE.Vector3(c.ax, c.ay + 0.9, c.az) : new THREE.Vector3(c.bx, c.by + 0.9, c.bz);
+        this.pushInteractionCandidate(
+          candidates, player, end, 3, 0.45,
+          `${glyph('interact')} ${mount.t === 0 ? climbLabel(c.kind) : 'Climb Down'}`,
+          mount.t === 0 ? 'W up, S down, Space jumps off' : 'S down, W back up, Space jumps off',
+          'climb',
         );
       }
     }

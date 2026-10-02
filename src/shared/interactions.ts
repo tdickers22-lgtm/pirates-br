@@ -1,4 +1,4 @@
-import { BERTH, FLOODING, PLAYER, SHIP, SHIP_STATS } from './constants/index.js';
+import { BERTH, FLOODING, PHYSICS, PLAYER, SHIP, SHIP_STATS } from './constants/index.js';
 import { getHullContactChain } from './hull.js';
 import type { HullSections, Island, IslandDock, IslandNpc, Player, Ship, ShipHole, ShipHoleTier, ShipKeg, UpgradeStation, Vec3 } from './types/index.js';
 import {
@@ -985,4 +985,133 @@ export function findNearbyKeg(
     }
   }
   return closest;
+}
+
+// ── b4.7b: the climb verb ────────────────────────────────────────────────────
+// One captive climb state for every vertical route: the mast ladder (ship
+// space, Match/PhysicsSystem) and the island routes below (world space). The
+// progress scalar is Player.mastClimb for both, so the client's climb pose,
+// holstered viewmodel, hidden prompts and rung footsteps already follow an
+// island climb with no new field on the wire (no parallel state). The server
+// keeps only which island route a climber is on (ClimbSystem).
+
+export type ClimbKind = 'ladder' | 'rope' | 'scramble';
+
+/** A climbable route on an island, WORLD coordinates. `a` is the foot (low end,
+ *  on walkable ground), `b` the top (high end, on walkable ground). `nx,nz` is
+ *  the unit horizontal normal pointing OUT of the face (away from the high side):
+ *  the climber hangs CLIMB_STANDOFF_M along it and jump-off throws along it. */
+export interface IslandClimb {
+  id: string;
+  kind: ClimbKind;
+  ax: number; ay: number; az: number;
+  bx: number; by: number; bz: number;
+  nx: number; nz: number;
+  /** Route polyline draped on the face, flat [x,y,z,...], pts[0..2] = a, last = b. */
+  pts: number[];
+}
+
+/** Structural extension of Island: b4.7b adds `climbs` to the served world. */
+export interface ClimbPlacedIsland { climbs?: IslandClimb[] }
+
+export const CLIMB_UP_MPS = 2.4;
+export const CLIMB_DOWN_MPS = 3.2;
+/** Horizontal distance a jump-off clears from the face before the feet are back at the height they left from. */
+export const CLIMB_JUMP_OFF_M = 2;
+export const CLIMB_JUMP_OFF_VY = 3.6;
+/** [X] mounts a route within this horizontal reach of its foot or top. */
+export const CLIMB_MOUNT_REACH_M = 1.2;
+/** ... and within this height of that end (feet on the ground there). */
+export const CLIMB_MOUNT_DY_M = 1.4;
+export const CLIMB_STANDOFF_M = 0.45;
+/** The walker's LOCO.SLOPE_MAX (PhysicsSystem): rise/run above it is a wall. */
+export const WALK_SLOPE_MAX = 1.15;
+/** Scramble corridors: rock-step routes on faces up to this rise/run, the body
+ *  held inside SCRAMBLE_CORRIDOR_M of the route line. */
+export const SCRAMBLE_SLOPE_MAX = 1.6;
+export const SCRAMBLE_CORRIDOR_M = 1.5;
+/** Every scarp taller than this that separates walkable ground gets a route ... */
+export const CLIMB_SCARP_MIN_M = 5;
+/** ... no point of it further than this from one. */
+export const CLIMB_SCARP_SPACING_M = 60;
+
+export function islandClimbs(island: object): readonly IslandClimb[] {
+  return (island as ClimbPlacedIsland).climbs ?? [];
+}
+
+/** Route length along its draped polyline (what the climber travels). */
+export function climbLength(c: IslandClimb): number {
+  let len = 0;
+  for (let i = 3; i < c.pts.length; i += 3) {
+    len += Math.hypot(c.pts[i] - c.pts[i - 3], c.pts[i + 1] - c.pts[i - 2], c.pts[i + 2] - c.pts[i - 1]);
+  }
+  return len;
+}
+
+/** Body position on the route at progress t (0 foot, 1 top): arc-length
+ *  interpolation along the polyline draped on the face, held CLIMB_STANDOFF_M
+ *  out along the face normal in the middle and none at the ends, so mounting
+ *  and the release at the top are steps on and off real ground. */
+export function climbPointAt(c: IslandClimb, t: number): Vec3 {
+  const u = Math.max(0, Math.min(1, t));
+  const n = c.pts.length / 3;
+  let target = u * climbLength(c);
+  let x = c.pts[0], y = c.pts[1], z = c.pts[2];
+  for (let i = 1; i < n; i++) {
+    const j = i * 3;
+    const seg = Math.hypot(c.pts[j] - c.pts[j - 3], c.pts[j + 1] - c.pts[j - 2], c.pts[j + 2] - c.pts[j - 1]);
+    if (target <= seg || i === n - 1) {
+      const f = seg > 1e-6 ? Math.min(1, target / seg) : 1;
+      x = c.pts[j - 3] + (c.pts[j] - c.pts[j - 3]) * f;
+      y = c.pts[j - 2] + (c.pts[j + 1] - c.pts[j - 2]) * f;
+      z = c.pts[j - 1] + (c.pts[j + 2] - c.pts[j - 1]) * f;
+      break;
+    }
+    target -= seg;
+  }
+  const off = CLIMB_STANDOFF_M * Math.min(1, u * 6, (1 - u) * 6);
+  return { x: x + c.nx * off, y, z: z + c.nz * off };
+}
+
+/** One tick of the captive climb: dir +1 up, -1 down, 0 hold. */
+export function stepClimbProgress(c: IslandClimb, t: number, dir: number, dt: number): number {
+  if (dir === 0) return t;
+  const len = Math.max(0.5, climbLength(c));
+  const speed = dir > 0 ? CLIMB_UP_MPS : CLIMB_DOWN_MPS;
+  return Math.max(0, Math.min(1, t + Math.sign(dir) * speed * dt / len));
+}
+
+/** The route [X] would mount from here (feet at x,y,z), or null. Same answer
+ *  for the client prompt and the server grant. */
+export function findClimbMount(
+  islands: readonly object[], x: number, y: number, z: number, reach = CLIMB_MOUNT_REACH_M,
+): { climb: IslandClimb; t: 0 | 1 } | null {
+  let best: { climb: IslandClimb; t: 0 | 1 } | null = null;
+  let bestD = reach;
+  for (const island of islands) {
+    for (const c of islandClimbs(island)) {
+      const da = Math.hypot(x - c.ax, z - c.az);
+      if (da <= bestD && Math.abs(y - c.ay) <= CLIMB_MOUNT_DY_M) { best = { climb: c, t: 0 }; bestD = da; }
+      const db = Math.hypot(x - c.bx, z - c.bz);
+      if (db <= bestD && Math.abs(y - c.by) <= CLIMB_MOUNT_DY_M) { best = { climb: c, t: 1 }; bestD = db; }
+    }
+  }
+  return best;
+}
+
+/** Jump-off: thrown out along the face normal so the feet clear
+ *  CLIMB_JUMP_OFF_M horizontally by the time they are back at the height they
+ *  left from (ballistic under PHYSICS.GRAVITY). */
+export function climbJumpOff(c: IslandClimb, t: number): { position: Vec3; velocity: Vec3 } {
+  const p = climbPointAt(c, t);
+  const flight = (2 * CLIMB_JUMP_OFF_VY) / -PHYSICS.GRAVITY;
+  const out = CLIMB_JUMP_OFF_M / flight;
+  return {
+    position: { x: p.x + c.nx * 0.15, y: p.y, z: p.z + c.nz * 0.15 },
+    velocity: { x: c.nx * out, y: CLIMB_JUMP_OFF_VY, z: c.nz * out },
+  };
+}
+
+export function climbLabel(kind: ClimbKind): string {
+  return kind === 'rope' ? 'Climb Rope' : kind === 'scramble' ? 'Scramble Up' : 'Climb Ladder';
 }
