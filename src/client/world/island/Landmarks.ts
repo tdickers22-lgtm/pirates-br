@@ -5,7 +5,7 @@
  */
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { climbLength, climbPointAt, islandClimbs } from '../../../shared/interactions.js';
+import { CLIMB_STANDOFF_M, climbLength, climbPointAt, islandClimbs } from '../../../shared/interactions.js';
 import { getBridgeSpanY, getIslandSurfaceY } from '../../../shared/utils/index.js';
 import { MAX_METALNESS_NO_ENV, MIN_ALBEDO_VALUE } from '../../assets/materialAudit.js';
 import type { IslandBuildCtx } from './context.js';
@@ -403,32 +403,39 @@ export function buildRopeLadder(ctx: IslandBuildCtx) {
   for (const c of routes) {
     const len = climbLength(c);
     const px = -c.nz; const pz = c.nx; // across the face
-    // Island-local point on the route, `out` metres off the face, `side` across it.
+    // Island-local point on the route `out` metres off the FACE (the draped
+    // polyline, not the body: climbPointAt's standoff tapers to 0 at the ends
+    // and would bury the rails there), `side` across it. The drawn terrain is a
+    // chord mesh that runs proud of the analytic face at a concave foot, so the
+    // point then steps out along the normal until it clears the drawn ground.
     const at = (t: number, out: number, side: number, lift = 0): THREE.Vector3 => {
       const p = climbPointAt(c, t);
-      return new THREE.Vector3(
-        p.x - ox - c.nx * out + px * side, p.y - oy + lift, p.z - oz - c.nz * out + pz * side,
-      );
+      const u = Math.max(0, Math.min(1, t));
+      const back = CLIMB_STANDOFF_M * Math.min(1, u * 6, (1 - u) * 6) - out;
+      let x = p.x - ox - c.nx * back + px * side; let z = p.z - oz - c.nz * back + pz * side;
+      const y = p.y - oy + lift;
+      for (let k = 0; k < 30 && drawnGroundAt(ctx, x, z) > y - 0.06; k++) { x += c.nx * 0.08; z += c.nz * 0.08; }
+      return new THREE.Vector3(x, y, z);
     };
     const n = Math.max(2, Math.ceil(len / 0.5));
     if (c.kind === 'ladder') {
       for (const s of [-CLIMB_RAIL_HALF_M, CLIMB_RAIL_HALF_M]) {
-        for (let i = 0; i < n; i++) rod(wood, at(i / n, 0.25, s, 0.05), at((i + 1) / n, 0.25, s, 0.05), 0.045);
-        const top = at(1, 0.25, s, 0.05);
+        for (let i = 0; i < n; i++) rod(wood, at(i / n, 0.12, s, 0.05), at((i + 1) / n, 0.12, s, 0.05), 0.045);
+        const top = at(1, 0.12, s, 0.05);
         rod(wood, top, top.clone().setY(top.y + 0.9), 0.045);
       }
       const rungs = Math.max(1, Math.floor(len / CLIMB_RUNG_STEP_M));
       for (let i = 1; i < rungs; i++) {
         const t = i / rungs;
-        rod(wood, at(t, 0.25, -CLIMB_RAIL_HALF_M - 0.04, 0.05), at(t, 0.25, CLIMB_RAIL_HALF_M + 0.04, 0.05), 0.03);
+        rod(wood, at(t, 0.12, -CLIMB_RAIL_HALF_M - 0.04, 0.05), at(t, 0.12, CLIMB_RAIL_HALF_M + 0.04, 0.05), 0.03);
       }
     } else if (c.kind === 'rope') {
-      for (let i = 0; i < n; i++) rod(rope, at(i / n, 0.22, 0, 0.05), at((i + 1) / n, 0.22, 0, 0.05), 0.035);
+      for (let i = 0; i < n; i++) rod(rope, at(i / n, 0.1, 0, 0.05), at((i + 1) / n, 0.1, 0, 0.05), 0.035);
       const knots = Math.floor(len / CLIMB_KNOT_STEP_M);
-      for (let i = 1; i < knots; i++) knot(at(i / knots, 0.22, 0, 0.05), 0.075);
+      for (let i = 1; i < knots; i++) knot(at(i / knots, 0.1, 0, 0.05), 0.075);
       const top = at(1, 0, 0, 0);
       stake(top.x - c.nx * 0.6, top.y, top.z - c.nz * 0.6, 0.7, 0.07);
-      rod(rope, at(1, 0.22, 0, 0.05), new THREE.Vector3(top.x - c.nx * 0.6, top.y + 0.55, top.z - c.nz * 0.6), 0.035);
+      rod(rope, at(1, 0.1, 0, 0.05), new THREE.Vector3(top.x - c.nx * 0.6, top.y + 0.55, top.z - c.nz * 0.6), 0.035);
     } else {
       // Scramble: hand line 0.9 m up, 0.7 m beside the step line.
       for (let i = 0; i < n; i++) rod(rope, at(i / n, 0, 0.7, 0.9), at((i + 1) / n, 0, 0.7, 0.9), 0.03);
