@@ -110,6 +110,9 @@ const PINNED_BASE = {
   sea_arch_a: -5.314, sea_arch_b: -1.679, searock_d: -2.515, searock_e: -2.078, searock_f: -2.557, searock_g: -1.573,
   basalt_columns_a: -1.211, scree_fan_a: -0.744, spire_a: -1.052, spire_b: -1.186, spire_c: -1.285,
   strata_slab_a: -1.645, strata_slab_b: -1.507, strata_slab_c: -1.521, reef_a: -0.864, reef_b: -0.858, reef_c: -0.869,
+  // Climb kit (b4.7b): five unit nodes instanced by Landmarks.buildRopeLadder, not a prop set on the ground;
+  // the base is the stopper knot centred on its rope line.
+  climb_kit: -0.08,
   castaway_camp: -3.4, crow_roost: -0.342, dig_site: -0.541, fort: -5.006, gallows: -0.611,
   kraken_wreck: -2.503, mermaid_shrine: -0.151, mine_head: -3.028, parley_table: -0.217,
   rock_arch: -0.286, rum_still: -3.0, shipwreck: -0.078, signal_pyre: -0.15, skull_totem: -0.387,

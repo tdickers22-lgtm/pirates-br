@@ -4,7 +4,7 @@ import { mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { browserArgs, describeGl } from '../lib/browser-args.mjs';
 // b4.7b live look at the climb routes: one headless SwiftShader Chromium on
 // 3101/8091 (seed 20260801), everything killed in finally. Counts the merged
-// route meshes per island (2 draws max) and frames a ladder, a rope and a
+// climb_kit instanced meshes per island (<= 5 draws, one per kit node, all GLB-backed) and frames a ladder, a rope and a
 // mast-free cliff route from 9 m off the face in daylight.
 // Usage: node scripts/probes/climb-routes-live.mjs [outDir]
 const OUT = process.argv[2] ?? 'test-results/climb-routes-live';
@@ -79,7 +79,11 @@ try {
     for (const isl of islands) {
       const grp = g.islandMeshes.get(isl.id);
       const meshes = [];
-      grp?.traverse((o) => { if (o.name === 'climb-routes' || o.name === 'climb-ropes') meshes.push({ name: o.name, tris: (o.geometry.index?.count ?? 0) / 3, visible: o.visible }); });
+      grp?.traverse((o) => {
+        if (!o.isInstancedMesh || !o.name.startsWith('climb-')) return;
+        const mats = (Array.isArray(o.material) ? o.material : [o.material]).map((m) => m.name);
+        meshes.push({ name: o.name, count: o.count, nodeTris: (o.geometry.index?.count ?? o.geometry.attributes.position.count) / 3, mats, visible: o.visible });
+      });
       const climbs = isl.climbs ?? [];
       perIsland.push({ id: isl.id, routes: climbs.length, meshes });
       for (const c of climbs) targets.push({ island: isl.id, id: c.id, kind: c.kind, pts: c.pts, nx: c.nx, nz: c.nz, ay: c.ay, by: c.by });
@@ -109,7 +113,11 @@ try {
   const withRoutes = report.perIsland.filter((p) => p.routes > 0);
   for (const p of withRoutes) {
     if (p.meshes.length === 0) fail.push(`${p.id}: ${p.routes} routes, no route mesh`);
-    if (p.meshes.length > 2) fail.push(`${p.id}: ${p.meshes.length} route meshes (> 2 draws)`);
+    if (p.meshes.length > 5) fail.push(`${p.id}: ${p.meshes.length} route meshes (> 5 draws, one per climb_kit node)`);
+    for (const m of p.meshes) {
+      if (!m.mats.some((n) => /^(Rope|Wood_)/.test(n))) fail.push(`${p.id}: ${m.name} draws the stand-in, not the climb_kit.glb node (${m.mats.join(',')})`);
+      if (!m.visible) fail.push(`${p.id}: ${m.name} hidden`);
+    }
   }
   if (withRoutes.length === 0) fail.push('no island has routes');
   writeFileSync(`${OUT}/report.json`, JSON.stringify({ perIsland: report.perIsland, shots, fail }, null, 1));

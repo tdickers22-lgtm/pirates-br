@@ -75,6 +75,10 @@ export const TIERS = {
     keys: ['barrel', 'keg', 'chest_closed', 'chest_open', 'crate', 'campfire', 'bedroll', 'lantern_post', 'tent_a', 'tent_b',
       'tent_c', 'bone_pile', 'driftwood_log', 'grave_marker', 'signal_pyre', 'wall_torch', 'bone_pile_cave', 'skull_shrine',
       'cave_painting_panel', 'rope_bridge_short', 'rowboat'] },
+  // Climb kit (b4.7b, build_poi_kit.py): five unit nodes (rail, rung, rope, knot, stake) instanced along every
+  // climb route; the file band is the five together. Palette Wood_Mid + Rope (no maps) and no LOD chain: the
+  // routes are built per island and the low-detail proxy draws a 4-sided stand-in from the same matrices.
+  'climb-kit': { family: 'props-poi', band: [300, 600], tex: null, lods: null, keys: ['climb_kit'] },
   // Flora: cross-card far (2-4 cards; a double-sided card may be modelled as 4 tris, so <= 16).
   palms: { family: 'flora-canopy', band: [10000, 16000], tex: ['base', 'normal'], foliage: true,
     lods: { need: ['LOD1', 'LOD2', 'far'], LOD1: { r: 0.40 }, LOD2: { r: 0.12 }, far: { max: 16 } },

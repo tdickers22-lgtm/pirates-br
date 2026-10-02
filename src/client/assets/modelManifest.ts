@@ -73,7 +73,7 @@ const FAMILY_MEMBERS: Record<Exclude<ModelFamily, 'shared' | 'instruments'>, rea
   'props-poi': [
     'barrel', 'keg', 'chest_closed', 'chest_open', 'crate', 'campfire', 'bedroll', 'lantern_post', 'tent_a', 'tent_b', 'tent_c',
     'bone_pile', 'driftwood_log', 'grave_marker', 'signal_pyre', 'wall_torch', 'bone_pile_cave', 'skull_shrine',
-    'cave_painting_panel', 'rope_bridge_short',
+    'cave_painting_panel', 'rope_bridge_short', 'climb_kit',
   ],
   'buildings-story': [
     'dock_mid', 'dock_end', 'watchtower', 'shipwreck', 'standing_stones', 'fort', 'tavern', 'stall',

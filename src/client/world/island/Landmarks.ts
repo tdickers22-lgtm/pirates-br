@@ -4,7 +4,7 @@
  * between the island's stops, the rope bridges between peaks, and the ruin.
  */
 import * as THREE from 'three';
-import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { assets } from '../../assets/AssetLibrary.js';
 import { CLIMB_STANDOFF_M, climbLength, climbPointAt, islandClimbs } from '../../../shared/interactions.js';
 import { getBridgeSpanY, getIslandSurfaceY } from '../../../shared/utils/index.js';
 import { MAX_METALNESS_NO_ENV, MIN_ALBEDO_VALUE } from '../../assets/materialAudit.js';
@@ -376,29 +376,31 @@ export function buildRopeLadder(ctx: IslandBuildCtx) {
   const routes = islandClimbs(island);
   if (routes.length === 0) return;
   const ox = island.position.x; const oy = island.position.y; const oz = island.position.z;
-  const radial = lowDetail ? 4 : 7;
-  const wood: THREE.BufferGeometry[] = [];
-  const rope: THREE.BufferGeometry[] = [];
-  const UP = new THREE.Vector3(0, 1, 0);
-  const va = new THREE.Vector3(); const vb = new THREE.Vector3(); const dir = new THREE.Vector3();
-  const q = new THREE.Quaternion();
-  const rod = (out: THREE.BufferGeometry[], a: THREE.Vector3, b: THREE.Vector3, r: number): void => {
+  // One instance matrix list per climb_kit.glb node (scripts/blender/build_poi_kit.py).
+  const parts = new Map<ClimbKitNode, THREE.Matrix4[]>(CLIMB_KIT_NODES.map((n) => [n, []]));
+  const UP = new THREE.Vector3(0, 1, 0); const ACROSS = new THREE.Vector3(1, 0, 0);
+  const dir = new THREE.Vector3(); const q = new THREE.Quaternion();
+  const put = (node: ClimbKitNode, pos: THREE.Vector3, rot: THREE.Quaternion, sx: number, sy: number, sz: number): void => {
+    parts.get(node)!.push(new THREE.Matrix4().compose(pos, rot, new THREE.Vector3(sx, sy, sz)));
+  };
+  // A unit node along +Y from `a` to `b` (rail, rope), radius scaled by `rs`.
+  const seg = (node: ClimbKitNode, a: THREE.Vector3, b: THREE.Vector3, rs = 1): void => {
     dir.subVectors(b, a);
     const len = dir.length();
     if (len < 1e-3) return;
-    const g = new THREE.CylinderGeometry(r, r, len, radial, 1, true);
-    q.setFromUnitVectors(UP, dir.multiplyScalar(1 / len));
-    g.applyQuaternion(q);
-    g.translate((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2);
-    out.push(g);
+    put(node, a, q.setFromUnitVectors(UP, dir.multiplyScalar(1 / len)).clone(), rs, len, rs);
   };
-  const knot = (p: THREE.Vector3, r: number): void => {
-    const g = new THREE.SphereGeometry(r, radial, Math.max(3, radial - 2));
-    g.translate(p.x, p.y, p.z);
-    rope.push(g);
+  const rung = (a: THREE.Vector3, b: THREE.Vector3): void => {
+    dir.subVectors(b, a);
+    const len = dir.length();
+    put('climb_rung', a.clone().add(b).multiplyScalar(0.5), q.setFromUnitVectors(ACROSS, dir.multiplyScalar(1 / len)).clone(), len, 1, 1);
   };
+  const knot = (p: THREE.Vector3, along: THREE.Vector3): void => {
+    put('climb_knot', p, q.setFromUnitVectors(UP, along.clone().normalize()).clone(), 1, 1, 1);
+  };
+  // Stake from 0.25 m below (x, y, z) to h above it; the node is unit radius and length.
   const stake = (x: number, y: number, z: number, h: number, r: number): void => {
-    rod(wood, va.set(x, y - 0.25, z).clone(), vb.set(x, y + h, z).clone(), r);
+    put('climb_stake', new THREE.Vector3(x, y - 0.25, z), new THREE.Quaternion(), r, h + 0.25, r);
   };
   for (const c of routes) {
     const len = climbLength(c);
@@ -420,25 +422,28 @@ export function buildRopeLadder(ctx: IslandBuildCtx) {
     const n = Math.max(2, Math.ceil(len / 0.5));
     if (c.kind === 'ladder') {
       for (const s of [-CLIMB_RAIL_HALF_M, CLIMB_RAIL_HALF_M]) {
-        for (let i = 0; i < n; i++) rod(wood, at(i / n, 0.12, s, 0.05), at((i + 1) / n, 0.12, s, 0.05), 0.045);
+        for (let i = 0; i < n; i++) seg('climb_rail', at(i / n, 0.12, s, 0.05), at((i + 1) / n, 0.12, s, 0.05));
         const top = at(1, 0.12, s, 0.05);
-        rod(wood, top, top.clone().setY(top.y + 0.9), 0.045);
+        seg('climb_rail', top, top.clone().setY(top.y + 0.9));
       }
       const rungs = Math.max(1, Math.floor(len / CLIMB_RUNG_STEP_M));
       for (let i = 1; i < rungs; i++) {
         const t = i / rungs;
-        rod(wood, at(t, 0.12, -CLIMB_RAIL_HALF_M - 0.04, 0.05), at(t, 0.12, CLIMB_RAIL_HALF_M + 0.04, 0.05), 0.03);
+        rung(at(t, 0.12, -CLIMB_RAIL_HALF_M - 0.04, 0.05), at(t, 0.12, CLIMB_RAIL_HALF_M + 0.04, 0.05));
       }
     } else if (c.kind === 'rope') {
-      for (let i = 0; i < n; i++) rod(rope, at(i / n, 0.1, 0, 0.05), at((i + 1) / n, 0.1, 0, 0.05), 0.035);
+      for (let i = 0; i < n; i++) seg('climb_rope', at(i / n, 0.1, 0, 0.05), at((i + 1) / n, 0.1, 0, 0.05));
       const knots = Math.floor(len / CLIMB_KNOT_STEP_M);
-      for (let i = 1; i < knots; i++) knot(at(i / knots, 0.1, 0, 0.05), 0.075);
+      for (let i = 1; i < knots; i++) {
+        const t = i / knots;
+        knot(at(t, 0.1, 0, 0.05), at(Math.min(1, t + 0.02), 0.1, 0, 0.05).sub(at(Math.max(0, t - 0.02), 0.1, 0, 0.05)));
+      }
       const top = at(1, 0, 0, 0);
       stake(top.x - c.nx * 0.6, top.y, top.z - c.nz * 0.6, 0.7, 0.07);
-      rod(rope, at(1, 0.1, 0, 0.05), new THREE.Vector3(top.x - c.nx * 0.6, top.y + 0.55, top.z - c.nz * 0.6), 0.035);
+      seg('climb_rope', at(1, 0.1, 0, 0.05), new THREE.Vector3(top.x - c.nx * 0.6, top.y + 0.55, top.z - c.nz * 0.6));
     } else {
       // Scramble: hand line 0.9 m up, 0.7 m beside the step line.
-      for (let i = 0; i < n; i++) rod(rope, at(i / n, 0, 0.7, 0.9), at((i + 1) / n, 0, 0.7, 0.9), 0.03);
+      for (let i = 0; i < n; i++) seg('climb_rope', at(i / n, 0, 0.7, 0.9), at((i + 1) / n, 0, 0.7, 0.9), 0.8);
       const posts = Math.max(1, Math.ceil(len / 4));
       for (let i = 0; i <= posts; i++) {
         const p = at(i / posts, 0, 0.7, 0);
@@ -446,19 +451,38 @@ export function buildRopeLadder(ctx: IslandBuildCtx) {
       }
     }
   }
-  const add = (geos: THREE.BufferGeometry[], name: string, color: number, roughness: number): void => {
-    if (!geos.length) return;
-    const merged = mergeGeometries(geos, false);
-    for (const g of geos) g.dispose();
-    if (!merged) return;
-    const mesh = new THREE.Mesh(merged, litPropMaterial({ color, roughness }));
-    mesh.name = name;
-    mesh.castShadow = !lowDetail;
-    mesh.receiveShadow = true;
-    group.add(mesh);
-  };
-  add(wood, 'climb-routes', 0x8a6a44, 0.85);
-  add(rope, 'climb-ropes', 0xb89c68, 0.95);
+  for (const [node, list] of parts) {
+    if (!list.length) continue;
+    // The Blender kit node; the low-detail proxy path (and a kit that failed to load) draws the
+    // same matrices on a 4-sided stand-in so the route never vanishes.
+    const kit = lowDetail ? null : assets.mergedNodeGeometry('climb_kit', node);
+    if (!kit && !lowDetail) console.warn(`[climb] climb_kit.glb node ${node} not loaded: ${island.id} draws the stand-in`);
+    const standIn = kit ? null : climbStandIn(node);
+    const inst = new THREE.InstancedMesh((kit ?? standIn)!.geometry, (kit ?? standIn)!.material, list.length);
+    list.forEach((m, i) => inst.setMatrixAt(i, m));
+    inst.instanceMatrix.needsUpdate = true;
+    inst.computeBoundingSphere();
+    inst.name = `climb-${node}`;
+    inst.castShadow = !lowDetail;
+    inst.receiveShadow = true;
+    group.add(inst);
+  }
+}
+
+const CLIMB_KIT_NODES = ['climb_rail', 'climb_rung', 'climb_rope', 'climb_knot', 'climb_stake'] as const;
+type ClimbKitNode = (typeof CLIMB_KIT_NODES)[number];
+/** Unit stand-in for a kit node in the GLB node's frame (see build_poi_kit.py); owned by its mesh. */
+function climbStandIn(node: ClimbKitNode): { geometry: THREE.BufferGeometry; material: THREE.Material } {
+  let g: THREE.BufferGeometry;
+  if (node === 'climb_rung') g = new THREE.CylinderGeometry(0.03, 0.03, 1, 4, 1, true).rotateZ(Math.PI / 2);
+  else if (node === 'climb_knot') g = new THREE.SphereGeometry(0.075, 4, 3);
+  else if (node === 'climb_stake') g = new THREE.CylinderGeometry(1, 1, 1, 4, 1).translate(0, 0.5, 0);
+  else {
+    const r = node === 'climb_rail' ? 0.045 : 0.035;
+    g = new THREE.CylinderGeometry(r, r, 1, 4, 1, true).translate(0, 0.5, 0);
+  }
+  const wood = node === 'climb_rail' || node === 'climb_rung' || node === 'climb_stake';
+  return { geometry: g, material: litPropMaterial(wood ? { color: 0x8a6a44, roughness: 0.85 } : { color: 0xb89c68, roughness: 0.95 }) };
 }
 
 /** Secondary smaller wreck on bigger islands so they feel storied. (Skipped

@@ -220,6 +220,35 @@ for (const island of islands) {
   ok(pl.mastClimb === null, 'mast ladder: [X] lets go');
 }
 
+// 8. Climb kit (b4.7b): routes are drawn from the Blender climb_kit.glb nodes, not runtime cylinders.
+{
+  const fs = await import('node:fs');
+  const root = new URL('../', import.meta.url);
+  const read = (rel) => (fs.existsSync(new URL(rel, root)) ? fs.readFileSync(new URL(rel, root)) : null);
+  const NODES = ['climb_rail', 'climb_rung', 'climb_rope', 'climb_knot', 'climb_stake'];
+  const glb = read('public/assets/models/climb_kit.glb');
+  let json = null;
+  if (glb && glb.readUInt32LE(0) === 0x46546c67) json = JSON.parse(glb.subarray(20, 20 + glb.readUInt32LE(12)).toString('utf8'));
+  ok(!!json, 'climb kit: public/assets/models/climb_kit.glb on disk (scripts/blender/build_poi_kit.py)');
+  if (json) {
+    const meshNodes = new Map((json.nodes ?? []).filter((n) => n.mesh !== undefined).map((n) => [n.name, n.mesh]));
+    const trisOf = (mi) => json.meshes[mi].primitives.reduce((a, pr) => a + json.accessors[pr.indices].count / 3, 0);
+    for (const n of NODES) ok(meshNodes.has(n), `climb kit: node ${n} is a mesh`);
+    const tris = NODES.filter((n) => meshNodes.has(n)).reduce((a, n) => a + trisOf(meshNodes.get(n)), 0);
+    ok(tris >= 300 && tris <= 600, 'climb kit: 300-600 tris across the five nodes', `${tris}`);
+    const mats = (json.materials ?? []).map((m) => m.name);
+    ok(mats.includes('Rope') && mats.some((m) => /^Wood_/.test(m)), 'climb kit: Rope + Wood_* materials', mats.join(','));
+  }
+  const src = (read('src/client/world/island/Landmarks.ts') ?? '').toString();
+  ok(/mergedNodeGeometry\('climb_kit'/.test(src) && NODES.every((n) => src.includes(`'${n}'`)),
+    'climb kit: Landmarks.buildRopeLadder instances every kit node via assets.mergedNodeGeometry');
+  const lib = (read('src/client/assets/AssetLibrary.ts') ?? '').toString();
+  const names = lib.slice(lib.indexOf('export const ASSET_NAMES'), lib.indexOf('] as const', lib.indexOf('export const ASSET_NAMES')));
+  ok(names.includes("'climb_kit'"), 'climb kit: climb_kit in AssetLibrary ASSET_NAMES (loaded with the world)');
+  const manifest = JSON.parse((read('src/client/assets/model-manifest.json') ?? '{}').toString());
+  ok(!!manifest.climb_kit && !!read(`public/assets/models/packed/${manifest.climb_kit}`), 'climb kit: packed (model-manifest.json row + file)');
+}
+
 const kinds = all.reduce((m, { c }) => ({ ...m, [c.kind]: (m[c.kind] ?? 0) + 1 }), {});
 console.log(`routes ${all.length} ${JSON.stringify(kinds)}; worst stray ${worstStray.toFixed(2)} m`);
 console.log(`${passed} passed, ${failed} failed`);
