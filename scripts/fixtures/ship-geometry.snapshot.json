@@ -2,9 +2,9 @@
   "note": "Baseline for scripts/test-ship-geometry-hash.mjs. Rebuild ONLY inside a slice that intends the geometry change, and name the moved families in the commit.",
   "hulls": {
     "sloop": {
-      "digest": "5fe37b36",
+      "digest": "40eb0493",
       "meshCount": 92,
-      "vertTotal": 111222,
+      "vertTotal": 111559,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 2,
@@ -302,15 +302,15 @@
         },
         "ship-sail-canvas": {
           "meshes": 4,
-          "verts": 1236,
-          "tris": 1833,
-          "hash": "92390a13",
+          "verts": 1573,
+          "tris": 2461,
+          "hash": "e7c58a4f",
           "box": [
             -3.91,
             2.72,
             2.89,
             3.91,
-            13.724,
+            12.76,
             9.12
           ]
         },
@@ -345,9 +345,9 @@
       }
     },
     "brigantine": {
-      "digest": "3f2f8b15",
+      "digest": "90b3d250",
       "meshCount": 118,
-      "vertTotal": 131224,
+      "vertTotal": 132572,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 4,
@@ -645,15 +645,15 @@
         },
         "ship-sail-canvas": {
           "meshes": 11,
-          "verts": 4783,
-          "tris": 7235,
-          "hash": "af422217",
+          "verts": 6131,
+          "tris": 9747,
+          "hash": "daf4ecfc",
           "box": [
             -5.796,
             3.32,
             -5.06,
             5.796,
-            16.163,
+            15.6,
             12.16
           ]
         },
@@ -688,9 +688,9 @@
       }
     },
     "galleon": {
-      "digest": "476b5b25",
+      "digest": "4b31e5a9",
       "meshCount": 152,
-      "vertTotal": 159750,
+      "vertTotal": 161772,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 8,
@@ -988,15 +988,15 @@
         },
         "ship-sail-canvas": {
           "meshes": 14,
-          "verts": 7141,
-          "tris": 10833,
-          "hash": "085c3153",
+          "verts": 9163,
+          "tris": 14601,
+          "hash": "1282eac7",
           "box": [
             -8.28,
             4.02,
             -3.55,
             8.28,
-            20.413,
+            19.692,
             16.72
           ]
         },
