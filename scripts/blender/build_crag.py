@@ -1,161 +1,203 @@
-# EXPOSED BEDROCK CRAG — crag.glb
+# ROCK KIT v2 II (b4.5b; assets-08, PLAN 3.12 + section 6 row 13): crag.glb and rock_arch.glb on the
+# shared rock core (_rock.py), the same HIGH sculpt -> welded LOD0 recipe as build_rocks.py.
 #
-# Replaces the deleted client-only procedural crag decoration (Game.ts →
-# IslandBuilder "Exposed bedrock CRAGS on the upper flanks"), which drew
-# 2-4 stretched boulder primitives per outcrop with a flat rock material and
-# NO collision. The registry version is one authored GLB scattered by
-# MapGenerator on mountain/rocky islands, so the rock you see is the rock you
-# bump into.
+#   crag       cliff band LOD0 10-16k. COLUMNAR / JOINTED bedrock pushed out of a hillside: a
+#              ridge of tall prismatic Voronoi columns (few, near-vertical fracture planes and a
+#              tilted flat cap each, so they read as basalt-like columns, not rounded blades),
+#              tallest in the middle-back, cross-jointed by horizontal bedding grooves and split by
+#              vertical joint fissures, on a buried root + shed rubble skirt so it seats into a slope
+#              without daylight under the downhill edge. Was 1,340 tris of noise-displaced boxes.
+#   rock_arch  arch band LOD0 20-30k. CARVED FROM ONE MASS: one big Voronoi block with a broad
+#              elliptic tunnel cut through it by a boolean (water-worn arch, not "a sausage on two
+#              blobs"), a fallen block at one foot and a cap shard, then voxel-unioned, smoothed
+#              (water-worn edges), bedded and jointed. Was 4,800 tris / 14,400 split verts.
 #
-# Silhouette brief (matching the old builder's read):
-#   * a fin/blade group — tall, thin, leaning, NOT a rounded boulder
-#   * 3 main blades of different heights on one ridge line (Blender +X), so a
-#     yaw spin still reads as "strata pushed up out of the hillside"
-#   * dark crevices between the blades (Rock_Dark cores in the gaps)
-#   * a rubble skirt + buried base so it seats into a slope without daylight
-#     under the downhill edge
+# Both are fitted per axis into the legacy game-space AABB (the HEAD GLBs measured 2026-10-02), so
+# colliders, propBaseLift and the test-asset-bounds base pins (crag -1.55, rock_arch -0.286) hold.
+# Underside / buried faces take Rock_Dark, the body Rock_Grey (the runtime triplanar 'rock' detail
+# family keys on the Rock_* names). `<name>_lods.glb` (LOD1/LOD2/far) comes from build_lods.py
+# (BR_LODS_ONLY=crag,rock_arch); no `_far.glb` is written here.
 #
-# Nominal envelope: horizontal half-extent 1.60, top +3.40, bottom -1.55
-# (buried skirt + root — the origin sits at the visible ground line). MapGenerator scales instances 1.0-2.2, which reproduces the
-# old builder's 1.3-3.4 "bigness" range.
-#
-# Headless: Blender -b -P scripts/blender/build_crag.py
+# Headless:  /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup -P scripts/blender/build_crag.py
+# env: BR_EXPORT_DIR (output dir), CRAG_ONLY=crag|rock_arch
 import bpy
-import bmesh
+import json
 import math
-import random
 import os
-from mathutils import Vector, Matrix
+import random
+import sys
+import time
+from mathutils import Matrix, Vector
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 exec(open(os.path.join(HERE, "_helpers.py")).read())
 exec(open(os.path.join(HERE, "_ao.py")).read())
 exec(open(os.path.join(HERE, "_detail.py")).read())
+exec(open(os.path.join(HERE, "_nature.py")).read())
+exec(open(os.path.join(HERE, "_rock.py")).read())
+EXPORT_DIR = os.environ.get('BR_EXPORT_DIR', EXPORT_DIR)
+ONLY = {s.strip() for s in os.environ.get('CRAG_ONLY', '').split(',') if s.strip()}
 
-RENDER_DIR = os.environ.get("BR_RENDER_DIR", "")
-EXPORT_DIR = os.environ.get("BR_EXPORT_DIR", EXPORT_DIR)
-
-clear_default_scene()
-agx_palette()
-
-
-def bake_xform(obj):
-    """Freeze loc/rot/scale into the mesh so every part lives in one shared
-    space — required before a group fit, and it keeps join() from inheriting
-    the first part's transform."""
-    bpy.ops.object.select_all(action='DESELECT')
-    obj.select_set(True)
-    bpy.context.view_layer.objects.active = obj
-    bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+# Blender-space (Z up) AABBs of the HEAD crag.glb / rock_arch.glb (game footprint + base pins).
+BOXES = {
+    'crag': ((-1.518, -0.733, -1.55), (1.600, 1.269, 3.400)),
+    'rock_arch': ((-4.032, -1.603, -0.286), (4.023, 1.593, 4.479)),
+}
+BANDS = {'crag': (10000, 16000), 'rock_arch': (20000, 30000)}
+TARGET = {'crag': 13000, 'rock_arch': 25000}
 
 
-def fit_group(objs, target_r, target_top, target_bot):
-    """Fit a GROUP of transform-baked meshes into a collider envelope: uniform
-    XY rescale to a max horizontal half-extent, Z rescale+shift to a span.
-    (build_rocks.py's fit_envelope, generalised past a single joined mesh so
-    the fit can happen BEFORE the tint pass — tint_pass needs one material per
-    object, so the join must stay last.)"""
+def fit_box(objs, box):
+    lo, hi = Vector(box[0]), Vector(box[1])
     vs = [v for o in objs for v in o.data.vertices]
-    r_now = max(max(abs(v.co.x), abs(v.co.y)) for v in vs)
-    zmin = min(v.co.z for v in vs)
-    zmax = max(v.co.z for v in vs)
-    sxy = target_r / max(1e-6, r_now)
-    sz = (target_top - target_bot) / max(1e-6, zmax - zmin)
-    dz = target_bot - zmin * sz
+    amin = Vector(tuple(min(v.co[a] for v in vs) for a in range(3)))
+    amax = Vector(tuple(max(v.co[a] for v in vs) for a in range(3)))
+    for v in vs:
+        for a in range(3):
+            v.co[a] = lo[a] + (v.co[a] - amin[a]) * (hi[a] - lo[a]) / max(1e-6, amax[a] - amin[a])
     for o in objs:
-        for v in o.data.vertices:
-            v.co.x *= sxy
-            v.co.y *= sxy
-            v.co.z = v.co.z * sz + dz
+        o.data.update()
 
 
-def blade(name, coll, w, d, h, seed, material="Rock_Grey",
-          coarse=0.26, fine=0.05, deci=0.55, cuts=5):
-    """A chiselled rock fin: subdivided box -> dual voronoi displacement ->
-    decimate to flat facets. Boxes (not icospheres) keep the blade silhouette
-    the old builder got from stretching a boulder mesh."""
-    bm = bm_box(w, d, h)
-    bmesh.ops.subdivide_edges(bm, edges=bm.edges[:], cuts=cuts, use_grid_fill=True)
-    obj = obj_from_bmesh(name, bm, coll, mat(material), smooth=False)
-    displace_noise(obj, strength=min(w, d) * coarse + h * 0.05, scale=1.5, seed=seed)
-    displace_noise(obj, strength=fine, scale=0.45, seed=seed + 17)
-    decimate(obj, deci)
-    apply_modifiers(obj)
+def carve(obj, cutter):
+    """Boolean difference (exact solver), cutter removed."""
+    md = obj.modifiers.new('rk_carve', 'BOOLEAN')
+    md.operation = 'DIFFERENCE'
+    md.solver = 'EXACT'
+    md.object = cutter
+    _apply(obj, md)
+    bpy.data.objects.remove(cutter, do_unlink=True)
     return obj
 
 
-def build_crag(name="crag", seed=8171):
+def tunnel(coll, name, cx, cz, rx, rz, depth, segs=96):
+    """An elliptic prism along Blender Y (the arch opening), slightly wavy so the soffit is not a
+    perfect lathe."""
+    import bmesh
+    bm = bmesh.new()
+    rng = random.Random(len(name))
+    ring = []
+    for i in range(segs):
+        a = i / segs * math.tau
+        w = 1.0 + 0.05 * math.sin(3 * a + 0.7) + 0.03 * math.sin(7 * a + rng.uniform(0, 3))
+        ring.append((cx + math.cos(a) * rx * w, cz + math.sin(a) * rz * w))
+    front = [bm.verts.new((x, -depth, z)) for x, z in ring]
+    back = [bm.verts.new((x, depth, z)) for x, z in ring]
+    for i in range(segs):
+        j = (i + 1) % segs
+        bm.faces.new((front[i], front[j], back[j], back[i]))
+    bm.faces.new(list(reversed(front)))
+    bm.faces.new(back)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    me = bpy.data.meshes.new(name)
+    bm.to_mesh(me)
+    bm.free()
+    obj = bpy.data.objects.new(name, me)
+    coll.objects.link(obj)
+    return obj
+
+
+# ── crag: columnar / jointed bedrock ─────────────────────────────────────────────────────────
+def form_crag(coll, seed=8171):
     rng = random.Random(seed)
-    coll = asset_collection(name)
     parts = []
-
-    # ── three ridge blades, tallest in the middle-back ────────────────────
-    spec = [
-        # (x,        y,      w,    d,    h,    rot_y_deg, rot_z_deg)
-        (-1.05, 0.18, 0.95, 0.72, 2.35, -13.0, 14.0),
-        (0.05, -0.10, 1.15, 0.86, 3.55, 7.0, -8.0),
-        (1.15, 0.24, 0.80, 0.62, 2.05, 19.0, 26.0),
-    ]
-    for i, (x, y, w, d, h, ry, rz) in enumerate(spec):
-        b = blade(f"{name}_b{i}", coll, w, d, h, seed + i * 13)
-        b.location = Vector((x, y, h * 0.5 - 0.55))
-        b.rotation_euler = (math.radians(rng.uniform(-6, 6)),
-                            math.radians(ry), math.radians(rz))
-        parts.append(b)
-
-    # ── dark crevice cores in the gaps between blades ─────────────────────
-    for i, (cx, cy, ch) in enumerate(((-0.50, 0.02, 1.75), (0.62, 0.05, 1.55))):
-        core = obj_from_bmesh(f"{name}_c{i}", bm_box(0.30, 0.55, ch), coll,
-                              mat("Rock_Dark"), smooth=False)
-        core.location = Vector((cx, cy, ch * 0.5 - 0.55))
-        core.rotation_euler = (0, math.radians(rng.uniform(-8, 8)),
-                               math.radians(rng.uniform(-10, 10)))
-        parts.append(core)
-
-    # ── shed rubble + buried skirt so it grows out of the hillside ────────
-    for i in range(4):
+    # (x, y, radius, top z, tilt x deg, tilt y deg): a ridge along +X, tallest middle-back.
+    cols = [(-1.10, 0.20, 0.42, 1.55, -4, -11), (-0.62, -0.12, 0.40, 2.30, 3, -7),
+            (-0.30, 0.42, 0.44, 2.75, -2, -4), (0.12, 0.05, 0.48, 3.40, 2, 3),
+            (0.52, 0.48, 0.40, 2.95, -3, 6), (0.70, -0.22, 0.38, 2.05, 4, 9),
+            (1.12, 0.25, 0.40, 1.70, -2, 14), (-0.05, -0.40, 0.34, 1.20, 6, 2)]
+    for k, (x, y, r, top, tx, ty) in enumerate(cols):
+        h = top + 1.30  # every column roots below the ground line
+        c = voronoi_cell(f'cr_c{k}', coll, seed + 11 * k, scale=(r, r * 0.92, h * 0.5), planes=7,
+                         reach=(0.80, 0.96), caps=(rng.uniform(0.86, 0.97),))
+        parts.append(place(c, (x, y, top - h * 0.5), (tx, ty, rng.uniform(0, 60))))
+    root = voronoi_cell('cr_root', coll, seed + 301, scale=(1.75, 1.05, 0.85), planes=10, reach=(0.62, 0.92))
+    parts.append(place(root, (0.02, 0.22, -0.85), (0, 0, 8)))
+    for k in range(6):  # shed column drums + rubble at the foot
         a = rng.uniform(0, math.tau)
-        r = rng.uniform(0.9, 1.7)
-        s = rng.uniform(0.34, 0.62)
-        chunk = blade(f"{name}_r{i}", coll, s * 1.6, s * 1.3, s,
-                      seed + 200 + i * 7, material="Rock_Grey",
-                      coarse=0.34, deci=0.55, cuts=3)
-        chunk.location = Vector((math.cos(a) * r, math.sin(a) * r * 0.7, -0.42 + s * 0.3))
-        chunk.rotation_euler = (math.radians(rng.uniform(-25, 25)),
-                                math.radians(rng.uniform(-25, 25)),
-                                math.radians(rng.uniform(0, 180)))
-        parts.append(chunk)
-    # The skirt doubles as the ROOT: on a steep flank a tilted blade lifts its
-    # downhill corner, so the mesh has to carry ~1.5 m of rock below the origin
-    # for the outcrop to bite into the slope instead of showing daylight.
-    skirt = blade(f"{name}_sk", coll, 2.9, 1.9, 0.75, seed + 401,
-                  material="Rock_Grey", coarse=0.30, deci=0.5, cuts=4)
-    skirt.location = Vector((0.0, 0.05, -0.72))
-    parts.append(skirt)
-    root = blade(f"{name}_rt", coll, 2.4, 1.6, 1.1, seed + 431,
-                 material="Rock_Dark", coarse=0.22, deci=0.4, cuts=2)
-    root.location = Vector((0.0, 0.0, -1.15))
-    parts.append(root)
-
-    for p in parts:
-        bake_xform(p)
-    fit_group(parts, 1.60, 3.40, -1.55)
-
-    spec_t = tint_spec(moss=0.38, seed=4)
-    # Bedrock reads as strata, not a paint bucket: horizontal banding + a damp
-    # shaded base where the outcrop meets the slope.
-    spec_t['Rock_Grey'] = dict(
-        spec_t['Rock_Grey'],
-        tone=0.19, mottle=0.15, mscale=0.30,
-        streak=dict(axis='z', freq=4.5, amt=0.13),
-        low=dict(z=0.34, amt=0.22, col=(0.52, 0.53, 0.47)),
-    )
-    spec_t['Rock_Dark'] = dict(spec_t['Rock_Dark'], tone=0.11, mottle=0.16)
-    return ship_asset(coll, name, spec=spec_t, tint_seed=4,
-                      ao=dict(samples=24, max_dist=3.4, floor=0.60),
-                      render_dir=RENDER_DIR or None,
-                      angles=(-90, -20, 40, 130))
+        d = rng.uniform(1.05, 1.45)
+        s = rng.uniform(0.22, 0.40)
+        rb = voronoi_cell(f'cr_rb{k}', coll, seed + 500 + k, scale=(s, s * 0.85, s * 0.7), planes=8,
+                          reach=(0.62, 0.92), points=600, caps=(0.88,))
+        parts.append(place(rb, (math.cos(a) * d, 0.25 + math.sin(a) * d * 0.55, -0.20 + s * 0.2),
+                           (rng.uniform(-35, 35), rng.uniform(-35, 35), rng.uniform(0, 180))))
+    joints = (((-0.45, 0.15, 1.0), (0.94, 0.30, 0.0), 0.030, 0.10),
+              ((0.32, 0.25, 1.4), (0.88, -0.45, 0.05), 0.030, 0.12),
+              ((0.90, 0.05, 0.8), (0.97, 0.20, 0.0), 0.025, 0.08))
+    recipe = dict(macro=(0.035, 1.1), heights=((0, 1.8, 0.035), (1, 0.6, 0.016), (0, 0.24, 0.006)),
+                  strata=dict(bed=0.42, amp=0.022, dip=(0.06, 0.03, 1.0)), joints=joints, chips=0.016)
+    return parts, 1, recipe
 
 
-info = build_crag()
+# ── rock_arch: carved from one mass ──────────────────────────────────────────────────────────
+def form_arch(coll, seed=9241):
+    rng = random.Random(seed)
+    mass = voronoi_cell('ra_mass', coll, seed, scale=(4.15, 1.55, 2.55), planes=14, reach=(0.74, 0.96),
+                        up_bias=1.5, caps=(0.93,))
+    place(mass, (0.0, 0.0, 2.05), (0, 3, 2))
+    carve(mass, tunnel(coll, 'ra_tunnel', 0.15, -0.35, 2.45, 3.05, 3.0))
+    foot = voronoi_cell('ra_foot', coll, seed + 7, scale=(0.95, 0.85, 0.55), planes=9, reach=(0.6, 0.92))
+    place(foot, (-3.35, 0.65, 0.05), (14, -9, 33))
+    cap = voronoi_cell('ra_cap', coll, seed + 13, scale=(1.35, 0.95, 0.40), planes=9, reach=(0.62, 0.93),
+                       up_bias=2.0)
+    place(cap, (0.95, -0.15, 4.05), (4, -7, 18))
+    parts = [mass, foot, cap]
+    # The mass is a clipped sphere, so outside the tunnel its underside rises toward the ends: two
+    # piers (outside the cut, unioned by the remesh) carry the arch down onto the ground line.
+    for s, k in ((-1, 0), (1, 1)):
+        pier = voronoi_cell(f'ra_pier{k}', coll, seed + 20 + k, scale=(0.95, 1.30, 1.55), planes=10,
+                            reach=(0.66, 0.95), caps=(0.92,))
+        parts.append(place(pier, (s * 3.30, 0.05 * s, 1.05), (0, 4 * s, 10 * s)))
+    for k in range(4):  # rubble at both feet
+        side = -1 if k % 2 else 1
+        s = rng.uniform(0.30, 0.50)
+        rb = voronoi_cell(f'ra_rb{k}', coll, seed + 40 + k, scale=(s, s * 0.8, s * 0.6), planes=8,
+                          reach=(0.6, 0.92), points=600)
+        parts.append(place(rb, (side * rng.uniform(2.9, 3.7), rng.uniform(-1.1, 1.1), -0.05),
+                           (rng.uniform(-25, 25), rng.uniform(-25, 25), rng.uniform(0, 180))))
+    joints = (((-1.6, 0.0, 3.0), (0.97, 0.0, 0.25), 0.05, 0.16),
+              ((2.2, 0.1, 2.0), (0.90, 0.30, -0.1), 0.045, 0.14))
+    recipe = dict(macro=(0.11, 2.4), heights=((0, 2.6, 0.060), (1, 0.9, 0.028), (0, 0.33, 0.010)),
+                  strata=dict(bed=0.55, amp=0.040, dip=(0.10, 0.04, 1.0)), joints=joints, chips=0.02)
+    return parts, 3, recipe
+
+
+def build(name, form):
+    t0 = time.time()
+    coll = asset_collection(name)
+    scratch = asset_collection(name + '_hi')
+    parts, smooth_iters, recipe = form(scratch)
+    high, voxel = fracture_cluster(parts, name + '_hi', smooth_iters=smooth_iters)
+    maxd = sculpt(high, sum(map(ord, name)), **recipe)
+    hi_tris = tri_count(high)
+    low = lod0(high, name, coll, TARGET[name])
+    bpy.data.objects.remove(high, do_unlink=True)
+    fit_box([low], BOXES[name])
+    z_dark = BOXES[name][0][2] + 0.55 if name == 'crag' else -10.0
+    zone_materials(low, [('Rock_Dark', lambda z, nz: nz < -0.40 or z < z_dark),
+                         ('Rock_Grey', lambda z, nz: True)])
+    rock_finish(coll, name, moss=0.36, low_band=0.65, strata_freq=4.5 if name == 'crag' else 3.2)
+    path = export_collection_vc(coll, name + '.glb')
+    info = verify_glb(path)
+    lo, hi = BANDS[name]
+    rep = dict(high_tris=hi_tris, voxel=round(voxel, 4), max_disp=round(maxd, 3), lod0_tris=info['tris'],
+               materials=info['materials'], bbox=[info.get('bbox_min'), info.get('bbox_max')],
+               secs=round(time.time() - t0, 1))
+    print(f'CRAG {name} ' + json.dumps(rep, default=str), flush=True)
+    assert 300000 <= hi_tris <= 600000, (name, 'high sculpt', hi_tris)
+    assert lo <= info['tris'] <= hi, (name, info['tris'], BANDS[name])
+    assert info['color0'], name
+    for o in coll.objects:
+        o.hide_render = True
+    return rep
+
+
+clear_default_scene()
+agx_palette()
+REPORT = {}
+for name, form in (('crag', form_crag), ('rock_arch', form_arch)):
+    if ONLY and name not in ONLY:
+        continue
+    REPORT[name] = build(name, form)
+print('CRAG REPORT ' + json.dumps(REPORT, default=str))
 print("CRAG DONE")

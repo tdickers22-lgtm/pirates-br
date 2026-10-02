@@ -301,5 +301,6 @@ def build_rock_arch(name):
 
 build_tent("tent_a")
 build_bedroll("bedroll")
-build_rock_arch("rock_arch")
+# rock_arch.glb moved to build_crag.py (b4.5b rock kit v2, carved from one mass); build_rock_arch()
+# above is the retired v1 builder and is no longer called, so the GLB has one writer.
 print("CAMP SET DONE")
