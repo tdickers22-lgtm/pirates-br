@@ -4,6 +4,8 @@
 // HULLGEO-01 slice a); scripts/test-ship-geometry-hash.mjs pins the move.
 import * as THREE from 'three';
 import { CYLINDER_UP } from './geometry.js';
+import { drawFlagEmblem } from './emblems.js';
+import { textureRng } from './textures.js';
 
 export function makeCylinderBetween(
   start: THREE.Vector3,
@@ -200,7 +202,7 @@ export const FLAG_FLY = 0.85;
 export const FLAG_DROP = 0.44;
 
 /** One flag texture per team colour (there are ~16), shared by every ship on
- *  that team — the jolly roger is PAINTED on rather than built from little
+ *  that team — the crew emblem is PAINTED on rather than built from little
  *  spheres and boxes, so the blazon deforms with the cloth for free and the
  *  whole flag stays a single draw call. */
 export const flagTextureCache = new Map<number, THREE.CanvasTexture>();
@@ -218,9 +220,10 @@ export function flagTexture(teamColor: number): THREE.CanvasTexture {
   // the flag doesn't read as a flat swatch of colour.
   ctx.globalAlpha = 0.14;
   ctx.fillStyle = '#ffffff';
+  const rnd = textureRng(0xf1a6 ^ (teamColor >>> 0));
   for (let i = 0; i < 7; i++) {
     ctx.beginPath();
-    ctx.arc(Math.random() * 256, Math.random() * 128, 10 + Math.random() * 22, 0, Math.PI * 2);
+    ctx.arc(rnd() * 256, rnd() * 128, 10 + rnd() * 22, 0, Math.PI * 2);
     ctx.fill();
   }
   ctx.globalAlpha = 0.16;
@@ -234,44 +237,9 @@ export function flagTexture(teamColor: number): THREE.CanvasTexture {
   }
   ctx.globalAlpha = 1;
 
-  // Skull and crossbones, centred on the fly half.
-  const cx = 150, cy = 64;
-  ctx.strokeStyle = '#f2efe6';
-  ctx.fillStyle = '#f2efe6';
-  ctx.lineWidth = 9;
-  ctx.lineCap = 'round';
-  for (const dir of [-1, 1]) {
-    ctx.beginPath();
-    ctx.moveTo(cx - 34, cy + 16 * dir + 8);
-    ctx.lineTo(cx + 34, cy - 16 * dir + 8);
-    ctx.stroke();
-  }
-  for (const dir of [-1, 1]) {
-    for (const end of [-1, 1]) {
-      ctx.beginPath();
-      ctx.arc(cx + 34 * end, cy + 16 * dir * -end + 8, 6.5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-  // Cranium + jaw over the bones.
-  ctx.beginPath();
-  ctx.ellipse(cx, cy - 12, 22, 20, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillRect(cx - 11, cy + 4, 22, 11);
-  // Eye sockets + nasal notch.
-  ctx.fillStyle = hex;
-  ctx.beginPath();
-  ctx.ellipse(cx - 9, cy - 14, 6.5, 7.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse(cx + 9, cy - 14, 6.5, 7.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(cx, cy - 4);
-  ctx.lineTo(cx - 4, cy + 3);
-  ctx.lineTo(cx + 4, cy + 3);
-  ctx.closePath();
-  ctx.fill();
+  // The crew emblem (b4.3e, crossdevice-15): one shape per crew, so the
+  // ensign reads by silhouette, not by hue alone. The skull is crew 0's.
+  drawFlagEmblem(ctx, teamColor);
 
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
