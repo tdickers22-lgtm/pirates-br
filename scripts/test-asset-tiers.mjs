@@ -34,8 +34,8 @@
 //   - a GLB with no tier, a GLB in two tiers, or a tier key with no GLB on disk.
 // Section 3.12's bar is "the test-asset-tiers ratchet ends empty".
 //
-// Mutation proof (rule 5): PIRATES_BR_MUTATE=tiers:<band|lods|textures|verts|compression|stale|grow|member>
-// breaks exactly one clause and the suite must go red; `--prove` runs all eight as child processes and
+// Mutation proof (rule 5): PIRATES_BR_MUTATE=tiers:<band|lods|textures|verts|compression|stale|grow|member|parts|sockets>
+// breaks exactly one clause and the suite must go red; `--prove` runs all ten as child processes and
 // fails unless every one of them exits non-zero.
 //
 //   node scripts/test-asset-tiers.mjs            grade
@@ -107,6 +107,27 @@ export const TIERS = {
   characters: { family: 'characters', band: [16000, 22000], tex: HARD,
     lods: { need: ['LOD1', 'LOD2', 'far'], LOD1: { max: 8000 }, LOD2: { max: 2500 }, far: { max: 700 } }, keys: ['pirate_base'] },
   'fp-arms': { family: 'characters', band: [1500, 4000], tex: HARD, lods: null, keys: ['pirate_fp_arms'] },
+  // Ship kit I (b4.3a, ships-07/08): ONE file of ship-only parts. The file band is the sum; every PART is also
+  // graded on its own band (figureheads 12-20k, the rest 2-10k: PLAN section 6 row 10) and its own LOD1/LOD2
+  // (`<node>_LOD1` / `<node>_LOD2` in ship_kit_a_lods.glb; glazing panes serve every level), and every named
+  // socket empty the client mounts by (b4.3c) must be present.
+  'ship-kit': { family: 'ship-hardware-kit', band: [60000, 110000], tex: HARD,
+    lods: { need: ['LOD1', 'LOD2'], LOD1: { r: 0.40 }, LOD2: { r: 0.12 } }, keys: ['ship_kit_a'],
+    parts: Object.fromEntries([
+      ...['sloop', 'brigantine', 'galleon'].map((c) => [`figurehead_${c}`, { band: [12000, 20000], nodes: [`figurehead_${c}`] }]),
+      ...['stern_gallery_galleon', 'stern_gallery_galleon_upper', 'stern_gallery_brigantine', 'stern_transom_sloop',
+        'quarter_gallery_galleon', 'quarter_gallery_brigantine'].map((k) => [k, { band: [2000, 10000], nodes: [k, `${k}_glass`] }]),
+      ['gunport', { band: [2000, 10000], nodes: ['gunport', 'gunport_lid'] }],
+      ['rudder', { band: [2000, 10000], nodes: ['rudder', 'rudder_gudgeons'] }],
+      ['cathead', { band: [2000, 10000], nodes: ['cathead'] }],
+    ]),
+    sockets: ['sock_figurehead_sloop', 'sock_figurehead_brigantine', 'sock_figurehead_galleon', 'sock_stern_gallery_galleon',
+      'sock_stern_gallery_galleon_upper', 'sock_stern_gallery_galleon_upper_lantern_0', 'sock_stern_gallery_galleon_upper_lantern_1',
+      'sock_stern_gallery_galleon_upper_lantern_2', 'sock_stern_gallery_brigantine', 'sock_stern_gallery_brigantine_lantern_0',
+      'sock_stern_gallery_brigantine_lantern_1', 'sock_stern_transom_sloop', 'sock_stern_transom_sloop_lantern_0',
+      'sock_quarter_gallery_galleon', 'sock_quarter_gallery_brigantine', 'sock_gunport', 'sock_gunport_hinge', 'sock_gunport_muzzle',
+      'sock_rudder_axis', 'sock_rudder_pintle_0', 'sock_rudder_pintle_1', 'sock_rudder_pintle_2', 'sock_rudder_pintle_3',
+      'sock_rudder_tiller', 'sock_cathead', 'sock_cathead_sheave'] },
   // Animation-only container (retargeted clips, no mesh): graded on membership and compression only.
   'clips-only': { family: 'characters', band: null, tex: null, lods: null, noMesh: true, keys: ['pirate_clips'] },
 };
@@ -266,6 +287,12 @@ function lodLevels(j) {
   });
   return out;
 }
+/** Triangles per named mesh node (kit tiers grade parts by node name). */
+function nodeTris(j) {
+  const out = {};
+  for (const n of j.nodes || []) if (n.mesh != null) out[n.name] = (out[n.name] ?? 0) + meshTris(j, n.mesh).tris;
+  return out;
+}
 function texSet(j) {
   const mats = j.materials || [];
   const graded = mats.filter((m) => !((m.emissiveFactor || [0, 0, 0]).some((v) => v > 0) && !m.pbrMetallicRoughness?.baseColorTexture));
@@ -289,7 +316,9 @@ export function measure(key, manifest) {
       basisuTextures: (pj.textures || []).filter((t) => t.extensions?.KHR_texture_basisu).length,
       textures: (pj.textures || []).length };
   }
-  return { key, tris, verts, lods, graded, has, mats: mats.length, packed, packedName };
+  const kit = TIERS[tierOf(key)]?.parts ? { nodes: nodeTris(j), names: (j.nodes || []).map((n) => n.name),
+    lodNodes: fs.existsSync(lodsFile) ? nodeTris(readJson(lodsFile)) : null } : null;
+  return { key, tris, verts, lods, graded, has, mats: mats.length, packed, packedName, kit };
 }
 
 /** Grade one measured key against its tier: { clause: null (pass) | 'why it fails' }. */
@@ -301,6 +330,11 @@ export function grade(tierName, m) {
   } else {
     const [lo, hi] = t.band;
     r.band = m.tris >= lo && m.tris <= hi ? null : `${m.tris} tris outside [${lo}, ${hi}]`;
+    if (t.parts) {
+      const bad = Object.entries(t.parts).map(([p, spec]) => [p, spec, spec.nodes.reduce((a, n) => a + (m.kit?.nodes[n] ?? 0), 0)])
+        .filter(([, spec, v]) => v < spec.band[0] || v > spec.band[1]).map(([p, spec, v]) => `part ${p} ${v} outside [${spec.band}]`);
+      if (bad.length) r.band = [r.band, ...bad].filter(Boolean).join('; ');
+    }
   }
   if (t.lods) {
     if (!m.lods) r.lods = `no ${m.key}_lods.glb (needs ${t.lods.need.join('/')})`;
@@ -316,6 +350,18 @@ export function grade(tierName, m) {
         if (c.min != null && v < c.min) bad.push(`${lvl} ${v} < ${c.min}`);
         if (v >= prev) bad.push(`${lvl} ${v} not coarser than ${prev}`);
         prev = v;
+      }
+      for (const [p, spec] of Object.entries(t.parts || {})) {
+        const meshNodes = spec.nodes.filter((n) => !n.endsWith('_glass'));
+        const lod0 = meshNodes.reduce((a, n) => a + (m.kit?.nodes[n] ?? 0), 0);
+        let prevP = lod0;
+        for (const lvl of t.lods.need) {
+          const v = meshNodes.reduce((a, n) => a + (m.kit?.lodNodes?.[`${n}_${lvl}`] ?? 0), 0);
+          const c = t.lods[lvl] || {};
+          if (v <= 0) bad.push(`part ${p} ${lvl} missing`);
+          else if ((c.r != null && v > lod0 * c.r) || v >= prevP) bad.push(`part ${p} ${lvl} ${v} vs LOD0 ${lod0}`);
+          prevP = v;
+        }
       }
       r.lods = bad.length ? bad.join('; ') : null;
     }
@@ -419,6 +465,21 @@ function main() {
       if (drop) { ratchet.delete(drop); console.log(`  ! ratchet row ${drop} removed while it still fails`); }
     }
   }
+  // [parts] / [sockets]: a kit part out of its own band fails band; a missing socket empty fails the suite.
+  if (mutate === 'parts') {
+    const v = rows.find((r) => tiers[r.tier].parts);
+    if (v) {
+      const [p, spec] = Object.entries(tiers[v.tier].parts)[0];
+      v.g = grade(v.tier, { ...v.m, kit: { ...v.m.kit, nodes: { ...v.m.kit.nodes, [spec.nodes[0]]: spec.band[1] + 1 } } });
+      console.log(`  ! ${v.key} part ${p} pushed over its band`);
+    }
+  }
+  for (const r of rows.filter((x) => tiers[x.tier].sockets)) {
+    const names = new Set(r.m.kit?.names ?? []);
+    if (mutate === 'sockets') { names.delete(tiers[r.tier].sockets[0]); console.log(`  ! ${tiers[r.tier].sockets[0]} dropped`); }
+    const missing = tiers[r.tier].sockets.filter((n) => !names.has(n));
+    expect(`[sockets] ${r.key}: ${tiers[r.tier].sockets.length} named socket empties present`, missing.length === 0, `missing: ${missing.join(', ')}`);
+  }
   if (mutate === 'stale') {
     const passing = rows.flatMap((r) => CLAUSES.filter((c) => r.g[c] == null).map((c) => `${r.key}:${c}`)).find((x) => !ratchet.has(x));
     if (passing) { ratchet.add(passing); console.log(`  ! passing row ${passing} added to the ratchet`); }
@@ -465,7 +526,7 @@ function main() {
 }
 
 function prove() {
-  const muts = [...CLAUSES, 'stale', 'grow', 'member'];
+  const muts = [...CLAUSES, 'stale', 'grow', 'member', 'parts', 'sockets'];
   let bad = 0;
   const clean = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], { env: { ...process.env, PIRATES_BR_MUTATE: '' }, encoding: 'utf8' });
   console.log(`  ${clean.status === 0 ? '✓' : '✗ FAIL:'} unmutated run exits 0 (got ${clean.status})`);
