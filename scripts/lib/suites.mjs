@@ -290,6 +290,9 @@ export const LOGIC = [
   quick(tsx('test-hlod-logic.mjs')),
   // b4.4b landform layer core (islands-01): evaluator + hook enforced, PLAN 3.14 relief table in report mode.
   quick(tsx('test-island-relief.mjs')),
+  // b4.7a inland water (islands-03, vm:islands:5): streams monotone 0.5-1.5 m deep to the coast, >= 1 stream per
+  // lush/tropical/crescent island, >= 3 ponds that hold water, >= 6 tide shelves, wading 0.7x, 0 new programs (~0.5 s).
+  quick(tsx('test-inland-water.mjs')),
   // b4.6 cliff kit (islands-02/08/14): sea_arch_a sail-through + bridge deck from the GLBs, and the
   // b4.6c convex-hull colliders (budget, enclose, face, hitscan rays, walker marches, flat back
   // seated in the hill, galleon under the arch, client/server parity). ~2.8 s, not quick.

@@ -3,6 +3,7 @@ import { getCrowNestStandingY, getIslandSurfaceY, isPointInsideIslandFootprint }
 import { getShipFloorYAt } from './interactions.js';
 import { resolvePropCollision } from './props.js';
 import { PLAYER, SHIP_STATS, WILDLIFE } from './constants/index.js';
+import { getIslandLandforms, getLandformPonds, landformStreamBedY, type ValleyLandform } from './landforms.js';
 
 /**
  * How a thing that WALKS is allowed to move over an island.
@@ -208,6 +209,146 @@ export function resolveWalkerAgainstWildlife(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** The part of a Player this step reads and writes. `Player` satisfies it. */
+// ─────────────────────────────────────────────────────────────────────────────
+// Inland water (b4.7a, islands-03): streams on the authored valley/gorge beds,
+// ponds at basin spill heights. ONE truth for the client ribbons
+// (StreamBuilder), the wading slow-down below and the footstep surface: the
+// water surface is analytic (bed + depth), the depth is surface - terrain.
+// Pure: no rng, no clock; server and prediction agree bit for bit.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Water over the bed (PLAN 3.14: 0.5-1.5 m). A valley carries a wadeable
+ *  creek, a gorge a river deep enough to swim in its channel. */
+export const STREAM_WATER_DEPTH: Readonly<Record<ValleyLandform['kind'], number>> = { valley: 0.6, gorge: 1.1 };
+/** Arc fraction at the mouth over which the stream thins into its beach delta. */
+export const STREAM_DELTA_U = 0.12;
+/** Feet under at least this much inland water count as wading. */
+export const WADE_DEPTH_MIN_M = 0.05;
+/** Below this the body wades (0.7x, water_shallow); at or above it swims. */
+export const WADE_DEPTH_MAX_M = 0.9;
+export const WADE_SPEED_MUL = 0.7;
+
+export interface InlandStream {
+  readonly id: string;
+  readonly rec: ValleyLandform;
+  /** Island-local polyline and the cumulative arc length at each vertex. */
+  readonly path: readonly (readonly [number, number])[];
+  readonly cum: readonly number[];
+  readonly length: number;
+  /** The water's bed at arc steps of `length / (bed.length - 1)`: the authored
+   *  bed line, dropped to the real centreline ground wherever the hillside
+   *  falls faster than the cut (rapids), as a running minimum so it never
+   *  rises toward the sea. */
+  readonly bed: Float64Array;
+}
+
+const streamCache = new Map<string, { recs: unknown; streams: InlandStream[] }>();
+
+/** The island's stream records, compiled once per record set. */
+export function getInlandStreams(island: Island): readonly InlandStream[] {
+  const recs = getIslandLandforms(island);
+  const hit = streamCache.get(island.id);
+  if (hit && hit.recs === recs) return hit.streams;
+  const streams: InlandStream[] = [];
+  for (const r of recs) {
+    if (r.kind !== 'valley' && r.kind !== 'gorge') continue;
+    const cum = [0];
+    for (let i = 1; i < r.path.length; i++) {
+      cum.push(cum[i - 1] + Math.hypot(r.path[i][0] - r.path[i - 1][0], r.path[i][1] - r.path[i - 1][1]));
+    }
+    const length = cum[cum.length - 1];
+    const n = Math.max(2, Math.ceil(length));
+    const bed = new Float64Array(n + 1);
+    let seg = 1, run = Infinity;
+    for (let k = 0; k <= n; k++) {
+      const u = k / n, t = u * length;
+      while (seg < r.path.length - 1 && cum[seg] < t) seg++;
+      const [ax, az] = r.path[seg - 1], [bx, bz] = r.path[seg];
+      const f = cum[seg] > cum[seg - 1] ? Math.max(0, Math.min(1, (t - cum[seg - 1]) / (cum[seg] - cum[seg - 1]))) : 0;
+      const ground = getIslandSurfaceY(island, island.position.x + ax + (bx - ax) * f, island.position.z + az + (bz - az) * f);
+      run = Math.min(run, landformStreamBedY(r, u), ground);
+      bed[k] = run;
+    }
+    streams.push({ id: r.id, rec: r, path: r.path, cum, length, bed });
+  }
+  streamCache.set(island.id, { recs, streams });
+  return streams;
+}
+
+/** Water depth over the bed at arc fraction u (full, then thinning to 0 in the delta). */
+export function streamDepthAt(s: InlandStream, u: number): number {
+  const d = STREAM_WATER_DEPTH[s.rec.kind];
+  return d * Math.max(0, Math.min(1, (1 - u) / STREAM_DELTA_U));
+}
+
+/** The water's bed at arc fraction u (linear in the running-minimum table). */
+export function streamBedY(s: InlandStream, u: number): number {
+  const n = s.bed.length - 1;
+  const t = Math.max(0, Math.min(1, u)) * n, k = Math.min(n - 1, Math.floor(t));
+  return s.bed[k] + (s.bed[k + 1] - s.bed[k]) * (t - k);
+}
+
+/** Water surface at arc fraction u: monotone (the bed never rises, the depth never grows). */
+export function streamSurfaceY(s: InlandStream, u: number): number {
+  return streamBedY(s, u) + streamDepthAt(s, u);
+}
+
+/** Half width of the water at u: the flat bed plus where the surface meets the wall. */
+export function streamHalfWidth(s: InlandStream, u: number): number {
+  const slope = s.rec.wallSlope ?? (s.rec.kind === 'gorge' ? 2.6 : 0.55);
+  return s.rec.floorWidth / 2 + streamDepthAt(s, u) / slope;
+}
+
+/** Closest point on the stream centreline (island-local): arc fraction + distance. */
+export function projectOnStream(s: InlandStream, lx: number, lz: number): { u: number; dist: number } {
+  let best = Infinity, bestS = 0;
+  for (let i = 1; i < s.path.length; i++) {
+    const [ax, az] = s.path[i - 1], [bx, bz] = s.path[i];
+    const dx = bx - ax, dz = bz - az, L2 = dx * dx + dz * dz;
+    const t = L2 > 0 ? Math.max(0, Math.min(1, ((lx - ax) * dx + (lz - az) * dz) / L2)) : 0;
+    const qx = ax + dx * t - lx, qz = az + dz * t - lz;
+    const d2 = qx * qx + qz * qz;
+    if (d2 < best) { best = d2; bestS = s.cum[i - 1] + Math.sqrt(L2) * t; }
+  }
+  return { u: s.length > 0 ? bestS / s.length : 0, dist: Math.sqrt(best) };
+}
+
+/** Inland water surface height at world (x, z), or null where there is none.
+ *  The sea is not inland water: a stream ends where its surface meets it. */
+export function getInlandWaterSurfaceY(island: Island, x: number, z: number): number | null {
+  const lx = x - island.position.x, lz = z - island.position.z;
+  let out: number | null = null;
+  for (const p of getLandformPonds(island)) {
+    if (Math.hypot(lx - p.x, lz - p.z) < p.radius && (out === null || p.y > out)) out = p.y;
+  }
+  for (const s of getInlandStreams(island)) {
+    const h = projectOnStream(s, lx, lz);
+    if (h.dist > streamHalfWidth(s, h.u)) continue;
+    const y = streamSurfaceY(s, h.u);
+    if (y > 0.05 && streamDepthAt(s, h.u) > 0 && (out === null || y > out)) out = y;
+  }
+  return out;
+}
+
+/** Depth of inland water over the terrain at world (x, z) (0 where dry). */
+export function getInlandWaterDepth(island: Island, x: number, z: number): number {
+  const surface = getInlandWaterSurfaceY(island, x, z);
+  if (surface === null) return 0;
+  return Math.max(0, surface - getIslandSurfaceY(island, x, z));
+}
+
+/** Speed multiplier for a body walking at (x, z): 0.7 in inland water at least
+ *  WADE_DEPTH_MIN_M deep (deeper water is the swim hand-off), else 1. */
+export function inlandWadeSpeedMul(islands: readonly Island[], x: number, z: number): number {
+  for (const island of islands) {
+    const dx = x - island.position.x, dz = z - island.position.z;
+    const reach = island.radius * 1.6;
+    if (dx * dx + dz * dz > reach * reach) continue;
+    if (getInlandWaterDepth(island, x, z) >= WADE_DEPTH_MIN_M) return WADE_SPEED_MUL;
+  }
+  return 1;
+}
+
 export interface PirateMotionState {
   position: { x: number; y: number; z: number };
   velocity: { x: number; y: number; z: number };
@@ -414,7 +555,9 @@ export function stepPirate(
   // physics-12 (b2.1h): the body has mass. Footing is tested ONCE, before the
   // move, and the same answer picks the acceleration law and gates the jump.
   const grounded = isPirateGrounded(k, env);
-  const speed = PLAYER.MOVE_SPEED * (k.crouching ? 0.55 : 1);
+  // b4.7a: wading through a stream or pond edge costs 30% of the stride.
+  const speed = PLAYER.MOVE_SPEED * (k.crouching ? 0.55 : 1)
+    * (grounded ? inlandWadeSpeedMul(env.islands, k.position.x, k.position.z) : 1);
   if (moveX !== 0 || moveZ !== 0) {
     const len = Math.sqrt(moveX * moveX + moveZ * moveZ);
     const nx = moveX / len, nz = moveZ / len;

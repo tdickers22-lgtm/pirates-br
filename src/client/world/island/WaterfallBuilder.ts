@@ -36,6 +36,7 @@
 import * as THREE from 'three';
 import { getIslandSurfaceY } from '../../../shared/utils/index.js';
 import { ZERO_SCALE_MAT4 } from '../../rendering/three-util.js';
+import { buildInlandWater } from './StreamBuilder.js';
 import type { IslandBuildCtx } from './context.js';
 import { ensureMeshGround } from './GroundTruth.js';
 
@@ -1583,6 +1584,33 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
  */
 export function buildWaterfalls(ctx: IslandBuildCtx) {
   const { island, group, rng, islandSeed, lowDetail } = ctx;
+
+  // ONE water material per island, shared by every fall AND the inland water
+  // (streams, ponds, tide pools; b4.7a): one program, one uniform set, one
+  // night-tint hook. Created lazily so a dry island makes none.
+  let sprayLight: SprayLight | null = null;
+  let waterMat: THREE.MeshStandardMaterial | null = null;
+  const ensureWater = (): { water: THREE.MeshStandardMaterial; spray: SprayLight } => {
+    if (!waterMat || !sprayLight) {
+      const spray: SprayLight = { value: new THREE.Color(1, 1, 1) };
+      sprayLight = spray;
+      waterMat = makeWaterMaterial(ctx, spray);
+      // The one per-frame write the island's water makes. The fx list is
+      // cleared on match teardown along with the island meshes, so this cannot
+      // outlive the materials it drives.
+      const atmosphere = ctx.host.renderer;
+      ctx.host.pushVolcanicFx(() => {
+        const night = THREE.MathUtils.clamp(atmosphere.getAtmosphere().nightFactor, 0, 1);
+        spray.value.setRGB(1, 1, 1).lerp(SPRAY_NIGHT_TINT, night);
+      });
+    }
+    return { water: waterMat, spray: sprayLight };
+  };
+  // Stream burble / pond lap emitters ride on the island group for the b2
+  // Ambience zones (hand-off; this lane does not own the sound engine).
+  const inland = buildInlandWater(ctx, () => ensureWater().water);
+  if (inland.length) group.userData.inlandWaterEmitters = inland;
+
   const fallCount = island.profile.terrainStyle === 'mountain' ? 2
     : (island.profile.terrainStyle === 'plateau' || island.profile.terrainStyle === 'twin') ? 1
       : 0;
@@ -1603,24 +1631,16 @@ export function buildWaterfalls(ctx: IslandBuildCtx) {
     if (!course) continue;
     taken.push(course.angle);
     if (!mats) {
-      const sprayLight: SprayLight = { value: new THREE.Color(1, 1, 1) };
+      const shared = ensureWater();
       mats = {
-        water: makeWaterMaterial(ctx, sprayLight),
+        water: shared.water,
         rock: new THREE.MeshStandardMaterial({
           vertexColors: true, roughness: 1, flatShading: true, side: THREE.DoubleSide,
         }),
-        mist: makeMistMaterial(ctx, lowDetail ? 1.3 : 1.55, sprayLight),
+        mist: makeMistMaterial(ctx, lowDetail ? 1.3 : 1.55, shared.spray),
       };
       mats.rock.name = 'waterfall-rock';
       paintFallRock(mats.rock);
-      // The one per-frame write these falls make. The fx list is cleared on
-      // match teardown along with the island meshes, so this cannot outlive the
-      // materials it drives.
-      const atmosphere = ctx.host.renderer;
-      ctx.host.pushVolcanicFx(() => {
-        const night = THREE.MathUtils.clamp(atmosphere.getAtmosphere().nightFactor, 0, 1);
-        sprayLight.value.setRGB(1, 1, 1).lerp(SPRAY_NIGHT_TINT, night);
-      });
     }
     const site = buildFall(ctx, course, fall, mats, drawn);
     if (!site) continue;

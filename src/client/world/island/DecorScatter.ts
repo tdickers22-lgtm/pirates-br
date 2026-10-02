@@ -143,14 +143,13 @@ export function buildRockAndDriftDecor(ctx: IslandBuildCtx) {
 
 /** Beach detail: shells, starfish, seaweed clumps, tide pools. */
 export function buildBeachDecor(ctx: IslandBuildCtx) {
-  const { group, r, rng, lowDetail, surfacePoint, isSolidDecorPoint, scaledCount, boulderGeo, boulderMat } = ctx;
+  const { group, r, rng, lowDetail, surfacePoint, isSolidDecorPoint, scaledCount } = ctx;
   const ground = ensureMeshGround(ctx);
   if (!lowDetail) {
     const shellMat = new THREE.MeshStandardMaterial({ color: 0xf6e3b8, roughness: 0.6 });
     const shellMatPink = new THREE.MeshStandardMaterial({ color: 0xf2b5b0, roughness: 0.55 });
     const seaweedMat = new THREE.MeshStandardMaterial({ color: 0x2d5b2c, roughness: 0.95, side: THREE.DoubleSide });
     const starfishMat = new THREE.MeshStandardMaterial({ color: 0xe07a36, roughness: 0.9 });
-    const tidePoolMat = new THREE.MeshBasicMaterial({ color: 0x3a86a8, transparent: true, opacity: 0.7 });
 
     const beachItems = scaledCount(Math.round(r / 9), 4);
     for (let i = 0; i < beachItems; i++) {
@@ -205,41 +204,9 @@ export function buildBeachDecor(ctx: IslandBuildCtx) {
       }
     }
 
-    // Tide pools — small flat blue disks where rocks shelter water on the rocky shore
-    if (!lowDetail) {
-      const tidePoolCount = scaledCount(Math.round(r / 30), 1);
-      for (let i = 0; i < tidePoolCount; i++) {
-        const angle = rng(i * 671 + 7) * Math.PI * 2;
-        const distRatio = 0.84 + rng(i * 677) * 0.1;
-        const pos = surfacePoint(distRatio, angle, 0.02);
-        if (pos.y > 5.7 || !isSolidDecorPoint(pos, 0.2, -0.18)) continue;
-        snapToDrawnGround(ground, pos, 0);
-        const pool = new THREE.Mesh(
-          new THREE.CircleGeometry(0.7 + rng(i * 681) * 0.6, 14),
-          tidePoolMat,
-        );
-        pool.rotation.x = -Math.PI * 0.5;
-        pool.position.copy(pos);
-        pool.position.y += 0.02;
-        group.add(pool);
-        // Encircling rocks — each seated on the ground at ITS OWN offset
-        // (they ringed the pool at the pool-center height and floated on
-        // any shore slope).
-        for (let r2 = 0; r2 < 5; r2++) {
-          const ra = (r2 / 5) * Math.PI * 2;
-          const rock = new THREE.Mesh(boulderGeo, boulderMat);
-          const rockScale = 0.16 + rng(r2 * 683 + i) * 0.18;
-          rock.scale.setScalar(rockScale);
-          const rx = pos.x + Math.cos(ra) * (0.85 + rng(r2 * 687 + i) * 0.3);
-          const rz = pos.z + Math.sin(ra) * (0.85 + rng(r2 * 689 + i) * 0.3);
-          const seat = seatOnDrawnGround(ctx, rx, rz, rockScale * 0.9, { bite: 0 });
-          rock.position.set(rx, seat.y + rockScale * 0.45, rz);
-          rock.rotation.set(rng(r2 * 691) * Math.PI, rng(r2 * 693) * Math.PI, rng(r2 * 697) * Math.PI);
-          rock.name = 'decor-poolrock';
-          group.add(rock);
-        }
-      }
-    }
+    // Tide pools live on the authored rock shelves now (b4.7a, islands-03):
+    // StreamBuilder draws them as lit still-water insets on the waterfall
+    // program. The old flat unlit discs on the sand are gone.
   }
 }
 
