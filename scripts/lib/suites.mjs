@@ -286,6 +286,8 @@ export const LOGIC = [
   quick(tsx('test-frame-governor.mjs')),
   quick(tsx('test-frame-pacer.mjs')),
   quick(tsx('test-island-reveal.mjs')),
+  // b4.4a island HLOD: sectorOf / hlodTier / sector + far switch, light lift, refusals.
+  quick(tsx('test-hlod-logic.mjs')),
   tsx('test-interaction-arbiter.mjs'),
   // HUD-01/hud-12: prompt ⊆ grant on a 0.25 m deck grid, all three hulls (w1.6).
   tsx('test-interact-parity.mjs'),

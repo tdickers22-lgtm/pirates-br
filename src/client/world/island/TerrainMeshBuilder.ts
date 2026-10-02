@@ -853,11 +853,18 @@ export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
  *  420m clear of the island's own edge at worst (Game.ts detailRadius), and every
  *  mouth sits inside the footprint — asserted in scripts/test-cave-walk.mjs so
  *  the argument fails loudly if a generator ever puts a mouth out to sea. */
-export function buildProxyTerrainMesh(ctx: IslandBuildCtx, terrain: TerrainBuild): THREE.Mesh {
+export function buildProxyTerrainMesh(
+  ctx: IslandBuildCtx,
+  terrain: TerrainBuild,
+  /** Grid density. Default 10 x 30 is the 950 m proxy; the b4.4a HLOD far tier
+   *  (island/IslandImpostor, 450 m) bakes a denser one (~6k tris) from the same
+   *  heightfield so the closer swap keeps the relief, not just the coastline. */
+  res: { rings?: number; segments?: number } = {},
+): THREE.Mesh {
   const { island, surfacePoint, sandColor, beachColor, cliffColor, grassColor, peakColor } = ctx;
   const { shoreRingSpan, seaBase, peakEst, rockSlopeColor, wetSandColor, submergedColor } = terrain;
-  const pRad = 10;
-  const pAng = 30;
+  const pRad = res.rings ?? 10;
+  const pAng = res.segments ?? 30;
   const pShore = 2;
   const pTotal = pRad + pShore;
   const pRingDist = (ring: number): number => ring <= pRad

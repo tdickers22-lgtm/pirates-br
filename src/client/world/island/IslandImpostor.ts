@@ -147,21 +147,95 @@ export class HlodSector extends THREE.LOD {
   }
 }
 
-function eligible(piece: THREE.Object3D, skip: ReadonlySet<THREE.Object3D>): boolean {
-  if (KEEP_NAMES.has(piece.name) || ADDRESSED_NAMES.has(piece.name)) return false;
-  if (skip.has(piece)) return false;
-  if ((piece as THREE.InstancedMesh).isInstancedMesh) return false;
-  let ok = true;
+/**
+ * Why a piece stays out of the sectors, or null if it may join. A PointLight
+ * no longer disqualifies on its own: `liftLights` moves it to the detail root
+ * first (world transform kept, still registered with the light budget, which
+ * holds the light itself, not its parent), so a lantern-bearing prop merges
+ * like any other. Anything else stays where it was.
+ */
+function refusal(piece: THREE.Object3D, skip: ReadonlySet<THREE.Object3D>): string | null {
+  if (KEEP_NAMES.has(piece.name) || ADDRESSED_NAMES.has(piece.name)) return 'addressed';
+  if (skip.has(piece)) return 'cave';
+  if ((piece as THREE.InstancedMesh).isInstancedMesh) return 'instanced';
+  let why: string | null = null;
   piece.traverse((o) => {
-    if (!ok) return;
-    if ((o as THREE.Light).isLight || (o as THREE.InstancedMesh).isInstancedMesh || (o as THREE.SkinnedMesh).isSkinnedMesh) ok = false;
-    else if (o.userData && Object.keys(o.userData).length > 0) ok = false;
-    else if (o !== piece && ADDRESSED_NAMES.has(o.name)) ok = false;
+    if (why) return;
+    if ((o as THREE.Light).isLight && !(o as THREE.PointLight).isPointLight) why = 'light';
+    else if ((o as THREE.InstancedMesh).isInstancedMesh) why = 'instanced';
+    else if ((o as THREE.SkinnedMesh).isSkinnedMesh) why = 'skinned';
+    else if (o.userData && Object.keys(o.userData).length > 0) why = `userData.${Object.keys(o.userData)[0]}`;
+    else if (o !== piece && ADDRESSED_NAMES.has(o.name)) why = 'addressed-child';
   });
-  return ok;
+  return why;
 }
 
-export type HlodStats = { sectors: number; pieces: number; near: number; mid: number; landmarks: number; saved: number };
+/** Point lights out of a piece about to be merged, onto `root` in place. */
+function liftLights(piece: THREE.Object3D, root: THREE.Object3D): number {
+  const lights: THREE.Object3D[] = [];
+  piece.traverse((o) => { if ((o as THREE.PointLight).isPointLight) lights.push(o); });
+  for (const light of lights) root.attach(light);
+  return lights.length;
+}
+
+/**
+ * The island's far tier (> mid band): the full terrain and its skirt give way
+ * to ONE baked proxy of the same heightfield (~6k tris, buildProxyTerrainMesh at
+ * HLOD_FAR_RES), so a landmass 450 m off costs a few thousand triangles, not
+ * the 100-350k of its walkable mesh. The landmarks (>= FAR_KEEP_SIZE, merged
+ * island-wide) stay on top of it as the silhouette. Same LOD-hook trick as the
+ * sectors: this node is the detail root's FIRST child, so the renderer updates
+ * it before it reaches the terrain. Visibility is toggled on the wrapper group,
+ * never on the meshes, so the detail warmer's held/released flags stay its own.
+ */
+export const HLOD_FAR_RES = { rings: 28, segments: 96 } as const;
+
+export class HlodFarSwitch extends THREE.LOD {
+  readonly full = new THREE.Group();
+  tier = 0;
+  private readonly centre = new THREE.Vector3();
+  private radius = 0;
+
+  constructor(readonly far: THREE.Mesh) {
+    super();
+    this.name = 'island-hlod-far-switch';
+    this.full.name = 'island-hlod-terrain-full';
+    far.name = 'island-hlod-far';
+    far.visible = false;
+    far.castShadow = false;
+    far.receiveShadow = true;
+    // Never a raycast target: the walkable truth is the full mesh / heightfield.
+    far.raycast = () => {};
+    this.add(this.full, far);
+  }
+
+  seal(): void {
+    const box = new THREE.Box3();
+    for (const c of this.full.children) box.expandByObject(c);
+    if (!box.isEmpty()) {
+      const sphere = box.getBoundingSphere(new THREE.Sphere());
+      this.centre.copy(sphere.center);
+      this.radius = sphere.radius;
+    }
+  }
+
+  override update(camera: THREE.Camera): void {
+    if (!hlodEnabled()) return;
+    _cam.setFromMatrixPosition(camera.matrixWorld);
+    _centre.copy(this.centre).applyMatrix4(this.matrixWorld);
+    const fov = (camera as THREE.PerspectiveCamera).fov ?? 74;
+    const apparent = Math.max(0, _cam.distanceTo(_centre) - this.radius) / apparentDistanceScale(fov);
+    this.tier = hlodTier(apparent, this.tier, hlodBands());
+    const far = this.tier === 2;
+    this.full.visible = !far;
+    this.far.visible = far;
+  }
+}
+
+export type HlodStats = {
+  sectors: number; pieces: number; near: number; mid: number; landmarks: number; saved: number;
+  lights: number; farTris: number; refused: Record<string, number>;
+};
 
 /**
  * Sort the static pieces under `detailRoot` (and its micro tier) into sectors.
@@ -173,8 +247,9 @@ export function buildIslandHlod(
   microRoot: THREE.Object3D | null,
   islandRadius: number,
   skip: ReadonlySet<THREE.Object3D>,
+  farProxy: (() => THREE.Mesh) | null = null,
 ): HlodStats {
-  const stats: HlodStats = { sectors: 0, pieces: 0, near: 0, mid: 0, landmarks: 0, saved: 0 };
+  const stats: HlodStats = { sectors: 0, pieces: 0, near: 0, mid: 0, landmarks: 0, saved: 0, lights: 0, farTris: 0, refused: {} };
   // `?hlod=off` is the pre-HLOD island exactly: no sectors, no cross-piece merge.
   if (!hlodEnabled()) return stats;
   const sectors: (HlodSector | null)[] = new Array(HLOD_ANGULAR * HLOD_RADIAL).fill(null);
@@ -194,7 +269,13 @@ export function buildIslandHlod(
   if (microRoot) for (const piece of microRoot.children) candidates.push({ piece, small: true });
 
   for (const { piece, small } of candidates) {
-    if (!eligible(piece, skip)) continue;
+    const why = refusal(piece, skip);
+    if (why) {
+      const key = `${piece.name || piece.type}:${why}`;
+      stats.refused[key] = (stats.refused[key] ?? 0) + 1;
+      continue;
+    }
+    stats.lights += liftLights(piece, detailRoot);
     box.setFromObject(piece);
     if (box.isEmpty()) continue;
     box.applyMatrix4(inverse);
@@ -233,6 +314,22 @@ export function buildIslandHlod(
     sector.seal();
     detailRoot.add(sector);
     stats.sectors += 1;
+  }
+
+  // Far tier: terrain + skirt behind one switch, the baked proxy beside them.
+  const fullPieces = detailRoot.children.filter((c) => c.name === 'island-terrain' || c.name === 'island-shore-skirt');
+  if (farProxy && fullPieces.length > 0) {
+    const mesh = farProxy();
+    const sw = new HlodFarSwitch(mesh);
+    // The low tier strips receiveShadow off the detail root; the proxy follows suit.
+    mesh.receiveShadow = fullPieces.some((p) => p.receiveShadow);
+    for (const piece of fullPieces) sw.full.add(piece);
+    sw.seal();
+    // FIRST child: updated by the renderer before anything else in the root.
+    detailRoot.add(sw);
+    detailRoot.children.unshift(detailRoot.children.pop()!);
+    const index = mesh.geometry.getIndex();
+    stats.farTris = index ? index.count / 3 : 0;
   }
   return stats;
 }

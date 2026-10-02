@@ -29,7 +29,7 @@ import { buildBeachDecor, buildCairns, buildInteriorDressing, buildPebbles, buil
 import { buildBridges, buildLookoutPost, buildPirateCamp, buildRopeLadder, buildRuin, buildSecondaryWreck, buildStoneIdols, buildTrails } from './island/Landmarks.js';
 import { buildCliffStrata, buildPeakMist, buildReefRing, buildRockSpires, buildTerraces } from './island/TerrainFeatures.js';
 import { collapseIslandDecor } from './island/StaticBatcher.js';
-import { buildIslandHlod } from './island/IslandImpostor.js';
+import { buildIslandHlod, HLOD_FAR_RES } from './island/IslandImpostor.js';
 import { collectInstanceLodBatches } from './island/InstanceLod.js';
 import { buildWaterfalls } from './island/WaterfallBuilder.js';
 import { buildVolcanicFx } from './island/VolcanicFx.js';
@@ -463,7 +463,10 @@ export class IslandBuilder {
       // low-tier shadow strip so a sector remembers the casts it was given.
       {
         const skip = new Set<THREE.Object3D>((group.userData.caveGroups as THREE.Object3D[] | undefined) ?? []);
-        const hlod = buildIslandHlod(detailRoot, microRoot, getIslandMaxRadius(island), skip);
+        const hlod = buildIslandHlod(
+          detailRoot, microRoot, getIslandMaxRadius(island), skip,
+          () => buildProxyTerrainMesh(ctx, terrain, HLOD_FAR_RES),
+        );
         group.userData.hlodStats = hlod;
       }
 
