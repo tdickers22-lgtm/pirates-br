@@ -97,6 +97,18 @@ export const TIERS = {
   // rocks-cliffs tier, this one included, to HARD (handoff in the b4.6 lane report).
   'cliff-kit': { family: 'rocks-cliffs', band: [10000, 16000], tex: null, lods: CHAIN(0.30, 0.10, 0.05),
     keys: ['cliff_face_a', 'cliff_face_b', 'cliff_face_c', 'cliff_overhang_a', 'cliff_overhang_b', 'rock_shelf_a', 'rock_shelf_b'] },
+  // Cliff kit II (b4.6b, section 6 row 17): arches 20-30k (sea_arch_a sail-through, graded by
+  // test-cliff-kit), sea stacks / basalt / scree, spires, strata slabs, reef; same rock family and chain.
+  'cliff-kit-arches': { family: 'rocks-cliffs', band: [20000, 30000], tex: null, lods: CHAIN(0.30, 0.10, 0.05),
+    keys: ['sea_arch_a', 'sea_arch_b'] },
+  'cliff-kit-stacks': { family: 'rocks-cliffs', band: [4000, 8000], tex: null, lods: CHAIN(0.30, 0.10, 0.05),
+    keys: ['searock_d', 'searock_e', 'searock_f', 'searock_g', 'basalt_columns_a', 'scree_fan_a'] },
+  'cliff-kit-spires': { family: 'rocks-cliffs', band: [3000, 6000], tex: null, lods: CHAIN(0.30, 0.10, 0.05),
+    keys: ['spire_a', 'spire_b', 'spire_c'] },
+  'cliff-kit-strata': { family: 'rocks-cliffs', band: [1500, 3000], tex: null, lods: CHAIN(0.30, 0.10, 0.05),
+    keys: ['strata_slab_a', 'strata_slab_b', 'strata_slab_c'] },
+  'cliff-kit-reef': { family: 'rocks-cliffs', band: [1000, 2000], tex: null, lods: CHAIN(0.30, 0.10, 0.05),
+    keys: ['reef_a', 'reef_b', 'reef_c'] },
   'cave-clusters': { family: 'rocks-cliffs', band: [3000, 8000], tex: HARD, lods: CHAIN(0.35, 0.10, 0.03),
     keys: ['stalactite_cluster_a', 'stalactite_cluster_b', 'stalagmite_cluster_a', 'stalagmite_cluster_b', 'crystal_vein_a',
       'crystal_vein_b', 'cave_ledge', 'cave_pool_rim', 'rock_arch_cave'] },

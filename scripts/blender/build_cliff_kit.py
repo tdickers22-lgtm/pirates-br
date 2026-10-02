@@ -520,12 +520,388 @@ def build(name, form):
     return rep
 
 
+# ══ CLIFF KIT II (b4.6b; islands-02, islands-08, islands-14; PLAN section 6 row 17) ══════════════
+#   sea_arch_a       SAIL-THROUGH sea arch: two jointed legs, a 4-block lintel. The channel is clear
+#                    18 m wide (|x| <= 9) from the root to the galleon main truck + 1 m, and 20 m
+#                    wide up to the course yard head + 1 m (src/shared/hull.ts getShipRigPlan; the
+#                    GLB is graded by scripts/test-cliff-kit.mjs). z = 0 is the DESIGN WATERLINE:
+#                    placement (b4.6d) must not sink it, legs root 4 m down for the seabed.
+#   sea_arch_b       LAND BRIDGE: two piers and a flat jointed deck >= 2.5 m walkable at the crown.
+#   basalt_columns_a volcanic biome: a hex-packed colonnade of capped columns + fallen drums.
+#   scree_fan_a      talus cone for a cliff foot, sorted (the big blocks rolled furthest).
+#   searock_d/e/f/g  sea-stack silhouettes that are NOT the tiered pagoda (islands-14): leaning
+#                    stack, twin stack with a hole, broken stump + fallen top, low skerry cluster;
+#                    vertical jointing (column courses + joints), not level ledges.
+#   strata_slab_*, spire_*, reef_*  the kit forms that replace TerrainFeatures' BoxGeometry /
+#                    ConeGeometry / DodecahedronGeometry primitives (islands-08; wiring is b4.6d).
+GALLEON_TRUCK = 23.74   # galleon main truckY above the waterline (hull.ts getShipRigPlan, measured)
+ARCH_HALF_SPAN = 9.0    # 18 m sail-through span
+YARD_HALF, YARD_TOP = 10.0, 14.62  # course yard halfSpan 9 + 1 m, course head 13.62 + 1 m
+BRIDGE_WALK_MIN = 2.5
+
+
+def _jitter_rot(rng, a=2.0, b=2.0):
+    return (rng.uniform(-a, a), rng.uniform(-a, a), rng.uniform(-b, b))
+
+
+def form_sea_arch_a(coll, seed=7101):
+    rng = random.Random(seed)
+    parts = []
+    courses = ((-4.0, 4.4, 4.6, 5.0), (0.2, 5.8, 4.3, 4.7), (5.8, 6.4, 3.9, 4.4), (12.0, 6.6, 3.6, 4.1),
+               (18.4, 6.4, 3.5, 3.9), (24.4, 4.8, 3.4, 3.8))
+    for si, side in enumerate((-1.0, 1.0)):
+        for k, (z0, h, hx, hy) in enumerate(courses):
+            inner = 10.9 + rng.uniform(0.0, 0.35) + (0.6 if z0 < 15 else 0.0)
+            parts.append(block(coll, f'aa_l{si}{k}', seed + 31 * si + 7 * k, (hx, hy, h * 0.5 + 0.2),
+                               (side * (inner + hx), rng.uniform(-0.5, 0.5), z0 + h * 0.5),
+                               (0, rng.uniform(-1.0, 1.0), rng.uniform(-4, 4)), planes=4, vplanes=3,
+                               vreach=(0.62, 0.80)))
+        parts.append(block(coll, f'aa_h{si}', seed + 90 + si, (1.7, 3.6, 2.2), (side * 11.4, 0.0, 25.2),
+                           (0, side * 8.0, 0), planes=3, vplanes=2))
+    edges = [-17.0, -8.6 + rng.uniform(-0.3, 0.3), rng.uniform(-0.4, 0.4), 8.6 + rng.uniform(-0.3, 0.3), 17.0]
+    for j in range(4):
+        x0, x1 = edges[j], edges[j + 1]
+        outer = j in (0, 3)
+        bot = (26.0 if outer else 26.9) + rng.uniform(0.0, 0.3)
+        top = 31.4 + rng.uniform(-0.6, 0.6)
+        parts.append(block(coll, f'aa_s{j}', seed + 120 + j, (0.5 * (x1 - x0) + 0.35, rng.uniform(3.5, 3.9), 0.5 * (top - bot)),
+                           (0.5 * (x0 + x1), rng.uniform(-0.3, 0.3), 0.5 * (top + bot)), (rng.uniform(-1, 1), 0, rng.uniform(-3, 3)),
+                           planes=4, vplanes=2, top=2, top_reach=(0.44, 0.53)))
+    for k in range(3):
+        parts.append(block(coll, f'aa_c{k}', seed + 140 + k, (rng.uniform(2.0, 3.2), rng.uniform(2.0, 2.8), 0.9),
+                           (rng.uniform(-12, 12), rng.uniform(-1, 1), 32.0), _jitter_rot(rng, 4, 20), planes=5, top=2))
+    for k in range(8):  # awash boulders at the leg feet, never in the channel
+        side = -1.0 if k % 2 else 1.0
+        s = rng.uniform(0.7, 1.4)
+        parts.append(cell(coll, f'aa_rb{k}', seed + 160 + k, (s, s * 0.85, s * 0.7),
+                          (side * rng.uniform(12.4, 19.0), rng.uniform(-6.0, 6.0), rng.uniform(-0.6, 0.2)),
+                          _jitter_rot(rng, 25, 180), planes=8, reach=(0.62, 0.92), points=600, caps=(0.88,)))
+    joints = tuple(((sx * (12.5 + 2.2 * k), -4.6, 10.0), (0.96, 0.28 * sx, 0.0), 0.06, 0.22)
+                   for sx in (-1, 1) for k in range(3))
+    recipe = dict(macro=(0.14, 3.2), heights=((0, 3.0, 0.07), (1, 1.0, 0.028), (0, 0.36, 0.009)),
+                  strata=dict(bed=1.5, amp=0.06, dip=(0.06, 0.02, 1.0)), joints=joints,
+                  notch=dict(z=0.4, width=1.2, depth=0.40), chips=0.035)
+    return parts, 2, recipe
+
+
+def form_sea_arch_b(coll, seed=7203):
+    """Land bridge: piers 12 m apart, deck 4 m deep with a FLAT top (no crest planes) at z ~9."""
+    rng = random.Random(seed)
+    parts = []
+    for si, side in enumerate((-1.0, 1.0)):
+        for k, (z0, h, hx, hy) in enumerate(((-1.4, 3.6, 3.0, 3.4), (2.0, 3.6, 2.6, 3.0), (5.4, 3.0, 2.4, 2.8))):
+            parts.append(block(coll, f'ab_l{si}{k}', seed + 31 * si + 7 * k, (hx, hy, h * 0.5 + 0.15),
+                               (side * (6.2 + hx + rng.uniform(0, 0.3)), rng.uniform(-0.3, 0.3), z0 + h * 0.5),
+                               (0, rng.uniform(-1, 1), rng.uniform(-5, 5)), planes=4, vplanes=3))
+    edges = [-11.2, -3.8 + rng.uniform(-0.3, 0.3), 3.8 + rng.uniform(-0.3, 0.3), 11.2]
+    for j in range(3):
+        x0, x1 = edges[j], edges[j + 1]
+        parts.append(block(coll, f'ab_d{j}', seed + 70 + j, (0.5 * (x1 - x0) + 0.3, 2.05, 1.25),
+                           (0.5 * (x0 + x1), rng.uniform(-0.08, 0.08), 7.85 + rng.uniform(-0.05, 0.05)),
+                           (rng.uniform(-0.6, 0.6), rng.uniform(-0.8, 0.8), rng.uniform(-1.5, 1.5)),
+                           planes=2, reach=(0.84, 0.94), vplanes=2, vreach=(0.80, 0.90)))
+    parts.append(block(coll, 'ab_keel', seed + 80, (6.6, 1.5, 0.8), (0, 0, 6.5), planes=4))
+    for k in range(6):
+        side = -1.0 if k % 2 else 1.0
+        s = rng.uniform(0.4, 0.8)
+        parts.append(cell(coll, f'ab_rb{k}', seed + 90 + k, (s, s * 0.85, s * 0.7),
+                          (side * rng.uniform(7.5, 11.0), rng.uniform(-4.0, 4.0), rng.uniform(-0.3, 0.1)),
+                          _jitter_rot(rng, 25, 180), planes=8, reach=(0.62, 0.92), points=600, caps=(0.88,)))
+    recipe = dict(macro=(0.05, 2.4), heights=((0, 2.4, 0.045), (1, 0.8, 0.020), (0, 0.30, 0.007)),
+                  strata=dict(bed=0.9, amp=0.035, dip=(0.04, 0.02, 1.0)), chips=0.02)
+    return parts, 2, recipe
+
+
+def form_basalt(coll, seed=7307):
+    rng = random.Random(seed)
+    parts = [block(coll, 'bc_root', seed, (3.6, 3.2, 0.6), (0, 0, -0.5), planes=5, vplanes=3)]
+    r0 = 0.62
+    k = 0
+    for q in range(-3, 4):
+        for rr in range(-3, 4):
+            x = r0 * 1.73 * (q + rr * 0.5)
+            y = r0 * 1.5 * rr
+            d = math.hypot(x, y)
+            if d > 3.2 or rng.random() < 0.08:
+                continue
+            top = 6.8 - 1.45 * d + rng.uniform(-0.6, 0.4)
+            if top < 0.6:
+                continue
+            h = top + 1.0
+            r = r0 * rng.uniform(0.93, 1.0)
+            parts.append(block(coll, f'bc_c{k}', seed + 11 * k, (r, r, h * 0.5), (x, y, top - h * 0.5),
+                               (rng.uniform(-2, 2), rng.uniform(-2, 2), rng.uniform(0, 60)), sides=6, planes=1,
+                               reach=(0.66, 0.76), top=1, top_reach=(0.48, 0.54)))
+            k += 1
+    for j in range(4):
+        r = r0 * rng.uniform(0.85, 1.0)
+        a = rng.uniform(0, math.tau)
+        parts.append(block(coll, f'bc_f{j}', seed + 300 + j, (r, r, rng.uniform(0.5, 1.1)),
+                           (math.cos(a) * rng.uniform(3.6, 4.6), math.sin(a) * rng.uniform(3.6, 4.6), 0.1),
+                           (rng.uniform(70, 95), 0, rng.uniform(0, 180)), sides=6, planes=1, reach=(0.62, 0.74)))
+    recipe = dict(macro=(0.03, 1.4), heights=((0, 1.6, 0.030), (1, 0.6, 0.014), (0, 0.24, 0.006)),
+                  strata=dict(bed=0.55, amp=0.020, dip=(0.0, 0.0, 1.0)), chips=0.015)
+    return parts, 1, recipe
+
+
+def form_scree(coll, seed=7411):
+    rng = random.Random(seed)
+    parts = [block(coll, 'sf_b0', seed, (4.2, 3.6, 0.55), (0, -0.4, -0.15), planes=4, vplanes=4, vreach=(0.6, 0.78)),
+             block(coll, 'sf_b1', seed + 1, (3.0, 2.2, 0.6), (0, 1.0, 0.75), planes=4, vplanes=3),
+             block(coll, 'sf_b2', seed + 2, (1.8, 1.2, 0.6), (0, 2.3, 1.6), planes=4, vplanes=3)]
+    for k in range(30):
+        t = rng.random() ** 0.8
+        y = 3.0 - 6.6 * t
+        x = rng.uniform(-1.0, 1.0) * (0.9 + 3.3 * t)
+        s = (0.16 + 0.42 * t) * rng.uniform(0.7, 1.1)
+        z = 2.3 * (1.0 - t) ** 1.25 + s * 0.25
+        parts.append(cell(coll, f'sf_r{k}', seed + 10 + k, (s, s * 0.8, s * 0.6), (x, y, z), _jitter_rot(rng, 30, 180),
+                          planes=8, reach=(0.6, 0.9), points=500, caps=(0.86,)))
+    recipe = dict(macro=(0.02, 1.0), heights=((0, 1.4, 0.022), (1, 0.5, 0.010), (0, 0.2, 0.004)), chips=0.012)
+    return parts, 1, recipe
+
+
+def _stack(coll, tag, seed, courses, sides=7, lean=(0.0, 0.0)):
+    """courses: (z0, h, r) column courses, offset along `lean` (dx/dz, dy/dz): vertical jointing."""
+    rng = random.Random(seed)
+    out = []
+    for k, (z0, h, r) in enumerate(courses):
+        zc = z0 + h * 0.5
+        out.append(block(coll, f'{tag}_k{k}', seed + 13 * k, (r * rng.uniform(0.95, 1.08), r * rng.uniform(0.88, 1.0), h * 0.5 + 0.25),
+                         (lean[0] * zc + rng.uniform(-0.2, 0.2), lean[1] * zc + rng.uniform(-0.2, 0.2), zc),
+                         (math.degrees(math.atan(lean[1])) * -1, math.degrees(math.atan(lean[0])), rng.uniform(0, 60)),
+                         sides=sides, planes=3, reach=(0.66, 0.84), top=(2 if k == len(courses) - 1 else 0)))
+    return out
+
+
+def _awash(coll, tag, seed, n, rad, size=(0.5, 1.1), centre=(0.0, 0.0)):
+    rng = random.Random(seed)
+    out = []
+    for k in range(n):
+        a = rng.uniform(0, math.tau)
+        d = rng.uniform(*rad)
+        s = rng.uniform(*size)
+        out.append(cell(coll, f'{tag}_aw{k}', seed + 40 + k, (s, s * 0.85, s * 0.65),
+                        (centre[0] + math.cos(a) * d, centre[1] + math.sin(a) * d, rng.uniform(-0.6, 0.1)),
+                        _jitter_rot(rng, 25, 180), planes=8, reach=(0.62, 0.92), points=600, caps=(0.88,)))
+    return out
+
+
+SEA_RECIPE = dict(macro=(0.10, 2.4), heights=((0, 2.4, 0.055), (1, 0.8, 0.024), (0, 0.30, 0.008)),
+                  strata=dict(bed=1.6, amp=0.025, dip=(0.10, 0.04, 1.0)), notch=dict(z=0.3, width=0.9, depth=0.30),
+                  chips=0.03)
+
+
+def _vjoints(r, h, n, seed):
+    rng = random.Random(seed)
+    return tuple(((math.cos(a) * r, math.sin(a) * r, h * 0.5), (-math.sin(a), math.cos(a), 0.0), 0.05, 0.22)
+                 for a in (rng.uniform(0, math.tau) for _ in range(n)))
+
+
+def form_searock_d(coll, seed=7501):
+    """Leaning stack: five column courses offset 0.3 m per metre, irregular vertical joints."""
+    parts = _stack(coll, 'sd', seed, ((-1.6, 4.6, 3.4), (2.6, 4.2, 3.0), (6.3, 4.0, 2.6), (9.8, 3.6, 2.2), (12.9, 2.8, 1.7)),
+                   lean=(0.30, 0.06))
+    parts += _awash(coll, 'sd', seed, 6, (3.6, 5.8))
+    return parts, 2, dict(SEA_RECIPE, joints=_vjoints(2.6, 12.0, 6, seed))
+
+
+def form_searock_e(coll, seed=7607):
+    """Twin stack with a hole: two stacks bridged by a lintel; the hole is clear |x| < 1.2, z 0.8-5."""
+    parts = _stack(coll, 'se0', seed, ((-1.6, 4.4, 2.5), (2.4, 4.4, 2.2), (6.4, 4.2, 2.0), (10.2, 3.4, 1.6)), lean=(-0.03, 0.0))
+    for o in parts:
+        for v in o.data.vertices:
+            v.co.x -= 4.3
+    p2 = _stack(coll, 'se1', seed + 500, ((-1.6, 4.0, 2.2), (2.0, 4.0, 2.0), (5.6, 3.6, 1.8)), lean=(0.04, 0.02))
+    for o in p2:
+        for v in o.data.vertices:
+            v.co.x += 4.2
+    parts += p2
+    parts.append(block(coll, 'se_lintel', seed + 900, (3.6, 1.7, 1.3), (0.0, 0.1, 7.3), (0, 4, 0), planes=4, vplanes=2))
+    parts += _awash(coll, 'se', seed, 6, (5.6, 7.6))
+    return parts, 2, dict(SEA_RECIPE, joints=_vjoints(2.2, 10.0, 6, seed))
+
+
+def form_searock_f(coll, seed=7709):
+    """Broken stump: a wide short stack snapped off (jagged crest) with its fallen top beside it."""
+    rng = random.Random(seed)
+    parts = [block(coll, 'sf0', seed, (4.0, 3.6, 2.6), (0, 0, 1.0), planes=4, vplanes=3, sides=8),
+             block(coll, 'sf1', seed + 1, (3.4, 3.1, 1.6), (0.2, 0.1, 4.2), planes=5, sides=8, top=5, top_reach=(0.30, 0.50)),
+             block(coll, 'sf_top', seed + 2, (2.2, 2.0, 3.6), (6.4, 1.2, 0.4), (0, 72, rng.uniform(10, 30)),
+                   sides=7, planes=3, top=2)]
+    parts += _awash(coll, 'sfx', seed, 5, (4.6, 6.4))
+    return parts, 2, dict(SEA_RECIPE, joints=_vjoints(3.6, 5.0, 5, seed))
+
+
+def form_searock_g(coll, seed=7811):
+    """Low skerry cluster: seven rocks (tops 0.4-1.9 m) on a drowned ledge."""
+    rng = random.Random(seed)
+    parts = [block(coll, 'sg_base', seed, (6.8, 4.4, 0.45), (0, 0, -0.85), planes=4, vplanes=4, vreach=(0.58, 0.76))]
+    spots = ((-4.6, 1.2, 1.9, 1.7), (-1.6, -1.4, 1.4, 1.4), (1.6, 1.6, 1.1, 1.6), (4.4, -0.6, 1.6, 1.2),
+             (-2.2, 2.8, 0.6, 1.0), (2.6, -2.8, 0.5, 0.9), (5.8, 2.4, 0.4, 0.8))
+    for k, (x, y, top, r) in enumerate(spots):
+        h = top + 1.1
+        parts.append(block(coll, f'sg_r{k}', seed + 17 * k, (r * rng.uniform(1.0, 1.5), r, h * 0.5), (x, y, top - h * 0.5),
+                           (rng.uniform(-8, 8), rng.uniform(-14, 14), rng.uniform(0, 180)), planes=5, vplanes=3, top=1))
+    return parts, 2, dict(SEA_RECIPE, macro=(0.06, 1.8))
+
+
+def form_strata(seed, beds, dip):
+    def f(coll):
+        rng = random.Random(seed)
+        parts = []
+        z = -0.5
+        for k, (hw, hd, t) in enumerate(beds):
+            parts.append(block(coll, f'st{seed}_{k}', seed + 11 * k, (hw, hd, t * 0.5 + 0.06),
+                               (rng.uniform(-0.25, 0.25) - 0.35 * k, rng.uniform(-0.25, 0.25) + 0.25 * k, z + t * 0.5),
+                               (dip, rng.uniform(-3, 3), rng.uniform(-8, 8)), planes=4, vplanes=3, vreach=(0.58, 0.78)))
+            z += t
+        recipe = dict(macro=(0.03, 1.2), heights=((0, 1.4, 0.025), (1, 0.5, 0.011), (0, 0.22, 0.005)),
+                      strata=dict(bed=0.22, amp=0.014, dip=(0.05, math.sin(math.radians(dip)), 1.0)), chips=0.012)
+        return parts, 1, recipe
+    return f
+
+
+def form_spire(seed, courses, lean):
+    def f(coll):
+        parts = _stack(coll, f'sp{seed}', seed, courses, sides=6, lean=lean)
+        recipe = dict(macro=(0.05, 1.6), heights=((0, 1.8, 0.035), (1, 0.6, 0.016), (0, 0.25, 0.006)),
+                      strata=dict(bed=1.1, amp=0.018, dip=(0.12, 0.05, 1.0)), joints=_vjoints(courses[0][2], 4.0, 4, seed),
+                      chips=0.02)
+        return parts, 1, recipe
+    return f
+
+
+def form_reef(seed, hw, hd, top, pockets):
+    def f(coll):
+        rng = random.Random(seed)
+        slab = block(coll, f'rf{seed}', seed, (hw, hd, (top + 0.8) * 0.5), (0, 0, (top - 0.8) * 0.5),
+                     (rng.uniform(-3, 3), rng.uniform(-3, 3), 0), planes=5, vplanes=5, vreach=(0.55, 0.74), top=2,
+                     top_reach=(0.45, 0.53))
+        for j in range(pockets):
+            a = rng.uniform(0, math.tau)
+            c = (math.cos(a) * hw * 0.4, math.sin(a) * hd * 0.4, top + 0.05)
+            carve(slab, ellipsoid(coll, f'rf{seed}_p{j}', c, (rng.uniform(0.3, 0.5), rng.uniform(0.25, 0.4), 0.30)))
+        parts = [slab] + [cell(coll, f'rf{seed}_n{k}', seed + 20 + k, (s, s * 0.8, s * 0.6),
+                               (rng.uniform(-hw, hw), rng.uniform(-hd, hd), top * 0.6), _jitter_rot(rng, 20, 180),
+                               planes=7, reach=(0.6, 0.9), points=400, caps=(0.86,))
+                          for k, s in enumerate(rng.uniform(0.18, 0.32) for _ in range(4))]
+        recipe = dict(macro=(0.03, 0.9), heights=((0, 1.0, 0.020), (1, 0.4, 0.010), (0, 0.18, 0.004)), chips=0.02)
+        return parts, 1, recipe
+    return f
+
+
+# name: (form, LOD0 target, band, HIGH target, sea piece (wet waterline), moss)
+KIT2_ROWS = (  # tuples, so provenance-scan finds each output name as a writer literal
+    ('sea_arch_a', form_sea_arch_a, 25000, (20000, 30000), 480000, True, 0.30),
+    ('sea_arch_b', form_sea_arch_b, 22000, (20000, 30000), 380000, False, 0.40),
+    ('basalt_columns_a', form_basalt, 6500, (4000, 8000), 300000, False, 0.20),
+    ('scree_fan_a', form_scree, 5200, (4000, 8000), 220000, False, 0.25),
+    ('searock_d', form_searock_d, 7000, (4000, 8000), 350000, True, 0.30),
+    ('searock_e', form_searock_e, 7400, (4000, 8000), 380000, True, 0.30),
+    ('searock_f', form_searock_f, 6200, (4000, 8000), 300000, True, 0.30),
+    ('searock_g', form_searock_g, 5600, (4000, 8000), 260000, True, 0.25),
+    ('strata_slab_a', form_strata(7901, ((2.6, 1.8, 0.45), (2.2, 1.6, 0.40), (1.7, 1.2, 0.38), (1.1, 0.8, 0.32)), 14), 2400, (1500, 3000), 150000, False, 0.40),
+    ('strata_slab_b', form_strata(7911, ((3.0, 1.4, 0.36), (2.6, 1.2, 0.34), (2.0, 1.0, 0.30)), 22), 2200, (1500, 3000), 150000, False, 0.40),
+    ('strata_slab_c', form_strata(7921, ((2.0, 2.0, 0.55), (1.8, 1.6, 0.50), (1.4, 1.3, 0.44), (1.0, 0.9, 0.40), (0.6, 0.6, 0.30)), 9), 2600, (1500, 3000), 150000, False, 0.40),
+    ('spire_a', form_spire(8001, ((-0.8, 2.4, 1.5), (1.5, 2.2, 1.2), (3.6, 2.0, 0.9), (5.4, 1.4, 0.6)), (0.05, 0.02)), 4400, (3000, 6000), 220000, False, 0.35),
+    ('spire_b', form_spire(8011, ((-0.8, 2.8, 1.9), (1.9, 2.6, 1.6), (4.4, 2.4, 1.3), (6.7, 2.0, 0.95), (8.5, 1.4, 0.6)), (-0.08, 0.04)), 5000, (3000, 6000), 260000, False, 0.35),
+    ('spire_c', form_spire(8021, ((-0.8, 3.2, 2.3), (2.3, 3.0, 2.0), (5.2, 2.8, 1.6), (7.9, 2.4, 1.2), (10.2, 1.8, 0.8)), (0.12, -0.03)), 5400, (3000, 6000), 300000, False, 0.35),
+    ('reef_a', form_reef(8101, 2.0, 1.4, 0.35, 2), 1600, (1000, 2000), 100000, True, 0.10),
+    ('reef_b', form_reef(8111, 2.6, 1.2, 0.25, 3), 1700, (1000, 2000), 100000, True, 0.10),
+    ('reef_c', form_reef(8121, 1.5, 1.5, 0.55, 2), 1500, (1000, 2000), 100000, True, 0.10),
+)
+KIT2 = {r[0]: r[1:] for r in KIT2_ROWS}
+
+
+def channel_centre(low, zmax):
+    """Arches: shift x so the channel (z 0..zmax, under the span) is centred on x = 0."""
+    vs = [v.co for v in low.data.vertices if 0.0 < v.co.z < zmax]
+    left = max(v.x for v in vs if v.x < 0)
+    right = min(v.x for v in vs if v.x > 0)
+    dx = -0.5 * (left + right)
+    for v in low.data.vertices:
+        v.co.x += dx
+    low.data.update()
+    return round(right - left, 2)
+
+
+def arch_measure(low):
+    vs = co_list(low)
+    clear = min((v.z for v in vs if abs(v.x) < ARCH_HALF_SPAN), default=1e9)
+    yard = min((v.z for v in vs if abs(v.x) < YARD_HALF), default=1e9)
+    return dict(clearance=round(clear, 2), yard_clear=round(yard, 2))
+
+
+def bridge_walk(obj):
+    me = obj.data
+    crown = [obj.matrix_world @ p.center for p in me.polygons if abs(p.center.x) < 2.0]
+    top = max(c.z for c in crown)
+    up = [obj.matrix_world @ p.center for p in me.polygons
+          if abs(p.center.x) < 2.0 and p.normal.z > 0.80 and p.center.z > top - 1.0]
+    under = min((v.co.z for v in me.vertices if abs(v.co.x) < 4.0 and v.co.z > 1.0), default=0.0)
+    return dict(walk_w=round(max(c.y for c in up) - min(c.y for c in up), 2) if up else 0.0,
+                deck_top=round(top, 2), underside=round(under, 2))
+
+
+def build2(name, spec):
+    form, target, band, high_t, sea, moss = spec
+    t0 = time.time()
+    coll = asset_collection(name)
+    scratch = asset_collection(name + '_hi')
+    parts, smooth_iters, recipe = form(scratch)
+    high, voxel = fracture_cluster(parts, name + '_hi', high_tris=high_t, smooth_iters=smooth_iters)
+    maxd = sculpt(high, sum(map(ord, name)), **recipe)
+    hi_tris = tri_count(high)
+    low = lod0(high, name, coll, target)
+    bpy.data.objects.remove(high, do_unlink=True)
+    rep = dict(high_tris=hi_tris, voxel=round(voxel, 4), max_disp=round(maxd, 3))
+    if name.startswith('sea_arch'):
+        rep['channel_w'] = channel_centre(low, 15.0 if name == 'sea_arch_a' else 4.0)
+    if name == 'sea_arch_a':
+        rep.update(arch_measure(low))
+    if name == 'searock_e':
+        rep['hole_clear'] = not any(abs(v.z - 2.9) < 2.0 and abs(v.x) < 1.0 for v in co_list(low))
+    if sea:
+        zone3(low, [('Rock_Sea', lambda c, n: c.z < 0.55), ('Rock_Dark', lambda c, n: n.z < -0.35),
+                    ('Rock_Grey', lambda c, n: True)])
+    else:
+        zone3(low, [('Rock_Dark', lambda c, n: n.z < -0.35 or c.z < 0.15), ('Rock_Grey', lambda c, n: True)])
+    obj = finish(coll, name, moss=moss)
+    if name == 'sea_arch_b':
+        rep.update(bridge_walk(obj))
+    path = export_collection_vc(coll, name + '.glb')
+    info = verify_glb(path)
+    rep.update(lod0_tris=info['tris'], materials=info['materials'], bbox=[info.get('bbox_min'), info.get('bbox_max')],
+               secs=round(time.time() - t0, 1))
+    print(f'CLIFF {name} ' + json.dumps(rep, default=str), flush=True)
+    assert 0.6 * high_t <= hi_tris <= 1.4 * high_t, (name, 'high sculpt', hi_tris, high_t)
+    assert band[0] <= info['tris'] <= band[1], (name, info['tris'], band)
+    assert info['color0'], name
+    if name == 'sea_arch_a':
+        assert rep['clearance'] >= GALLEON_TRUCK + 1.0 and rep['yard_clear'] >= YARD_TOP, (name, rep)
+    if name == 'sea_arch_b':
+        assert rep['walk_w'] >= BRIDGE_WALK_MIN, (name, rep)
+    if name == 'searock_e':
+        assert rep['hole_clear'], (name, 'twin stack lost its hole')
+    for o in coll.objects:
+        o.hide_render = True
+    return rep
+
+
 clear_default_scene()
 agx_palette()
 REPORT = {}
-for name, form in FORMS:
-    if ONLY and name not in ONLY:
-        continue
-    REPORT[name] = build(name, form)
+KIT_SET = os.environ.get('CLIFF_SET', 'all')  # 1 = kit I, 2 = kit II (b4.6b), all
+if KIT_SET in ('1', 'all'):
+    for name, form in FORMS:
+        if ONLY and name not in ONLY:
+            continue
+        REPORT[name] = build(name, form)
+if KIT_SET in ('2', 'all'):
+    for name, spec in KIT2.items():
+        if ONLY and name not in ONLY:
+            continue
+        REPORT[name] = build2(name, spec)
 print('CLIFF REPORT ' + json.dumps(REPORT, default=str))
 print("CLIFF DONE")

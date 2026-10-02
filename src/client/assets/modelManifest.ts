@@ -65,6 +65,9 @@ const FAMILY_MEMBERS: Record<Exclude<ModelFamily, 'shared' | 'instruments'>, rea
     'cave_ledge', 'crystal_vein_a', 'crystal_vein_b', 'cave_pool_rim',
     // cliff kit I (b4.6a)
     'cliff_face_a', 'cliff_face_b', 'cliff_face_c', 'cliff_overhang_a', 'cliff_overhang_b', 'rock_shelf_a', 'rock_shelf_b',
+    // cliff kit II (b4.6b)
+    'sea_arch_a', 'sea_arch_b', 'searock_d', 'searock_e', 'searock_f', 'searock_g', 'basalt_columns_a', 'scree_fan_a',
+    'spire_a', 'spire_b', 'spire_c', 'strata_slab_a', 'strata_slab_b', 'strata_slab_c', 'reef_a', 'reef_b', 'reef_c',
   ],
   'flora-canopy': ['palm_a', 'palm_b', 'palm_c', 'palm_tall', 'palm_ground', 'bush', 'bush_berry', 'flower_bush', 'fern_plant', 'flower_patch', 'wildflowers'],
   'props-poi': [

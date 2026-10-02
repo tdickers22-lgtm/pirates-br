@@ -105,6 +105,11 @@ const PINNED_BASE = {
   // Cliff kit I (b4.6a): roots sunk below the ground line so a scarp foot never shows air.
   cliff_face_a: -1.2, cliff_face_b: -1.2, cliff_face_c: -1.2, cliff_overhang_a: -1.2, cliff_overhang_b: -1.0,
   rock_shelf_a: -0.9, rock_shelf_b: -0.9,
+  // Cliff kit II (b4.6b): measured roots; z = 0 is the design waterline / ground line. sea_arch_a
+  // roots 4.3 m down for the seabed (its clearance is graded from z = 0 by test-cliff-kit).
+  sea_arch_a: -4.341, sea_arch_b: -1.679, searock_d: -2.515, searock_e: -2.078, searock_f: -2.827, searock_g: -1.573,
+  basalt_columns_a: -1.211, scree_fan_a: -0.744, spire_a: -1.147, spire_b: -1.186, spire_c: -1.285,
+  strata_slab_a: -0.985, strata_slab_b: -1.091, strata_slab_c: -0.879, reef_a: -0.915, reef_b: -0.858, reef_c: -0.869,
   castaway_camp: -3.4, crow_roost: -0.342, dig_site: -0.541, fort: -5.006, gallows: -0.611,
   kraken_wreck: -2.503, mermaid_shrine: -0.151, mine_head: -3.028, parley_table: -0.217,
   rock_arch: -0.286, rum_still: -3.0, shipwreck: -0.078, signal_pyre: -0.15, skull_totem: -0.387,
