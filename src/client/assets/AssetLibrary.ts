@@ -71,13 +71,14 @@ export const ASSET_NAMES = [
   // island.kitPieces and drawn by CliffKitBuilder. WORLD tier, loaded before the countdown: the
   // convex-hull colliders (hullCollide.ts) exist from tick 0, so the draw must too. The _lods
   // siblings carry <key>_LOD1/_LOD2/_far nodes; InstanceLod swaps to the _far node.
+  // scree_fan_a is built but cliffKit.ts never places it, so it stays off the wire (b4.6d).
   'cliff_face_a', 'cliff_face_b', 'cliff_face_c', 'cliff_overhang_a', 'cliff_overhang_b', 'rock_shelf_a',
-  'rock_shelf_b', 'sea_arch_a', 'sea_arch_b', 'basalt_columns_a', 'scree_fan_a', 'searock_d', 'searock_e',
+  'rock_shelf_b', 'sea_arch_a', 'sea_arch_b', 'basalt_columns_a', 'searock_d', 'searock_e',
   'searock_f', 'searock_g', 'strata_slab_a', 'strata_slab_b', 'strata_slab_c', 'spire_a', 'spire_b',
   'spire_c', 'reef_a', 'reef_b', 'reef_c',
   'cliff_face_a_lods', 'cliff_face_b_lods', 'cliff_face_c_lods', 'cliff_overhang_a_lods',
   'cliff_overhang_b_lods', 'rock_shelf_a_lods', 'rock_shelf_b_lods', 'sea_arch_a_lods', 'sea_arch_b_lods',
-  'basalt_columns_a_lods', 'scree_fan_a_lods', 'searock_d_lods', 'searock_e_lods', 'searock_f_lods',
+  'basalt_columns_a_lods', 'searock_d_lods', 'searock_e_lods', 'searock_f_lods',
   'searock_g_lods', 'strata_slab_a_lods', 'strata_slab_b_lods', 'strata_slab_c_lods', 'spire_a_lods',
   'spire_b_lods', 'spire_c_lods', 'reef_a_lods', 'reef_b_lods', 'reef_c_lods',
 ] as const;
