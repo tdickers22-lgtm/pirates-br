@@ -20,9 +20,10 @@
 import type { Island } from '../../../shared/types/index.js';
 import { getIslandSurfaceY } from '../../../shared/utils/index.js';
 import { getIslandLandforms, getLandformLadders } from '../../../shared/landforms.js';
+import { resolvePropCollision } from '../../../shared/props.js';
 import {
   CLIMB_SCARP_MIN_M, CLIMB_SCARP_SPACING_M, SCRAMBLE_SLOPE_MAX, WALK_SLOPE_MAX,
-  type ClimbKind, type ClimbPlacedIsland, type IslandClimb,
+  climbLength, climbPointAt, type ClimbKind, type ClimbPlacedIsland, type IslandClimb,
 } from '../../../shared/interactions.js';
 
 export const CLIMB_GRID_M = 3;
@@ -123,6 +124,64 @@ function footing(island: Island, x: number, z: number): [number, number] | null 
   return null;
 }
 
+/** Body radius the route keeps clear of props and cliff-kit hulls (the gate
+ *  checks 0.3 m at 0.25 m spacing; the 0.1 m margin covers the chord between
+ *  draped vertices). */
+const SOLID_CLEAR_R = 0.4;
+const SOLID_PUSH_MAX_M = 3;
+
+/** Drape the route over what is drawn ON the face, not just the terrain under
+ *  it: a cliff-kit hull or a prop standing on the scarp (b4.6 kit faces sit up
+ *  to ~1.5 m proud of the analytic ground) would otherwise pin the climber
+ *  inside rock the walker can never enter. Each interior vertex steps out along
+ *  the face normal (0.1 m steps, at most SOLID_PUSH_MAX_M) until the body there
+ *  (held off it as climbPointAt holds it) is one the shared prop/kit pushout
+ *  leaves alone. The two ends are the mount and release points on real ground:
+ *  either one inside a solid rejects the site. Mutates pts; false = reject. */
+function clearOfSolids(island: Island, pts: number[], nx: number, nz: number): boolean {
+  const n = pts.length / 3;
+  const probe = { x: 0, y: 0, z: 0 };
+  const blocked = (x: number, y: number, z: number): boolean => {
+    probe.x = x; probe.y = y; probe.z = z;
+    return resolvePropCollision(probe, SOLID_CLEAR_R, island).pushed;
+  };
+  if (blocked(pts[0], pts[1], pts[2]) || blocked(pts[(n - 1) * 3], pts[(n - 1) * 3 + 1], pts[(n - 1) * 3 + 2])) return false;
+  const push = new Float64Array(n);
+  const base = pts.slice();
+  const route = { pts, nx, nz } as IslandClimb;
+  // Sample the body exactly where climbPointAt will hold it (arc-length t, the
+  // end-tapered standoff); every blocked sample steps the two vertices of its
+  // segment out by 0.1 m (ends stay put). Re-drape until no sample is blocked.
+  for (let pass = 0; pass < 40; pass++) {
+    const len = climbLength(route);
+    const segEnd: number[] = [];
+    let acc = 0;
+    for (let i = 1; i < n; i++) {
+      acc += Math.hypot(pts[i * 3] - pts[i * 3 - 3], pts[i * 3 + 1] - pts[i * 3 - 2], pts[i * 3 + 2] - pts[i * 3 - 1]);
+      segEnd.push(acc);
+    }
+    const samples = Math.max(4, Math.ceil(len / 0.2));
+    const hit = new Set<number>();
+    for (let k = 0; k <= samples; k++) {
+      const t = k / samples;
+      const p = climbPointAt(route, t);
+      if (!blocked(p.x, p.y, p.z)) continue;
+      let seg = 0;
+      while (seg < segEnd.length - 1 && segEnd[seg] < t * len) seg++;
+      for (const v of [seg, seg + 1]) if (v > 0 && v < n - 1) hit.add(v);
+      if (seg === 0 && n === 2) return false;
+    }
+    if (hit.size === 0) return true;
+    for (const v of hit) {
+      push[v] += 0.1;
+      if (push[v] > SOLID_PUSH_MAX_M) return false;
+      pts[v * 3] = base[v * 3] + nx * push[v];
+      pts[v * 3 + 2] = base[v * 3 + 2] + nz * push[v];
+    }
+  }
+  return false;
+}
+
 /** Route from low ground (lx,lz) to high ground (hx,hz), draped on the terrain. */
 export function makeClimb(island: Island, id: string, lx0: number, lz0: number, hx0: number, hz0: number): IslandClimb | null {
   const lo = footing(island, lx0, lz0);
@@ -151,6 +210,7 @@ export function makeClimb(island: Island, id: string, lx0: number, lz0: number, 
     const ox = lx - island.position.x; const oz = lz - island.position.z; const o = Math.hypot(ox, oz) || 1;
     nx = ox / o; nz = oz / o;
   }
+  if (!clearOfSolids(island, pts, nx, nz)) return null;
   const kind: ClimbKind = maxSlope <= SCRAMBLE_SLOPE_MAX ? 'scramble' : by - ay > 9 ? 'rope' : 'ladder';
   return { id, kind, ax: pts[0], ay, az: pts[2], bx: pts[pts.length - 3], by, bz: pts[pts.length - 1], nx, nz, pts };
 }

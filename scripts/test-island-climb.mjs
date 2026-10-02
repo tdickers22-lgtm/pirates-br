@@ -10,15 +10,16 @@
 //   - every authored scarp > 5 m with walkable ground on both sides has a route
 //     within 60 m of every point of its path;
 //   - the mast ladder still runs through the same verb (base -> nest).
-// Usage: node --import tsx scripts/test-island-climb.mjs [--mutate=no-climbs|no-jump]
+// Usage: node --import tsx scripts/test-island-climb.mjs [--mutate=no-climbs|no-jump|prop-on-route]
 import { MapGenerator } from '../src/server/world/MapGenerator.ts';
 import { getIslandSurfaceY } from '../src/shared/utils/index.ts';
 import { getIslandLandforms } from '../src/shared/landforms.ts';
 import { PHYSICS } from '../src/shared/constants/index.ts';
 import {
   CLIMB_JUMP_OFF_M, CLIMB_SCARP_MIN_M, CLIMB_SCARP_SPACING_M, CLIMB_STANDOFF_M, WALK_SLOPE_MAX,
-  climbLength, findClimbMount, islandClimbs,
+  climbLength, climbPointAt, findClimbMount, islandClimbs,
 } from '../src/shared/interactions.ts';
+import { resolvePropCollision } from '../src/shared/props.ts';
 import { ClimbSystem, MAST_CLIMB_RATE } from '../src/server/systems/ClimbSystem.ts';
 import { buildWalkGrid, gridCellAt, landingComponent, CLIMB_DRY_Y } from '../src/server/world/placement/climbs.ts';
 
@@ -172,6 +173,38 @@ for (const island of islands) {
   }
 }
 
+// 6. no climb runs through a prop or a cliff-kit hull: the climber's body at
+//    every 0.25 m of the route (the standoff point the server pins it to) is
+//    one the shared prop/kit pushout leaves alone. A route through a boulder or
+//    a kit face would pin the body inside geometry the walker can never enter.
+{
+  const BODY_R = 0.3;
+  if (mutate === 'prop-on-route') {
+    for (const { island, c } of all) {
+      const mid = c.pts.length / 3 >> 1;
+      (island.props ??= []).push({ id: `mut-${c.id}`, type: 'boulder_a', x: c.pts[mid * 3], z: c.pts[mid * 3 + 2], rotation: 0, scale: 1 });
+    }
+  }
+  let samples = 0;
+  for (const { island, c } of all) {
+    const len = climbLength(c);
+    const n = Math.max(4, Math.ceil(len / 0.25));
+    let hits = 0; let worst = 0; let worstT = 0;
+    for (let i = 0; i <= n; i++) {
+      const p = climbPointAt(c, i / n);
+      const r = resolvePropCollision({ x: p.x, y: p.y, z: p.z }, BODY_R, island);
+      samples++;
+      if (r.pushed) {
+        hits++;
+        const d = Math.hypot(r.x - p.x, r.z - p.z);
+        if (d > worst) { worst = d; worstT = i / n; }
+      }
+    }
+    ok(hits === 0, `${c.id} (${c.kind}) clear of props and kit hulls`, `${hits}/${n + 1} body samples pushed, worst ${worst.toFixed(2)} m at t=${worstT.toFixed(2)}`);
+  }
+  ok(samples >= all.length * 5, 'prop/kit clearance sampled', `${samples}`);
+}
+
 // 5. the mast ladder runs through the same verb.
 {
   const sys = new ClimbSystem();
@@ -191,4 +224,6 @@ const kinds = all.reduce((m, { c }) => ({ ...m, [c.kind]: (m[c.kind] ?? 0) + 1 }
 console.log(`routes ${all.length} ${JSON.stringify(kinds)}; worst stray ${worstStray.toFixed(2)} m`);
 console.log(`${passed} passed, ${failed} failed`);
 if (passed === 0) { console.log('VACUOUS'); process.exit(1); }
+// The runner's EVIDENCE regex needs a PASS/FAIL token (a bare tally reads VACUOUS).
+console.log(failed ? `FAIL test-island-climb: ${failed} rows` : `PASS test-island-climb: ${passed} rows`);
 process.exit(failed ? 1 : 0);

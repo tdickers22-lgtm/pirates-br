@@ -4,6 +4,7 @@
  * between the island's stops, the rope bridges between peaks, and the ruin.
  */
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { climbLength, climbPointAt, islandClimbs } from '../../../shared/interactions.js';
 import { getBridgeSpanY, getIslandSurfaceY } from '../../../shared/utils/index.js';
 import { MAX_METALNESS_NO_ENV, MIN_ALBEDO_VALUE } from '../../assets/materialAudit.js';
@@ -359,45 +360,98 @@ export function buildStoneIdols(ctx: IslandBuildCtx) {
 }
 
 /** b4.7b: the island's climb routes (island.climbs, placed by the static
- *  world), drawn along the same draped polyline the server pins climbers to.
- *  The old decorative ladder (random site, no server presence) is gone. Rails +
- *  rungs for ladders, one hawser for ropes, nothing extra for scrambles (the
- *  rock steps come from the face itself). GLB kit pieces replace these lines
- *  when build_poi_kit.py ships them. */
+ *  world), built along the same draped polyline the server pins climbers to.
+ *  The old decorative ladder (random site, no server presence) is gone.
+ *  Ladders: two round rails 0.48 m apart with rungs every 0.32 m of arc and
+ *  rail ends standing 0.9 m proud of the top as handholds. Ropes: one knotted
+ *  hawser (a knot every 0.45 m) tied off to a stake on the top. Scrambles: a
+ *  fixed hand line on short stakes beside the rock steps, so the route reads
+ *  from the beach. Everything merges into one wood mesh and one rope mesh per
+ *  island (2 draws), geometry in island-local space. */
+const CLIMB_RUNG_STEP_M = 0.32;
+const CLIMB_RAIL_HALF_M = 0.24;
+const CLIMB_KNOT_STEP_M = 0.45;
 export function buildRopeLadder(ctx: IslandBuildCtx) {
-  const { island, group } = ctx;
+  const { island, group, lowDetail } = ctx;
   const routes = islandClimbs(island);
   if (routes.length === 0) return;
   const ox = island.position.x; const oy = island.position.y; const oz = island.position.z;
-  const rails: number[] = [];
-  const rungs: number[] = [];
+  const radial = lowDetail ? 4 : 7;
+  const wood: THREE.BufferGeometry[] = [];
+  const rope: THREE.BufferGeometry[] = [];
+  const UP = new THREE.Vector3(0, 1, 0);
+  const va = new THREE.Vector3(); const vb = new THREE.Vector3(); const dir = new THREE.Vector3();
+  const q = new THREE.Quaternion();
+  const rod = (out: THREE.BufferGeometry[], a: THREE.Vector3, b: THREE.Vector3, r: number): void => {
+    dir.subVectors(b, a);
+    const len = dir.length();
+    if (len < 1e-3) return;
+    const g = new THREE.CylinderGeometry(r, r, len, radial, 1, true);
+    q.setFromUnitVectors(UP, dir.multiplyScalar(1 / len));
+    g.applyQuaternion(q);
+    g.translate((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2);
+    out.push(g);
+  };
+  const knot = (p: THREE.Vector3, r: number): void => {
+    const g = new THREE.SphereGeometry(r, radial, Math.max(3, radial - 2));
+    g.translate(p.x, p.y, p.z);
+    rope.push(g);
+  };
+  const stake = (x: number, y: number, z: number, h: number, r: number): void => {
+    rod(wood, va.set(x, y - 0.25, z).clone(), vb.set(x, y + h, z).clone(), r);
+  };
   for (const c of routes) {
-    if (c.kind === 'scramble') continue;
     const len = climbLength(c);
-    const n = Math.max(2, Math.ceil(len / 0.4));
     const px = -c.nz; const pz = c.nx; // across the face
-    const half = c.kind === 'rope' ? 0 : 0.24;
-    let prev: { x: number; y: number; z: number } | null = null;
-    for (let i = 0; i <= n; i++) {
-      const p = climbPointAt(c, i / n);
-      const x = p.x - ox - c.nx * 0.25; const y = p.y - oy + 0.05; const z = p.z - oz - c.nz * 0.25;
-      if (prev) {
-        for (const s of half ? [-half, half] : [0]) rails.push(prev.x + px * s, prev.y, prev.z + pz * s, x + px * s, y, z + pz * s);
+    // Island-local point on the route, `out` metres off the face, `side` across it.
+    const at = (t: number, out: number, side: number, lift = 0): THREE.Vector3 => {
+      const p = climbPointAt(c, t);
+      return new THREE.Vector3(
+        p.x - ox - c.nx * out + px * side, p.y - oy + lift, p.z - oz - c.nz * out + pz * side,
+      );
+    };
+    const n = Math.max(2, Math.ceil(len / 0.5));
+    if (c.kind === 'ladder') {
+      for (const s of [-CLIMB_RAIL_HALF_M, CLIMB_RAIL_HALF_M]) {
+        for (let i = 0; i < n; i++) rod(wood, at(i / n, 0.25, s, 0.05), at((i + 1) / n, 0.25, s, 0.05), 0.045);
+        const top = at(1, 0.25, s, 0.05);
+        rod(wood, top, top.clone().setY(top.y + 0.9), 0.045);
       }
-      if (half && i > 0 && i < n) rungs.push(x - px * half, y, z - pz * half, x + px * half, y, z + pz * half);
-      prev = { x, y, z };
+      const rungs = Math.max(1, Math.floor(len / CLIMB_RUNG_STEP_M));
+      for (let i = 1; i < rungs; i++) {
+        const t = i / rungs;
+        rod(wood, at(t, 0.25, -CLIMB_RAIL_HALF_M - 0.04, 0.05), at(t, 0.25, CLIMB_RAIL_HALF_M + 0.04, 0.05), 0.03);
+      }
+    } else if (c.kind === 'rope') {
+      for (let i = 0; i < n; i++) rod(rope, at(i / n, 0.22, 0, 0.05), at((i + 1) / n, 0.22, 0, 0.05), 0.035);
+      const knots = Math.floor(len / CLIMB_KNOT_STEP_M);
+      for (let i = 1; i < knots; i++) knot(at(i / knots, 0.22, 0, 0.05), 0.075);
+      const top = at(1, 0, 0, 0);
+      stake(top.x - c.nx * 0.6, top.y, top.z - c.nz * 0.6, 0.7, 0.07);
+      rod(rope, at(1, 0.22, 0, 0.05), new THREE.Vector3(top.x - c.nx * 0.6, top.y + 0.55, top.z - c.nz * 0.6), 0.035);
+    } else {
+      // Scramble: hand line 0.9 m up, 0.7 m beside the step line.
+      for (let i = 0; i < n; i++) rod(rope, at(i / n, 0, 0.7, 0.9), at((i + 1) / n, 0, 0.7, 0.9), 0.03);
+      const posts = Math.max(1, Math.ceil(len / 4));
+      for (let i = 0; i <= posts; i++) {
+        const p = at(i / posts, 0, 0.7, 0);
+        stake(p.x, p.y, p.z, 0.95, 0.05);
+      }
     }
   }
-  const add = (pos: number[], color: number): void => {
-    if (!pos.length) return;
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    const seg = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color }));
-    seg.name = 'climb-routes';
-    group.add(seg);
+  const add = (geos: THREE.BufferGeometry[], name: string, color: number, roughness: number): void => {
+    if (!geos.length) return;
+    const merged = mergeGeometries(geos, false);
+    for (const g of geos) g.dispose();
+    if (!merged) return;
+    const mesh = new THREE.Mesh(merged, litPropMaterial({ color, roughness }));
+    mesh.name = name;
+    mesh.castShadow = !lowDetail;
+    mesh.receiveShadow = true;
+    group.add(mesh);
   };
-  add(rails, 0xc8b27a);
-  add(rungs, 0x7a5a36);
+  add(wood, 'climb-routes', 0x8a6a44, 0.85);
+  add(rope, 'climb-ropes', 0xb89c68, 0.95);
 }
 
 /** Secondary smaller wreck on bigger islands so they feel storied. (Skipped
