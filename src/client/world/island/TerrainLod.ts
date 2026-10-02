@@ -17,11 +17,11 @@ import {
  * Raycasts never see the coarse list: the mesh raycasts against a sibling
  * geometry that shares the attributes and holds the full index.
  *
- * Bands: desktop 120 m, phone 60 m (islands-06: the phone draws the coarse
+ * Bands: desktop 120 m, phone 40 m (b4.4c: 60 m left the 2 m grid at 321k on the phone island-interior row; islands-06: the phone draws the coarse
  * grid beyond 60 m). `?terrainlod=off` keeps every chunk fine (perf mutation).
  */
 export const TERRAIN_LOD_NEAR_DESKTOP = 120;
-export const TERRAIN_LOD_NEAR_PHONE = 60;
+export const TERRAIN_LOD_NEAR_PHONE = 40;
 const HYSTERESIS = 1.15;
 
 let resolvedEnabled: boolean | null = null;
