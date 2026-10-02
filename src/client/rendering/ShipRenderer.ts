@@ -44,7 +44,7 @@ import { releaseShipGeometry } from './ship/geometry.js';
 import { selectShipLod, shipLodKey, SHIP_LOD_BANDS, SHIP_LOD_HYSTERESIS, type ShipLodLevel } from './ship/lod.js';
 import { buildRudder, buildSternCastle } from './ship/stern.js';
 import { buildRig } from './ship/sails.js';
-import { deckKitSockets, kitDrawCount, mountShipKit, shipKitSockets, SHIP_KIT_FILES, SHIP_KIT_LOD_FILES, type KitSocket, type ShipKitFile, type ShipKitLodFile, type ShipKitSource } from './ship/kit.js';
+import { DECK_KIT_SMALL, deckKitSockets, kitDrawCount, type DeckKitPart, mountShipKit, shipKitSockets, SHIP_KIT_FILES, SHIP_KIT_LOD_FILES, type KitSocket, type ShipKitFile, type ShipKitLodFile, type ShipKitSource } from './ship/kit.js';
 import { SAIL_BELLY, SAIL_CLOTH_GRID, makeLodSailCard, sailFillTarget, sailLuff01, sailWind01, setSailClothUniforms, stepSailFill, type SailClothUniforms } from './ship/sailCloth.js';
 import { applyRiggingLod, updateRigging, type Rigging, type RiggingSet } from './ship/rigging.js';
 import { buildWakeSurface, writeWakeSurface, setArmsVisible, makeWakeFrame, ARM_FACTOR_FLOOR, buildWaterlineCollar, seatWaterlineCollar, type WakeSurface, type WakeFrame } from './ship/wake.js';
@@ -474,7 +474,7 @@ export class ShipRenderer {
     // 30 m (the rudder is under water past the detail band: LOD0 only).
     const lod1 = mountShipKit(hull, src, glass, 1);
     if (lod1) mesh.lod1Root.add(lod1);
-    const lod2 = mountShipKit(hull.filter((s) => s.part !== 'barrel'), src, glass, 2);
+    const lod2 = mountShipKit(hull.filter((s) => !DECK_KIT_SMALL.has(s.part)), src, glass, 2);
     if (lod2) { lod2.traverse((o) => { o.castShadow = false; }); mesh.lod2Root.add(lod2); }
     const rudder = mesh.kitSockets.find((s) => s.part === 'rudder');
     if (rudder) {
@@ -2260,9 +2260,45 @@ export class ShipRenderer {
     }
     // b4.3c: decor barrels are the kit's staved barrel (ship_kit_b) on the
     // deck slab; deterministic yaw from the berth (perf-15, see above).
-    const kitDeckSpots = decorSpots.map((spot) => ({
+    const kitDeckSpots: Array<{ x: number; z: number; yaw: number; part?: DeckKitPart }> = decorSpots.map((spot) => ({
       x: spot.x, z: spot.z, yaw: (Math.abs(Math.sin(spot.x * 12.9898 + spot.z * 78.233)) % 1) * Math.PI * 2,
     }));
+    // b4.3c: kit II deck hardware (ship's bell, elm-tree bilge pump, shot
+    // garlands) on main-deck berths clear of every work station, the masts,
+    // the stairwell and each other; a part with no clear berth stays off.
+    {
+      const taken: Array<{ x: number; z: number; r: number }> = [
+        ...getShipRigPlan(stats).map((mp) => ({ x: 0, z: mp.z, r: 0.95 })),
+        ...supplyBarrels.map((b) => ({ x: b.position.x, z: b.position.z, r: 0.85 })),
+        ...decorSpots.map((d) => ({ x: d.x, z: d.z, r: 0.85 })),
+      ];
+      // Sweep the main deck (quarterdeck front to the bow capstan band) on a
+      // 25 cm grid and take the clear berth nearest the part's preferred spot.
+      const half = (z: number) => sheerHalfWidthAt(profile, z);
+      const berth = (part: DeckKitPart, r: number, pref: [number, number], yawAt: (x: number) => number, rail = 0): void => {
+        const along = part === 'cannonball_rack'; // a 1.1 m garland, long axis fore-aft
+        const cands: Array<[number, number]> = [];
+        for (let z = qd.frontZ + r + 0.5; z <= L * 0.32; z += 0.25) {
+          if (rail) { cands.push([rail * (half(z) - 0.6), z]); continue; }
+          for (let x = -half(z) + 0.35 + r; x <= half(z) - 0.35 - r; x += 0.25) cands.push([x, z]);
+        }
+        cands.sort((p, q) => Math.hypot(p[0] - pref[0], p[1] - pref[1]) - Math.hypot(q[0] - pref[0], q[1] - pref[1]));
+        const rr = along ? 0.3 : r;
+        for (const [x, z] of cands) {
+          const ends: Array<[number, number]> = along ? [[x, z - 0.55], [x, z], [x, z + 0.55]] : [[x, z]];
+          if (!ends.every(([ex, ez]) => clearOfStations(ex, ez) && taken.every((t) => (ex - t.x) ** 2 + (ez - t.z) ** 2 >= (t.r + rr) ** 2))) continue;
+          kitDeckSpots.push({ x, z, yaw: yawAt(x), part });
+          taken.push(...ends.map(([ex, ez]) => ({ x: ex, z: ez, r: rr })));
+          return;
+        }
+      };
+      // Bell on the centreline forward of the mainmast, pump abaft it (the
+      // brake handle athwartships), a shot garland against each bulwark by
+      // the shot barrels.
+      berth('bell', 0.6, [0, mainMastLocalZ + 1.7], () => 0);
+      berth('bilge_pump', 0.5, [W * 0.15, mainMastLocalZ - 1.2], (x) => (x >= 0 ? -1 : 1) * Math.PI / 2);
+      for (const side of [-1, 1] as const) berth('cannonball_rack', 0.6, [side * W * 0.5, shotZ], () => -side * Math.PI / 2, side);
+    }
 
     // Mooring line flaked down near the stern quarter
     const sternRope = makeRopeCoil(ropeCoilMat, 0.24, 0.052, 7, 2.9, this.lodPhone ? 4 : 6);
