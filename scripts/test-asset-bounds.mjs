@@ -102,6 +102,9 @@ const PINNED_BASE = {
   // +0.14/+0.34/+0.54 Blender lift; they now seat on their own small skirt.
   boulder_a: -0.083, boulder_b: -0.120, boulder_c: -0.100,
   crag: -1.55, searock_a: -1.026, searock_b: -1.268, searock_c: -0.785,
+  // Cliff kit I (b4.6a): roots sunk below the ground line so a scarp foot never shows air.
+  cliff_face_a: -1.2, cliff_face_b: -1.2, cliff_face_c: -1.2, cliff_overhang_a: -1.2, cliff_overhang_b: -1.0,
+  rock_shelf_a: -0.9, rock_shelf_b: -0.9,
   castaway_camp: -3.4, crow_roost: -0.342, dig_site: -0.541, fort: -5.006, gallows: -0.611,
   kraken_wreck: -2.503, mermaid_shrine: -0.151, mine_head: -3.028, parley_table: -0.217,
   rock_arch: -0.286, rum_still: -3.0, shipwreck: -0.078, signal_pyre: -0.15, skull_totem: -0.387,

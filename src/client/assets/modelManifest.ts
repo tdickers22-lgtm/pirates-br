@@ -63,6 +63,8 @@ const FAMILY_MEMBERS: Record<Exclude<ModelFamily, 'shared' | 'instruments'>, rea
     'boulder_a', 'boulder_b', 'boulder_c', 'searock_a', 'searock_b', 'searock_c', 'rock_arch', 'crag',
     'rock_arch_cave', 'stalactite_cluster_a', 'stalactite_cluster_b', 'stalagmite_cluster_a', 'stalagmite_cluster_b',
     'cave_ledge', 'crystal_vein_a', 'crystal_vein_b', 'cave_pool_rim',
+    // cliff kit I (b4.6a)
+    'cliff_face_a', 'cliff_face_b', 'cliff_face_c', 'cliff_overhang_a', 'cliff_overhang_b', 'rock_shelf_a', 'rock_shelf_b',
   ],
   'flora-canopy': ['palm_a', 'palm_b', 'palm_c', 'palm_tall', 'palm_ground', 'bush', 'bush_berry', 'flower_bush', 'fern_plant', 'flower_patch', 'wildflowers'],
   'props-poi': [

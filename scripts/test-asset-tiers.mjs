@@ -90,6 +90,13 @@ export const TIERS = {
   searocks: { family: 'rocks-cliffs', band: [15000, 25000], tex: HARD, lods: CHAIN(0.35, 0.10, 0.03), keys: ['searock_a', 'searock_b', 'searock_c'] },
   arches: { family: 'rocks-cliffs', band: [20000, 30000], tex: HARD, lods: CHAIN(0.35, 0.10, 0.03), keys: ['rock_arch'] },
   cliff: { family: 'rocks-cliffs', band: [10000, 16000], tex: HARD, lods: CHAIN(0.35, 0.10, 0.03), keys: ['crag'] },
+  // Cliff kit I (b4.6a, section 6 row 16): faces 12x8 m with a flat back, overhangs (6 m lip / 3 m
+  // undercut), tide-pool shelves. LOD0 10-16k, LOD1 <= 30%, far <= 5% (PLAN 3.14). tex: null because
+  // the kit is ONE shared rock material family (Rock_Grey/Dark/Sea, runtime triplanar 'rock' detail),
+  // exactly what the ratcheted '<rock>:textures' rows above lack; the rock map pass flips every
+  // rocks-cliffs tier, this one included, to HARD (handoff in the b4.6 lane report).
+  'cliff-kit': { family: 'rocks-cliffs', band: [10000, 16000], tex: null, lods: CHAIN(0.30, 0.10, 0.05),
+    keys: ['cliff_face_a', 'cliff_face_b', 'cliff_face_c', 'cliff_overhang_a', 'cliff_overhang_b', 'rock_shelf_a', 'rock_shelf_b'] },
   'cave-clusters': { family: 'rocks-cliffs', band: [3000, 8000], tex: HARD, lods: CHAIN(0.35, 0.10, 0.03),
     keys: ['stalactite_cluster_a', 'stalactite_cluster_b', 'stalagmite_cluster_a', 'stalagmite_cluster_b', 'crystal_vein_a',
       'crystal_vein_b', 'cave_ledge', 'cave_pool_rim', 'rock_arch_cave'] },
