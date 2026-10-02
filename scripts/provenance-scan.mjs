@@ -65,6 +65,12 @@ export const OVERRIDES = {
     script: 'scripts/blender/build_fauna_v2.py',
     reason: 'shipped shark.glb is skinned (1 skin) = build_shark_hero/export_skinned in build_fauna_v2.py; build_animals.py build_shark() is the superseded rigid version (c0f262fb)',
   },
+  // b4.5a: the rock kit v2 build writes its own far rocks (_rock.decimated_copy: gate-safe weld, area kept);
+  // build_far_lods.py still names the rocks in its legacy list but no longer builds them.
+  ...Object.fromEntries(['boulder_a', 'boulder_b', 'boulder_c', 'searock_a', 'searock_b', 'searock_c'].map((k) => [`${k}_far.glb`, {
+    script: 'scripts/blender/build_rocks.py',
+    reason: 'build_rocks.py exports <name>_far.glb next to LOD0 (b4.5a); build_far_lods.py rows for rocks are superseded',
+  }])),
 };
 
 const SKIP_DIRS = new Set(['node_modules', '__pycache__', '.cache', '.git', 'dist', 'test-results']);
