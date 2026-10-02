@@ -273,6 +273,9 @@ try {
     // Hide every other audit hull; the ID pass only swaps this group, so a stale one in front stole its pixels.
     await page.evaluate((id) => { const sr = window.__piratesBR.shipRenderer; for (const k of ['sloop', 'brigantine', 'galleon']) { const o = sr.getShipGroup('audit-' + k); if (o && 'audit-' + k !== id) o.visible = false; } }, id);
     await sleep(2500);
+    // b4.3c: the Blender ship kit streams in and mounts late (first-draw allowance); wait for it before shooting.
+    const kitMounted = await page.waitForFunction((id) => !!window.__piratesBR.shipRenderer.getShipGroup(id)?.getObjectByName('ship-kit'), id, { timeout: 45_000, polling: 250 }).then(() => true).catch(() => false);
+    console.log(`[gallery] ${type} kit mounted: ${kitMounted}`);
     report.census[type] = await page.evaluate((id) => {
       const grp = window.__piratesBR.shipRenderer.getShipGroup(id); if (!grp) return null;
       let tris = 0, meshes = 0; const mats = new Set();

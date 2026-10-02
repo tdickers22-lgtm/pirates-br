@@ -44,7 +44,7 @@ import { releaseShipGeometry } from './ship/geometry.js';
 import { selectShipLod, shipLodKey, SHIP_LOD_BANDS, SHIP_LOD_HYSTERESIS, type ShipLodLevel } from './ship/lod.js';
 import { buildRudder, buildSternCastle } from './ship/stern.js';
 import { buildRig } from './ship/sails.js';
-import { deckKitSockets, kitDrawCount, mountShipKit, shipKitSockets, SHIP_KIT_FILES, type KitSocket, type ShipKitFile, type ShipKitSource } from './ship/kit.js';
+import { deckKitSockets, kitDrawCount, mountShipKit, shipKitSockets, SHIP_KIT_FILES, SHIP_KIT_LOD_FILES, type KitSocket, type ShipKitFile, type ShipKitLodFile, type ShipKitSource } from './ship/kit.js';
 import { SAIL_BELLY, SAIL_CLOTH_GRID, makeLodSailCard, sailFillTarget, sailLuff01, sailWind01, setSailClothUniforms, stepSailFill, type SailClothUniforms } from './ship/sailCloth.js';
 import { applyRiggingLod, updateRigging, type Rigging, type RiggingSet } from './ship/rigging.js';
 import { buildWakeSurface, writeWakeSurface, setArmsVisible, makeWakeFrame, ARM_FACTOR_FLOOR, buildWaterlineCollar, seatWaterlineCollar, type WakeSurface, type WakeFrame } from './ship/wake.js';
@@ -442,18 +442,19 @@ export class ShipRenderer {
   private readonly hardwareMeshCount = new Map<string, number>();
   setHardwareSource(src: ShipHardwareSource | null): void { this.hardwareSource = src; }
   /** b4.3c: the ship kit's library (AssetLibrary in the browser); streamed on first need. */
-  private kitSource: (ShipKitSource & { ensure?(name: ShipKitFile): Promise<void> }) | null = null;
+  private kitSource: (ShipKitSource & { ensure?(name: ShipKitFile | ShipKitLodFile): Promise<void> }) | null = null;
   private kitRequested = false;
   private kitPrice: number | undefined;
-  setKitSource(src: (ShipKitSource & { ensure?(name: ShipKitFile): Promise<void> }) | null): void { this.kitSource = src; }
+  setKitSource(src: (ShipKitSource & { ensure?(name: ShipKitFile | ShipKitLodFile): Promise<void> }) | null): void { this.kitSource = src; }
 
   private kitReady(): boolean {
     const src = this.kitSource;
     if (!src) return false;
-    if (SHIP_KIT_FILES.every((f) => src.has(f))) return true;
+    const files = [...SHIP_KIT_FILES, ...SHIP_KIT_LOD_FILES];
+    if (files.every((f) => src.has(f))) return true;
     if (!this.kitRequested && src.ensure) {
       this.kitRequested = true;
-      for (const f of SHIP_KIT_FILES) void src.ensure(f).catch(() => { /* hull stays bare of kit */ });
+      for (const f of files) void src.ensure(f).catch(() => { /* hull stays bare of kit */ });
     }
     return false;
   }
@@ -464,9 +465,17 @@ export class ShipRenderer {
     const src = this.kitSource;
     if (!src) return;
     const glass = mesh.lanternGlassMats[0] ?? null;
-    const root = mountShipKit(mesh.kitSockets.filter((s) => s.part !== 'rudder'), src, glass);
+    const hull = mesh.kitSockets.filter((s) => s.part !== 'rudder');
+    const root = mountShipKit(hull, src, glass);
     if (!root) return;
     mesh.detailRoot.add(root);
+    // The level roots get the kit's own LOD1/LOD2 geometry on the same
+    // sockets, so the figurehead, galleries and gunports do not pop off at
+    // 30 m (the rudder is under water past the detail band: LOD0 only).
+    const lod1 = mountShipKit(hull, src, glass, 1);
+    if (lod1) mesh.lod1Root.add(lod1);
+    const lod2 = mountShipKit(hull.filter((s) => s.part !== 'barrel'), src, glass, 2);
+    if (lod2) { lod2.traverse((o) => { o.castShadow = false; }); mesh.lod2Root.add(lod2); }
     const rudder = mesh.kitSockets.find((s) => s.part === 'rudder');
     if (rudder) {
       const p = mesh.rudderPivot.position;
@@ -3480,7 +3489,7 @@ void main() {
       if (mesh.hardware && detailNear) this.updateHardwareLod(mesh, distSq);
       // b4.3c: the ship kit mounts the same way (a late first appearance that
       // pays the shared first-draw allowance), once both files are in.
-      if (!mesh.kit && detailNear && this.kitReady()) {
+      if (!mesh.kit && mesh.lodLevel <= 2 && this.kitReady()) {
         const price = this.kitPrice ??= kitDrawCount(mountShipKit(mesh.kitSockets, this.kitSource!, null));
         if (price <= firstDrawRemaining() || firstDrawFrameUntouched()) {
           spendFirstDraw(price);
