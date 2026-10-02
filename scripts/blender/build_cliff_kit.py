@@ -544,42 +544,119 @@ def _jitter_rot(rng, a=2.0, b=2.0):
     return (rng.uniform(-a, a), rng.uniform(-a, a), rng.uniform(-b, b))
 
 
+def hull_mesh(coll, name, pts):
+    """Convex hull of a point set as a mesh object (scree cone, b4.6b2)."""
+    bm = bmesh.new()
+    for p in pts:
+        bm.verts.new(p)
+    res = bmesh.ops.convex_hull(bm, input=list(bm.verts))
+    drop = {v for v in list(res['geom_interior']) + list(res['geom_unused']) if isinstance(v, bmesh.types.BMVert)}
+    if drop:
+        bmesh.ops.delete(bm, geom=list(drop), context='VERTS')
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    me = bpy.data.meshes.new(name)
+    bm.to_mesh(me)
+    bm.free()
+    obj = bpy.data.objects.new(name, me)
+    coll.objects.link(obj)
+    return obj
+
+
+def taper(obj, k, z0, z1, cx, cy):
+    """Narrow a column toward its head (factor 1 - k at z1) about the axis (cx, cy)."""
+    for v in obj.data.vertices:
+        f = 1.0 - k * min(1.0, max(0.0, (v.co.z - z0) / (z1 - z0)))
+        v.co.x = cx + (v.co.x - cx) * f
+        v.co.y = cy + (v.co.y - cy) * f
+    obj.data.update()
+
+
+def shear(obj, lean, z0=0.0):
+    """Lean by shearing (dx/dz, dy/dz): joints stay vertical-ish, no rotated course steps."""
+    for v in obj.data.vertices:
+        v.co.x += lean[0] * (v.co.z - z0)
+        v.co.y += lean[1] * (v.co.z - z0)
+    obj.data.update()
+
+
+ARCH_A, ARCH_Z0, ARCH_B = 11.9, 9.5, 18.5  # superellipse intrados (n = 4): z(9 m) = 26.26, crown 28.0
+
+
+def _intrados(n=4.0, steps=600):
+    out = []
+    for i in range(steps + 1):
+        phi = math.pi * i / steps
+        c, s_ = math.cos(phi), math.sin(phi)
+        out.append((ARCH_A * math.copysign(abs(c) ** (2.0 / n), c), ARCH_Z0 + ARCH_B * abs(s_) ** (2.0 / n)))
+    return out
+
+
 def form_sea_arch_a(coll, seed=7101):
+    """b4.6b2: a rock arch, not a doorway. Legs are a few tall joint-bounded masses (foot, shaft,
+    buttress, front flake) instead of equal courses; the opening is a superellipse intrados lined by
+    voussoir blocks whose inner faces are TANGENT to the curve (a flat chord of a concave-down curve
+    lies above it, so no block dips into the channel), each recessed 0.15-0.7 m at random: an
+    irregular, stepped soffit. Spandrels and a crown mass sit outside the intrados."""
     rng = random.Random(seed)
     parts = []
-    courses = ((-4.0, 4.4, 4.6, 5.0), (0.2, 5.8, 4.3, 4.7), (5.8, 6.4, 3.9, 4.4), (12.0, 6.6, 3.6, 4.1),
-               (18.4, 6.4, 3.5, 3.9), (24.4, 4.8, 3.4, 3.8))
     for si, side in enumerate((-1.0, 1.0)):
-        for k, (z0, h, hx, hy) in enumerate(courses):
-            inner = 10.9 + rng.uniform(0.0, 0.35) + (0.6 if z0 < 15 else 0.0)
-            parts.append(block(coll, f'aa_l{si}{k}', seed + 31 * si + 7 * k, (hx, hy, h * 0.5 + 0.2),
-                               (side * (inner + hx), rng.uniform(-0.5, 0.5), z0 + h * 0.5),
-                               (0, rng.uniform(-1.0, 1.0), rng.uniform(-4, 4)), planes=4, vplanes=3,
-                               vreach=(0.62, 0.80)))
-        parts.append(block(coll, f'aa_h{si}', seed + 90 + si, (1.7, 3.6, 2.2), (side * 11.4, 0.0, 25.2),
-                           (0, side * 8.0, 0), planes=3, vplanes=2))
-    edges = [-17.0, -8.6 + rng.uniform(-0.3, 0.3), rng.uniform(-0.4, 0.4), 8.6 + rng.uniform(-0.3, 0.3), 17.0]
-    for j in range(4):
+        inner = ARCH_A + 0.45 + rng.uniform(0.0, 0.35)
+        parts.append(block(coll, f'aa_f{si}', seed + 31 * si, (5.2, 5.0, 6.0),
+                           (side * (inner + 5.2), rng.uniform(-0.6, 0.6), 1.6), (rng.uniform(-2, 2), 0, rng.uniform(-7, 7)),
+                           planes=5, vplanes=4, vreach=(0.58, 0.78)))
+        parts.append(block(coll, f'aa_u{si}', seed + 37 * si + 3, (4.3, 4.4, 6.0),
+                           (side * (inner + 0.3 + 4.3), rng.uniform(-0.5, 0.5), 12.6), (rng.uniform(-2, 2), side * -2.0, rng.uniform(-5, 5)),
+                           planes=4, vplanes=3, vreach=(0.60, 0.80)))
+        parts.append(block(coll, f'aa_b{si}', seed + 41 * si + 5, (2.2, 3.4, 7.5),
+                           (side * (inner + 10.0), rng.uniform(-1.0, 1.0), 2.5), (rng.uniform(-3, 3), side * 6.0, rng.uniform(-8, 8)),
+                           planes=4, vplanes=3))
+        parts.append(block(coll, f'aa_k{si}', seed + 43 * si + 7, (1.6, 1.2, 7.0),
+                           (side * (inner + 4.0 + rng.uniform(-0.8, 0.8)), -5.0, 4.0 + rng.uniform(-1, 1)),
+                           (rng.uniform(-3, 3), side * 3.0, rng.uniform(-10, 10)), planes=4, vplanes=2))
+        parts.append(block(coll, f'aa_s{si}', seed + 47 * si + 9, (3.6, 3.8, 5.6),
+                           (side * (ARCH_A + 0.6 + 3.6), rng.uniform(-0.4, 0.4), 23.0), (0, side * -4.0, rng.uniform(-4, 4)),
+                           planes=4, vplanes=2))
+        parts.append(block(coll, f'aa_h{si}', seed + 53 * si + 11, (5.0, 3.7, 3.0),
+                           (side * 9.0, rng.uniform(-0.3, 0.3), 31.8), (0, side * 14.0, rng.uniform(-3, 3)), planes=4, vplanes=2))
+    curve = [p for p in _intrados() if p[1] >= 16.5]
+    acc = [0.0]
+    for (x0, z0), (x1, z1) in zip(curve, curve[1:]):
+        acc.append(acc[-1] + math.hypot(x1 - x0, z1 - z0))
+    L, nv = acc[-1], 11
+    for k in range(nv):
+        s_ = min(L, max(0.0, (k + 0.5) / nv * L + rng.uniform(-0.12, 0.12) * L / nv))
+        i = min(len(curve) - 2, next(j for j, a in enumerate(acc) if a >= s_))
+        (x0, z0), (x1, z1) = curve[i], curve[i + 1]
+        dl = math.hypot(x1 - x0, z1 - z0)
+        tx, tz = (x1 - x0) / dl, (z1 - z0) / dl
+        nx, nz = tz, -tx  # outward (into the rock)
+        recess = rng.uniform(0.15, 0.70)
+        hr = rng.uniform(2.0, 2.6)
+        ht = 0.5 * L / nv + rng.uniform(0.45, 0.75)
+        c = (x0 + nx * (hr + recess), rng.uniform(-0.3, 0.3), z0 + nz * (hr + recess))
+        parts.append(block(coll, f'aa_v{k}', seed + 200 + k, (ht, rng.uniform(3.4, 3.9), hr), c,
+                           (rng.uniform(-1.0, 1.0), math.degrees(math.atan2(nx, nz)), rng.uniform(-2, 2)),
+                           planes=4, reach=(0.72, 0.90)))
+    edges = [-14.0, -4.5 + rng.uniform(-0.6, 0.6), 4.5 + rng.uniform(-0.6, 0.6), 14.0]
+    for j in range(3):
         x0, x1 = edges[j], edges[j + 1]
-        outer = j in (0, 3)
-        bot = (26.0 if outer else 26.9) + rng.uniform(0.0, 0.3)
-        top = 31.4 + rng.uniform(-0.6, 0.6)
-        parts.append(block(coll, f'aa_s{j}', seed + 120 + j, (0.5 * (x1 - x0) + 0.35, rng.uniform(3.5, 3.9), 0.5 * (top - bot)),
-                           (0.5 * (x0 + x1), rng.uniform(-0.3, 0.3), 0.5 * (top + bot)), (rng.uniform(-1, 1), 0, rng.uniform(-3, 3)),
+        top = 34.0 + rng.uniform(-0.8, 0.6)
+        parts.append(block(coll, f'aa_m{j}', seed + 120 + j, (0.5 * (x1 - x0) + 0.4, rng.uniform(3.4, 3.8), 0.5 * (top - 30.0)),
+                           (0.5 * (x0 + x1), rng.uniform(-0.3, 0.3), 0.5 * (top + 30.0)), (rng.uniform(-1, 1), 0, rng.uniform(-3, 3)),
                            planes=4, vplanes=2, top=2, top_reach=(0.44, 0.53)))
     for k in range(3):
         parts.append(block(coll, f'aa_c{k}', seed + 140 + k, (rng.uniform(2.0, 3.2), rng.uniform(2.0, 2.8), 0.9),
-                           (rng.uniform(-12, 12), rng.uniform(-1, 1), 32.0), _jitter_rot(rng, 4, 20), planes=5, top=2))
+                           (rng.uniform(-12, 12), rng.uniform(-1, 1), 34.2), _jitter_rot(rng, 4, 20), planes=5, top=2))
     for k in range(8):  # awash boulders at the leg feet, never in the channel
         side = -1.0 if k % 2 else 1.0
         s = rng.uniform(0.7, 1.4)
         parts.append(cell(coll, f'aa_rb{k}', seed + 160 + k, (s, s * 0.85, s * 0.7),
-                          (side * rng.uniform(12.4, 19.0), rng.uniform(-6.0, 6.0), rng.uniform(-0.6, 0.2)),
+                          (side * rng.uniform(13.5, 19.5), rng.uniform(-6.0, 6.0), rng.uniform(-0.6, 0.2)),
                           _jitter_rot(rng, 25, 180), planes=8, reach=(0.62, 0.92), points=600, caps=(0.88,)))
-    joints = tuple(((sx * (12.5 + 2.2 * k), -4.6, 10.0), (0.96, 0.28 * sx, 0.0), 0.06, 0.22)
+    joints = tuple(((sx * (13.5 + 2.6 * k), -5.2, 10.0), (0.96, 0.28 * sx, 0.0), 0.06, 0.24)
                    for sx in (-1, 1) for k in range(3))
     recipe = dict(macro=(0.14, 3.2), heights=((0, 3.0, 0.07), (1, 1.0, 0.028), (0, 0.36, 0.009)),
-                  strata=dict(bed=1.5, amp=0.06, dip=(0.06, 0.02, 1.0)), joints=joints,
+                  strata=dict(bed=2.8, amp=0.06, dip=(0.22, 0.08, 1.0)), joints=joints,
                   notch=dict(z=0.4, width=1.2, depth=0.40), chips=0.035)
     return parts, 2, recipe
 
@@ -645,17 +722,30 @@ def form_basalt(coll, seed=7307):
 
 
 def form_scree(coll, seed=7411):
+    """b4.6b2: a talus cone, not a plinth: a smooth inclined half-cone (apex against the cliff at
+    y = 3.4, z = 2.8) under ~44 clasts sorted by size downslope plus run-out boulders past the toe."""
     rng = random.Random(seed)
-    parts = [block(coll, 'sf_b0', seed, (4.2, 3.6, 0.55), (0, -0.4, -0.15), planes=4, vplanes=4, vreach=(0.6, 0.78)),
-             block(coll, 'sf_b1', seed + 1, (3.0, 2.2, 0.6), (0, 1.0, 0.75), planes=4, vplanes=3),
-             block(coll, 'sf_b2', seed + 2, (1.8, 1.2, 0.6), (0, 2.3, 1.6), planes=4, vplanes=3)]
-    for k in range(30):
-        t = rng.random() ** 0.8
-        y = 3.0 - 6.6 * t
-        x = rng.uniform(-1.0, 1.0) * (0.9 + 3.3 * t)
-        s = (0.16 + 0.42 * t) * rng.uniform(0.7, 1.1)
-        z = 2.3 * (1.0 - t) ** 1.25 + s * 0.25
-        parts.append(cell(coll, f'sf_r{k}', seed + 10 + k, (s, s * 0.8, s * 0.6), (x, y, z), _jitter_rot(rng, 30, 180),
+    AY, AZ, RX, RY = 3.4, 2.8, 4.6, 6.8
+    pts = [(0.0, AY, AZ), (0.0, AY, -0.7), (-0.5, AY, AZ - 0.15), (0.5, AY, AZ - 0.15)]
+    for i in range(33):
+        a = math.pi + math.pi * i / 32
+        pts.append((RX * math.cos(a), AY + RY * math.sin(a), -0.1))
+        pts.append((RX * 1.05 * math.cos(a), AY + RY * 1.05 * math.sin(a), -0.7))
+    parts = [hull_mesh(coll, 'sf_cone', pts)]
+    for k in range(44):
+        t = rng.random() ** 0.75
+        a = math.pi + rng.uniform(0.07, 0.93) * math.pi
+        s = (0.12 + 0.48 * t ** 1.4) * rng.uniform(0.7, 1.15)
+        z = AZ * (1.0 - t) - 0.1 * t + s * 0.2
+        parts.append(cell(coll, f'sf_r{k}', seed + 10 + k, (s, s * 0.8, s * 0.6),
+                          (RX * t * math.cos(a), AY + RY * t * math.sin(a), z), _jitter_rot(rng, 30, 180),
+                          planes=8, reach=(0.6, 0.9), points=500, caps=(0.86,)))
+    for j in range(4):
+        t = rng.uniform(1.0, 1.18)
+        a = math.pi + rng.uniform(0.15, 0.85) * math.pi
+        s = rng.uniform(0.6, 0.95)
+        parts.append(cell(coll, f'sf_o{j}', seed + 80 + j, (s, s * 0.8, s * 0.6),
+                          (RX * t * math.cos(a), AY + RY * t * math.sin(a), s * 0.25 - 0.1), _jitter_rot(rng, 30, 180),
                           planes=8, reach=(0.6, 0.9), points=500, caps=(0.86,)))
     recipe = dict(macro=(0.02, 1.0), heights=((0, 1.4, 0.022), (1, 0.5, 0.010), (0, 0.2, 0.004)), chips=0.012)
     return parts, 1, recipe
@@ -723,14 +813,21 @@ def form_searock_e(coll, seed=7607):
 
 
 def form_searock_f(coll, seed=7709):
-    """Broken stump: a wide short stack snapped off (jagged crest) with its fallen top beside it."""
+    """Broken stump (b4.6b2): three irregular joint-bounded masses (no polygonal drum, no radial
+    joints), a tall shard on one side and a lower shoulder, both with snapped crests; parallel joint
+    set + one cross joint; the fallen top lies beside it."""
     rng = random.Random(seed)
-    parts = [block(coll, 'sf0', seed, (4.0, 3.6, 2.6), (0, 0, 1.0), planes=4, vplanes=3, sides=8),
-             block(coll, 'sf1', seed + 1, (3.4, 3.1, 1.6), (0.2, 0.1, 4.2), planes=5, sides=8, top=5, top_reach=(0.30, 0.50)),
-             block(coll, 'sf_top', seed + 2, (2.2, 2.0, 3.6), (6.4, 1.2, 0.4), (0, 72, rng.uniform(10, 30)),
-                   sides=7, planes=3, top=2)]
+    parts = [block(coll, 'sf0', seed, (3.9, 3.3, 2.0), (0, 0, 0.4), (0, 0, 17), planes=6, vplanes=5, vreach=(0.56, 0.76)),
+             block(coll, 'sf1', seed + 1, (2.0, 2.4, 2.9), (-1.6, 0.6, 3.0), (6, -9, 30), planes=4, vplanes=3,
+                   top=5, top_reach=(0.30, 0.48)),
+             block(coll, 'sf2', seed + 3, (2.4, 2.2, 1.6), (1.7, -0.5, 2.4), (-8, 12, -20), planes=5, vplanes=2,
+                   top=4, top_reach=(0.32, 0.50)),
+             block(coll, 'sf_top', seed + 2, (2.0, 1.8, 3.4), (6.4, 1.2, 0.4), (0, 72, rng.uniform(10, 30)),
+                   planes=5, vplanes=3, top=2)]
     parts += _awash(coll, 'sfx', seed, 5, (4.6, 6.4))
-    return parts, 2, dict(SEA_RECIPE, joints=_vjoints(3.6, 5.0, 5, seed))
+    joints = (((-2.3, 0.0, 2.5), (0.97, 0.24, 0.0), 0.05, 0.20), ((0.35, 0.0, 2.5), (0.90, -0.42, 0.0), 0.05, 0.16),
+              ((0.4, 1.3, 2.5), (-0.25, 0.97, 0.0), 0.05, 0.14))  # irregular, non-radial, unequal spacing
+    return parts, 2, dict(SEA_RECIPE, joints=joints)
 
 
 def form_searock_g(coll, seed=7811):
@@ -747,45 +844,90 @@ def form_searock_g(coll, seed=7811):
 
 
 def form_strata(seed, beds, dip):
+    """b4.6b2: beds share one strong dip (rotation about X) and stack along the bed normal, each
+    offset in x and up-dip so the ledges step sideways: a tilted outcrop, not a stepped plinth."""
     def f(coll):
         rng = random.Random(seed)
+        d = math.radians(dip)
+        nrm = Vector((0.0, -math.sin(d), math.cos(d)))
+        updip = Vector((0.0, math.cos(d), math.sin(d)))
         parts = []
-        z = -0.5
+        z = 0.0
+        hw0, hd0 = beds[0][0], beds[0][1]
         for k, (hw, hd, t) in enumerate(beds):
-            parts.append(block(coll, f'st{seed}_{k}', seed + 11 * k, (hw, hd, t * 0.5 + 0.06),
-                               (rng.uniform(-0.25, 0.25) - 0.35 * k, rng.uniform(-0.25, 0.25) + 0.25 * k, z + t * 0.5),
-                               (dip, rng.uniform(-3, 3), rng.uniform(-8, 8)), planes=4, vplanes=3, vreach=(0.58, 0.78)))
+            # cuesta: beds keep most of their width, their down-dip ends line up into one dip slope and
+            # the up-dip (scarp) ends step back bed by bed; alternate x offsets break the pyramid.
+            hw_k, hd_k = max(hw, hw0 * (1.0 - 0.08 * k)), max(hd, hd0 * (1.0 - 0.16 * k))
+            sx = (0.35 * k if k % 2 else -0.3 * k) + rng.uniform(-0.15, 0.15)
+            c = (Vector((0.0, 0.0, -0.7)) + nrm * (z + t * 0.5) + Vector((sx, 0.0, 0.0))
+                 + updip * (hd_k - hd0 + rng.uniform(-0.12, 0.12)))
+            parts.append(block(coll, f'st{seed}_{k}', seed + 11 * k, (hw_k, hd_k, t * 0.5 + 0.04), tuple(c),
+                               (dip + rng.uniform(-2, 2), rng.uniform(-2, 2), rng.uniform(-6, 6)), planes=4, vplanes=3,
+                               vreach=(0.58, 0.78)))
             z += t
         recipe = dict(macro=(0.03, 1.2), heights=((0, 1.4, 0.025), (1, 0.5, 0.011), (0, 0.22, 0.005)),
-                      strata=dict(bed=0.22, amp=0.014, dip=(0.05, math.sin(math.radians(dip)), 1.0)), chips=0.012)
+                      strata=dict(bed=0.22, amp=0.014, dip=(0.03, -math.sin(d), math.cos(d))), chips=0.012)
         return parts, 1, recipe
     return f
 
 
-def form_spire(seed, courses, lean):
+def form_spire(seed, cols, lean):
+    """b4.6b2: a bundle of tall single columns (dx, dy, r, h), each full height, tapered and sheared
+    (no stacked courses, no level steps: the islands-14 pagoda tell), heads at different heights with
+    snapped crests; vertical joints only (no bedding grooves)."""
     def f(coll):
-        parts = _stack(coll, f'sp{seed}', seed, courses, sides=6, lean=lean)
+        rng = random.Random(seed)
+        parts = []
+        for k, (dx, dy, r, h) in enumerate(cols):
+            z0 = -0.8 - rng.uniform(0.0, 0.3)
+            o = block(coll, f'sp{seed}_{k}', seed + 13 * k, (r * rng.uniform(0.95, 1.1), r * rng.uniform(0.80, 0.95), h * 0.5),
+                      (dx, dy, z0 + h * 0.5), (0, 0, rng.uniform(0, 180)), planes=2, reach=(0.70, 0.86),
+                      vplanes=4, vreach=(0.60, 0.80), top=3, top_reach=(0.40, 0.52))
+            taper(o, rng.uniform(0.36, 0.48), z0, z0 + h, dx, dy)
+            shear(o, (lean[0] + rng.uniform(-0.03, 0.03), lean[1] + rng.uniform(-0.03, 0.03)))
+            parts.append(o)
+        r0, h0 = cols[0][2], cols[0][3]
+        joints = _vjoints(r0 * 0.8, h0 * 0.5, 4, seed) + tuple(
+            ((0.5 * dx, 0.5 * dy, h0 * 0.4), (dx, dy, 0.0), 0.06, 0.24) for dx, dy, _, _ in cols[1:])
         recipe = dict(macro=(0.05, 1.6), heights=((0, 1.8, 0.035), (1, 0.6, 0.016), (0, 0.25, 0.006)),
-                      strata=dict(bed=1.1, amp=0.018, dip=(0.12, 0.05, 1.0)), joints=_vjoints(courses[0][2], 4.0, 4, seed),
-                      chips=0.02)
+                      joints=joints, chips=0.02)
         return parts, 1, recipe
     return f
 
 
 def form_reef(seed, hw, hd, top, pockets):
+    """b4.6b2: low, ragged, multi-lobed awash rock: five lobes of differing height along a bent
+    spine, ragged in plan, with real pockets (0.3-0.4 m deep bowls carved where lobes meet the
+    pocket) and a few loose stones."""
     def f(coll):
         rng = random.Random(seed)
-        slab = block(coll, f'rf{seed}', seed, (hw, hd, (top + 0.8) * 0.5), (0, 0, (top - 0.8) * 0.5),
-                     (rng.uniform(-3, 3), rng.uniform(-3, 3), 0), planes=5, vplanes=5, vreach=(0.55, 0.74), top=2,
-                     top_reach=(0.45, 0.53))
-        for j in range(pockets):
-            a = rng.uniform(0, math.tau)
-            c = (math.cos(a) * hw * 0.4, math.sin(a) * hd * 0.4, top + 0.05)
-            carve(slab, ellipsoid(coll, f'rf{seed}_p{j}', c, (rng.uniform(0.3, 0.5), rng.uniform(0.25, 0.4), 0.30)))
-        parts = [slab] + [cell(coll, f'rf{seed}_n{k}', seed + 20 + k, (s, s * 0.8, s * 0.6),
-                               (rng.uniform(-hw, hw), rng.uniform(-hd, hd), top * 0.6), _jitter_rot(rng, 20, 180),
-                               planes=7, reach=(0.6, 0.9), points=400, caps=(0.86,))
-                          for k, s in enumerate(rng.uniform(0.18, 0.32) for _ in range(4))]
+        n = 5
+        bend = rng.uniform(-0.5, 0.5)
+        lobes = []
+        for k in range(n):
+            u = -1.0 + 2.0 * (k + 0.5) / n
+            x = u * hw * 0.82 + rng.uniform(-0.2, 0.2) * hw / n
+            y = hd * (bend * (u * u - 0.4) + rng.uniform(-0.25, 0.25))
+            t = top * rng.uniform(0.45, 1.3)
+            hx, hy = hw / n * rng.uniform(1.2, 1.7), hd * rng.uniform(0.45, 0.8)
+            o = block(coll, f'rf{seed}_{k}', seed + 7 * k, (hx, hy, (t + 0.8) * 0.5), (x, y, (t - 0.8) * 0.5),
+                      (rng.uniform(-6, 6), rng.uniform(-6, 6), rng.uniform(-35, 35)), planes=6, reach=(0.60, 0.86),
+                      vplanes=5, vreach=(0.50, 0.72), top=3, top_reach=(0.42, 0.53))
+            lobes.append((o, x, y, t, hx, hy))
+        for j, li in enumerate(rng.sample(range(n), min(pockets, n))):
+            _, x, y, t, hx, hy = lobes[li]
+            c = (x + rng.uniform(-0.4, 0.4) * hx, y + rng.uniform(-0.3, 0.3) * hy, t + 0.12)
+            r = (rng.uniform(0.35, 0.6), rng.uniform(0.30, 0.5), 0.5)
+            for o2, *_ in lobes:
+                vs = [v.co for v in o2.data.vertices]
+                if (min(v.x for v in vs) < c[0] + r[0] and max(v.x for v in vs) > c[0] - r[0]
+                        and min(v.y for v in vs) < c[1] + r[1] and max(v.y for v in vs) > c[1] - r[1]
+                        and max(v.z for v in vs) > c[2] - r[2]):
+                    carve(o2, ellipsoid(coll, f'rf{seed}_p{j}_{o2.name}', c, r))
+        parts = [o for o, *_ in lobes] + [cell(coll, f'rf{seed}_n{k}', seed + 20 + k, (s, s * 0.8, s * 0.6),
+                                               (rng.uniform(-hw, hw) * 1.05, rng.uniform(-hd, hd) * 1.1, top * 0.4),
+                                               _jitter_rot(rng, 20, 180), planes=7, reach=(0.6, 0.9), points=400, caps=(0.86,))
+                                          for k, s in enumerate(rng.uniform(0.18, 0.32) for _ in range(4))]
         recipe = dict(macro=(0.03, 0.9), heights=((0, 1.0, 0.020), (1, 0.4, 0.010), (0, 0.18, 0.004)), chips=0.02)
         return parts, 1, recipe
     return f
@@ -801,15 +943,15 @@ KIT2_ROWS = (  # tuples, so provenance-scan finds each output name as a writer l
     ('searock_e', form_searock_e, 7400, (4000, 8000), 380000, True, 0.30),
     ('searock_f', form_searock_f, 6200, (4000, 8000), 300000, True, 0.30),
     ('searock_g', form_searock_g, 5600, (4000, 8000), 260000, True, 0.25),
-    ('strata_slab_a', form_strata(7901, ((2.6, 1.8, 0.45), (2.2, 1.6, 0.40), (1.7, 1.2, 0.38), (1.1, 0.8, 0.32)), 14), 2400, (1500, 3000), 150000, False, 0.40),
-    ('strata_slab_b', form_strata(7911, ((3.0, 1.4, 0.36), (2.6, 1.2, 0.34), (2.0, 1.0, 0.30)), 22), 2200, (1500, 3000), 150000, False, 0.40),
-    ('strata_slab_c', form_strata(7921, ((2.0, 2.0, 0.55), (1.8, 1.6, 0.50), (1.4, 1.3, 0.44), (1.0, 0.9, 0.40), (0.6, 0.6, 0.30)), 9), 2600, (1500, 3000), 150000, False, 0.40),
-    ('spire_a', form_spire(8001, ((-0.8, 2.4, 1.5), (1.5, 2.2, 1.2), (3.6, 2.0, 0.9), (5.4, 1.4, 0.6)), (0.05, 0.02)), 4400, (3000, 6000), 220000, False, 0.35),
-    ('spire_b', form_spire(8011, ((-0.8, 2.8, 1.9), (1.9, 2.6, 1.6), (4.4, 2.4, 1.3), (6.7, 2.0, 0.95), (8.5, 1.4, 0.6)), (-0.08, 0.04)), 5000, (3000, 6000), 260000, False, 0.35),
-    ('spire_c', form_spire(8021, ((-0.8, 3.2, 2.3), (2.3, 3.0, 2.0), (5.2, 2.8, 1.6), (7.9, 2.4, 1.2), (10.2, 1.8, 0.8)), (0.12, -0.03)), 5400, (3000, 6000), 300000, False, 0.35),
-    ('reef_a', form_reef(8101, 2.0, 1.4, 0.35, 2), 1600, (1000, 2000), 100000, True, 0.10),
-    ('reef_b', form_reef(8111, 2.6, 1.2, 0.25, 3), 1700, (1000, 2000), 100000, True, 0.10),
-    ('reef_c', form_reef(8121, 1.5, 1.5, 0.55, 2), 1500, (1000, 2000), 100000, True, 0.10),
+    ('strata_slab_a', form_strata(7901, ((2.6, 1.8, 0.45), (2.2, 1.6, 0.40), (1.7, 1.2, 0.38), (1.1, 0.8, 0.32)), 28), 2400, (1500, 3000), 150000, False, 0.40),
+    ('strata_slab_b', form_strata(7911, ((3.0, 1.4, 0.36), (2.6, 1.2, 0.34), (2.0, 1.0, 0.30)), 35), 2200, (1500, 3000), 150000, False, 0.40),
+    ('strata_slab_c', form_strata(7921, ((2.0, 2.0, 0.55), (1.8, 1.6, 0.50), (1.4, 1.3, 0.44), (1.0, 0.9, 0.40), (0.6, 0.6, 0.30)), 24), 2600, (1500, 3000), 150000, False, 0.40),
+    ('spire_a', form_spire(8001, ((0.0, 0.0, 1.35, 7.4), (1.15, 0.4, 0.85, 5.2), (-0.9, 0.75, 0.6, 2.8)), (0.05, 0.02)), 4400, (3000, 6000), 220000, False, 0.35),
+    ('spire_b', form_spire(8011, ((0.0, 0.0, 1.7, 10.6), (-1.4, 0.5, 1.05, 7.6), (0.9, -1.1, 0.8, 4.4), (1.3, 0.9, 0.55, 2.4)), (-0.08, 0.04)), 5000, (3000, 6000), 260000, False, 0.35),
+    ('spire_c', form_spire(8021, ((0.0, 0.0, 2.0, 12.8), (1.7, 0.6, 1.3, 9.6), (-1.2, -1.3, 1.0, 6.4), (-1.6, 1.0, 0.7, 3.0)), (0.12, -0.03)), 5400, (3000, 6000), 300000, False, 0.35),
+    ('reef_a', form_reef(8101, 2.0, 1.4, 0.35, 3), 1600, (1000, 2000), 100000, True, 0.10),
+    ('reef_b', form_reef(8111, 2.6, 1.2, 0.25, 4), 1700, (1000, 2000), 100000, True, 0.10),
+    ('reef_c', form_reef(8121, 1.5, 1.5, 0.55, 3), 1500, (1000, 2000), 100000, True, 0.10),
 )
 KIT2 = {r[0]: r[1:] for r in KIT2_ROWS}
 
@@ -862,7 +1004,12 @@ def build2(name, spec):
         rep.update(arch_measure(low))
     if name == 'searock_e':
         rep['hole_clear'] = not any(abs(v.z - 2.9) < 2.0 and abs(v.x) < 1.0 for v in co_list(low))
-    if sea:
+    if name.startswith('reef'):  # b4.6b2: mixed tops, wet Rock_Sea + dry Rock_Grey patches
+        zone3(low, [('Rock_Dark', lambda c, n: n.z < -0.35),
+                    ('Rock_Grey', lambda c, n: n.z > 0.5 and c.z > 0.08
+                     and math.sin(1.7 * c.x + 0.6) + math.sin(2.1 * c.y + 1.9 + 0.8 * c.x) > 0.2),
+                    ('Rock_Sea', lambda c, n: True)])
+    elif sea:
         zone3(low, [('Rock_Sea', lambda c, n: c.z < 0.55), ('Rock_Dark', lambda c, n: n.z < -0.35),
                     ('Rock_Grey', lambda c, n: True)])
     else:
