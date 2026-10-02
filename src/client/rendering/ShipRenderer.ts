@@ -46,6 +46,7 @@ import { buildRudder, buildSternCastle } from './ship/stern.js';
 import { buildRig } from './ship/sails.js';
 import { attachLodSailTear, railBreaksOf, railRunFor, setLodSailTear, shipMotionOf, wheelFollowAlpha, type LodSailTear } from './ship/shipMotion.js';
 import { DECK_KIT_SMALL, deckKitSockets, kitDrawCount, type DeckKitPart, mountShipKit, shipKitSockets, SHIP_KIT_FILES, SHIP_KIT_LOD_FILES, type KitSocket, type ShipKitFile, type ShipKitLodFile, type ShipKitSource } from './ship/kit.js';
+import { stationGripsCannon, stationGripsCapstan, stationGripsFallback, stationGripsHelm } from './ship/kit.js';
 import { SAIL_BELLY, SAIL_CLOTH_GRID, makeLodSailCard, sailFillTarget, sailLuff01, sailWind01, setSailClothUniforms, stepSailFill, type SailClothUniforms } from './ship/sailCloth.js';
 import { applyRiggingLod, updateRigging, type Rigging, type RiggingSet } from './ship/rigging.js';
 import { buildWakeSurface, writeWakeSurface, setArmsVisible, makeWakeFrame, ARM_FACTOR_FLOOR, buildWaterlineCollar, seatWaterlineCollar, type WakeSurface, type WakeFrame } from './ship/wake.js';
@@ -186,37 +187,6 @@ const HW_WHEEL_TIP_R = 0.84;
 const HW_SHARED = 'hwShared';
 interface HardwarePart { near: THREE.Object3D; far: THREE.Object3D | null }
 export interface ShipHardwareMount { parts: HardwarePart[]; far: boolean; lanterns: number }
-
-/** Handle / bar tips of a spoked part, clustered by angle, in `root` space:
- *  the IK grip anchors come out of the GLB instead of a hand-typed ring. */
-function radialTips(root: THREE.Object3D, plane: 'xy' | 'xz'): THREE.Vector3[] {
-  root.updateMatrixWorld(true);
-  const inv = new THREE.Matrix4().copy(root.matrixWorld).invert();
-  const m = new THREE.Matrix4();
-  const pts: THREE.Vector3[] = [];
-  root.traverse((o) => {
-    const pos = (o as THREE.Mesh).isMesh ? (o as THREE.Mesh).geometry?.getAttribute?.('position') : undefined;
-    if (!pos || !(pos as THREE.BufferAttribute).array?.length) return;
-    m.multiplyMatrices(inv, o.matrixWorld);
-    for (let i = 0; i < pos.count; i++) pts.push(new THREE.Vector3().fromBufferAttribute(pos as THREE.BufferAttribute, i).applyMatrix4(m));
-  });
-  const rad = (p: THREE.Vector3) => (plane === 'xy' ? Math.hypot(p.x, p.y) : Math.hypot(p.x, p.z));
-  const ang = (p: THREE.Vector3) => (plane === 'xy' ? Math.atan2(p.y, p.x) : Math.atan2(p.z, p.x));
-  let maxR = 0;
-  for (const p of pts) maxR = Math.max(maxR, rad(p));
-  const tips = pts.filter((p) => rad(p) > maxR * 0.93).sort((a, b) => ang(a) - ang(b));
-  if (tips.length === 0) return [];
-  const clusters: THREE.Vector3[][] = [[tips[0]]];
-  for (let i = 1; i < tips.length; i++) {
-    if (ang(tips[i]) - ang(tips[i - 1]) > 0.15) clusters.push([]);
-    clusters[clusters.length - 1].push(tips[i]);
-  }
-  // The cluster straddling ±π is one handle cut in two.
-  if (clusters.length > 1 && ang(tips[0]) + 2 * Math.PI - ang(tips[tips.length - 1]) <= 0.15) {
-    clusters[0].push(...clusters.pop()!);
-  }
-  return clusters.map((c) => c.reduce((acc, p) => acc.add(p), new THREE.Vector3()).divideScalar(c.length));
-}
 
 interface WakeSpray {
   sprite: THREE.Sprite;
@@ -437,8 +407,6 @@ export class ShipRenderer {
   /** b3.4e: where the hardware GLBs come from (the shared AssetLibrary in the
    *  browser, a stub in the node gate). Null = procedural hardware only. */
   private hardwareSource: ShipHardwareSource | null = null;
-  /** Grip anchors per hardware file, in GLB units (computed once per file). */
-  private readonly hardwareTips = new Map<string, THREE.Vector3[]>();
   /** Meshes per hardware file (near / far), counted once: the late mount's price. */
   private readonly hardwareMeshCount = new Map<string, number>();
   setHardwareSource(src: ShipHardwareSource | null): void { this.hardwareSource = src; }
@@ -1744,7 +1712,7 @@ export class ShipRenderer {
       wheelGroup.add(peg);
     }
     // b3.3c: peg grips for the helmsman's hand IK, local to the spinning wheel.
-    wheelGroup.userData[IK_GRIPS_KEY] = { kind: 'helm', points: Array.from({ length: spokeCount }, (_, i) => new THREE.Vector3(Math.cos(i / spokeCount * Math.PI * 2) * (rimR + 0.02), Math.sin(i / spokeCount * Math.PI * 2) * (rimR + 0.02), 0.1)) };
+    wheelGroup.userData[IK_GRIPS_KEY] = stationGripsFallback('helm', spokeCount, rimR);
 
     // Compass binnacle at the foot of the helm steps (on the main deck, just
     // forward of the raised dais so it doesn't sink into the platform).
@@ -1806,7 +1774,7 @@ export class ShipRenderer {
     anchorCapstan.add(capstanHub);
     let capstanGrip: THREE.Mesh | undefined;
     // b3.3c: bar-end knob grips for the capstan pusher's hand IK.
-    anchorCapstan.userData[IK_GRIPS_KEY] = { kind: 'capstan', points: Array.from({ length: 8 }, (_, i) => new THREE.Vector3(Math.cos(i / 8 * Math.PI * 2) * 0.66, 0.88, -Math.sin(i / 8 * Math.PI * 2) * 0.66)) };
+    anchorCapstan.userData[IK_GRIPS_KEY] = stationGripsFallback('capstan');
     // Four bars, each spanning the full wheel, give the eight spoke ends. Eight
     // bars at 45 deg steps drew every bar twice (spoke k and k+4 are the same
     // box turned 180 deg), a coplanar pair that fought on every face and doubled
@@ -2131,7 +2099,7 @@ export class ShipRenderer {
         cg.rotation.y = side === 0 ? 0 : Math.PI;
         group.add(cg);
         // b3.3c: breech handle grips for the gunner's hand IK (behind the cascabel).
-        pitchPivot.userData[IK_GRIPS_KEY] = { kind: 'cannon', points: [new THREE.Vector3(-0.28, 0.1, 0.2), new THREE.Vector3(-0.28, 0.1, -0.2)] };
+        pitchPivot.userData[IK_GRIPS_KEY] = stationGripsFallback('cannon');
         cannonGroups.push({ root: cg, yawPivot, pitchPivot });
       }
     }
@@ -2713,16 +2681,6 @@ export class ShipRenderer {
       + this.hardwareMeshes('wheel', far) + this.hardwareMeshes('capstan', far);
   }
 
-  /** Grip anchors for a spoked file (wheel handles, capstan bars), in GLB units. */
-  private tipsOf(name: 'wheel' | 'capstan', node: THREE.Object3D, plane: 'xy' | 'xz'): THREE.Vector3[] {
-    let tips = this.hardwareTips.get(name);
-    if (!tips || tips.length === 0) {
-      tips = radialTips(node, plane);
-      if (tips.length > 0) this.hardwareTips.set(name, tips);
-    }
-    return tips;
-  }
-
   private lanternFromGlb(glassMat: THREE.MeshStandardMaterial): { holder: THREE.Group; part: HardwarePart } | null {
     const near = this.hardwareClone('ship_lantern', false);
     if (!near) return null;
@@ -2797,10 +2755,7 @@ export class ShipRenderer {
       if (bb[0]) parts.push({ near: bb[0], far: bb[1] ?? null });
       const t = trunnion ?? new THREE.Vector3(0, 0.6, 0.02);
       body.position.set(-t.z * S, -t.y * S, 0);
-      cannon.pitchPivot.userData[IK_GRIPS_KEY] = {
-        kind: 'cannon',
-        points: [new THREE.Vector3((breechZ + 0.1) * S, 0.08, 0.18), new THREE.Vector3((breechZ + 0.1) * S, 0.08, -0.18)],
-      };
+      cannon.pitchPivot.userData[IK_GRIPS_KEY] = stationGripsCannon(breechZ, S);
     }
 
     // Helm wheel: fitted to this hull's rim radius, spun by mesh.wheel.rotation.z.
@@ -2811,10 +2766,8 @@ export class ShipRenderer {
       const ws = (mesh.wheelRimR + 0.16) / HW_WHEEL_TIP_R;
       for (const g of wheelFar ? [wheelNear, wheelFar] : [wheelNear]) { g.scale.setScalar(ws); mesh.wheel.add(g); }
       parts.push({ near: wheelNear, far: wheelFar });
-      const tips = this.tipsOf('wheel', wheelNear.getObjectByName('wheel_body') ?? wheelNear, 'xy');
-      if (tips.length >= 4) {
-        mesh.wheel.userData[IK_GRIPS_KEY] = { kind: 'helm', points: tips.map((p) => p.clone().multiplyScalar(ws * 0.97)) };
-      }
+      const grips = stationGripsHelm(wheelNear.getObjectByName('wheel_body') ?? wheelNear, ws);
+      if (grips) mesh.wheel.userData[IK_GRIPS_KEY] = grips;
     }
 
     // Capstan: the base stays on the deck, the drum (bars) turns with the anchor.
@@ -2837,12 +2790,8 @@ export class ShipRenderer {
       const bodies = base.children;
       const drums = cap.children.filter((c) => c.name === 'drum');
       parts.push({ near: bodies[0], far: bodies[1] ?? null }, { near: drums[0], far: drums[1] ?? null });
-      if (drums[0]) {
-        const tips = this.tipsOf('capstan', drums[0], 'xz');
-        if (tips.length >= 4) {
-          cap.userData[IK_GRIPS_KEY] = { kind: 'capstan', points: tips.map((p) => p.clone().multiplyScalar(HW_CAPSTAN_SCALE)) };
-        }
-      }
+      const grips = drums[0] ? stationGripsCapstan(drums[0], HW_CAPSTAN_SCALE) : null;
+      if (grips) cap.userData[IK_GRIPS_KEY] = grips;
     }
 
     mesh.hardware = { parts: parts.filter((p) => !!p.near), far: false, lanterns: lanterns.length };
