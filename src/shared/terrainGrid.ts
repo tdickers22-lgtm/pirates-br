@@ -39,19 +39,37 @@ import {
   SHORE_APRON_DIST_RATIO,
   getIslandMaxRadius,
   getIslandSurfacePoint,
+  getCaveMouthCarve,
+  isNearCaveMouthCut,
 } from './utils/index.js';
+import { getIslandLandforms, type Landform, type LandformPoint } from './landforms.js';
 
-/** Radial spacing target, metres. The old high tier. */
-export const GRID_RADIAL_STEP = 4;
-/** Angular spacing target at the rim, metres of arc. */
-export const GRID_RIM_ARC_STEP = 5;
-/** Rings between the footprint edge (1.0) and the apron. */
+/**
+ * Radial spacing target, metres (islands-07, b4.4c). Was 4 m: a 3 m stream
+ * bed got at most one vertex across and a 2 m scarp step drew as a 4 m ramp,
+ * on the mesh AND on the server walk surface (the grid is the collision
+ * surface). Measured land spacing, wobble and footprint included, stays
+ * <= 2.5 m (test-terrain-grid).
+ */
+export const GRID_RADIAL_STEP = 2;
+/** Angular spacing target at the rim, metres of arc (was 5). The ladder target
+ *  includes the coast wobble's worst stretch, so the DRAWN arc meets it. */
+export const GRID_RIM_ARC_STEP = 2.5;
+/** Minimum rings between the footprint edge (1.0) and the apron. The apron is
+ *  sea floor, so it is drawn at twice the land step (more rings on big islands). */
 export const GRID_SHORE_RINGS = 7;
 /** Ring-doubling ladder: segments are always 24·2^k, so an outer ring's count
  *  is an exact integer multiple of its inner neighbour's and the stitch is
- *  T-junction free by construction. */
+ *  T-junction free by construction. 768 = Crow's Perch rim at 2.5 m. */
 export const GRID_SEGMENTS_MIN = 24;
-export const GRID_SEGMENTS_MAX = 192;
+export const GRID_SEGMENTS_MAX = 768;
+/** A landform edge (scarp line, bed edge, mesa/caldera rim...) gets a ring
+ *  within this many metres of it, measured along the meridian. */
+export const GRID_EDGE_RING_TOL = 0.5;
+/** |edge normal . meridian| below this = the edge runs RADIALLY: the meridians
+ *  (2.5 m arc) resolve it, a ring cannot, so no ring is inserted for it. */
+export const GRID_EDGE_RADIAL_COS = 0.5;
+
 /** How far a vertex may be pulled toward its radial neighbours' mean. */
 export const GRID_FEATHER_CAP = 0.42;
 /** Distance from the footprint edge to the apron, in distRatio. */
@@ -133,7 +151,161 @@ export type TerrainGridOptions = {
   carveCaveMouth?: (worldX: number, worldZ: number, y: number) => { y: number; carved: number };
   /** Bake per-vertex AO (client only — the server never shades). */
   withAO?: boolean;
+  /** Landform records whose edges get rings (defaults to the island's roster;
+   *  gates pass [] to see the plain ladder). */
+  landforms?: readonly Landform[];
 };
+
+/** Base ladder rings: interior power curve to the footprint edge, then the
+ *  apron at no more than twice the land step. */
+function baseRingDists(islandMaxR: number): { dists: number[]; radialSegments: number } {
+  // Rings sit at (ring / N)^0.9, which spends the most metres on ring 1
+  // (N^-0.9 of the radius): size N so THAT step stays inside the 2.5 m land
+  // ceiling; the outer steps (0.9 / N, wobble included) land near 2 m.
+  const radialSegments = clamp(Math.ceil(Math.pow(islandMaxR / (GRID_RIM_ARC_STEP * 0.97), 1 / 0.9)), 32, 256);
+  // The apron keeps the LAND step: beaches and sandbars stay above the sea
+  // out past 1.15 (Smuggler's Rest at 1.153 measured with a 4 m apron step),
+  // and the swimmer's seabed is this surface too. At least GRID_SHORE_RINGS.
+  const shoreRings = Math.max(GRID_SHORE_RINGS, Math.ceil((islandMaxR * GRID_APRON_SPAN) / GRID_RADIAL_STEP));
+  const dists: number[] = [];
+  for (let ring = 0; ring <= radialSegments; ring++) {
+    dists.push(ring === 0 ? 0 : Math.pow(ring / radialSegments, 0.9));
+  }
+  for (let k = 1; k <= shoreRings; k++) dists.push(1 + (k / shoreRings) * GRID_APRON_SPAN);
+  return { dists, radialSegments };
+}
+
+/** One sample on a landform edge, island-local, with the edge's unit normal. */
+export type LandformEdgeSample = { x: number; z: number; nx: number; nz: number; id: string };
+
+function sampleOffsetPath(path: readonly LandformPoint[], offsets: readonly number[], id: string, out: LandformEdgeSample[]): void {
+  for (let i = 0; i + 1 < path.length; i++) {
+    const [ax, az] = path[i];
+    const [bx, bz] = path[i + 1];
+    const len = Math.hypot(bx - ax, bz - az);
+    if (len < 1e-6) continue;
+    const tx = (bx - ax) / len; const tz = (bz - az) / len;
+    const nx = -tz; const nz = tx;
+    const n = Math.max(1, Math.ceil(len));
+    for (let k = 0; k <= n; k++) {
+      if (k === n && i + 2 < path.length) continue; // the next segment owns the joint
+      const px = ax + tx * len * (k / n); const pz = az + tz * len * (k / n);
+      for (const off of offsets) out.push({ x: px + nx * off, z: pz + nz * off, nx, nz, id });
+    }
+  }
+}
+
+function sampleCircle(cx: number, cz: number, r: number, id: string, out: LandformEdgeSample[]): void {
+  if (r <= 0.5) return;
+  const n = Math.max(12, Math.ceil(Math.PI * 2 * r));
+  for (let k = 0; k < n; k++) {
+    const a = (k / n) * Math.PI * 2;
+    out.push({ x: cx + Math.cos(a) * r, z: cz + Math.sin(a) * r, nx: Math.cos(a), nz: Math.sin(a), id });
+  }
+}
+
+/**
+ * Every landform EDGE, sampled at ~1 m: the lines where an authored record
+ * changes the ground's slope sharply. Scarp: its path (the face). Valley/gorge:
+ * both bed edges and both top edges. Terrace run / headland: band or crest
+ * edges. Mesa, rock shelf: the rim. Basin: rim and flat-floor edge. Caldera:
+ * rim crest and inner rim foot. Dune fields and meadows have no hard edge.
+ */
+export function landformEdgeSamples(records: readonly Landform[]): LandformEdgeSample[] {
+  const out: LandformEdgeSample[] = [];
+  for (const rec of records) {
+    switch (rec.kind) {
+      case 'scarp': sampleOffsetPath(rec.path, [0], rec.id, out); break;
+      case 'valley': case 'gorge':
+        sampleOffsetPath(rec.path, [-rec.floorWidth / 2, rec.floorWidth / 2, -rec.topWidth / 2, rec.topWidth / 2], rec.id, out);
+        break;
+      case 'terrace_run': sampleOffsetPath(rec.path, [-rec.width / 2, rec.width / 2], rec.id, out); break;
+      case 'headland': sampleOffsetPath(rec.path, [-rec.topHalfWidth, rec.topHalfWidth], rec.id, out); break;
+      case 'mesa': case 'rock_shelf': sampleCircle(rec.center[0], rec.center[1], rec.radius, rec.id, out); break;
+      case 'basin':
+        sampleCircle(rec.center[0], rec.center[1], rec.radius, rec.id, out);
+        sampleCircle(rec.center[0], rec.center[1], rec.radius * (rec.flat ?? 0.4), rec.id, out);
+        break;
+      case 'caldera':
+        sampleCircle(rec.center[0], rec.center[1], rec.rimRadius, rec.id, out);
+        sampleCircle(rec.center[0], rec.center[1], rec.rimRadius - (rec.rimWidth ?? 10), rec.id, out);
+        break;
+      case 'dune_field': case 'meadow': break;
+    }
+  }
+  return out;
+}
+
+/**
+ * Where a ring of un-wobbled distRatio `d` crosses meridian `angle`, island-
+ * local xz. The vertex path is surfacePoint(coastWobble(d, angle), angle) and
+ * the footprint is linear in distRatio, so one direction vector per meridian
+ * (the dw = 1 point) gives every ring on it.
+ */
+function meridianDir(island: Island, angle: number): { x: number; z: number } {
+  const p = getIslandSurfacePoint(island, 1, angle);
+  return { x: p.x - island.position.x, z: p.z - island.position.z };
+}
+
+/**
+ * The ring list: the 2 m ladder, plus FEATURE RINGS (islands-07). For every
+ * landform edge sample whose edge faces the meridian (|n . r| >= 0.5), the
+ * metric interval along its meridian within GRID_EDGE_RING_TOL is turned into
+ * a distRatio interval; samples a base ring already stabs are done, the rest
+ * are grouped greedily by common intersection and each group gets ONE ring at
+ * the middle of that intersection. Every ring is still a full ladder ring, so
+ * the stitch stays T-junction free. Deterministic: data only, no rng.
+ */
+export function gridRingDists(island: Island, islandMaxR: number, records: readonly Landform[]): number[] {
+  const { dists } = baseRingDists(islandMaxR);
+  if (records.length === 0) return dists;
+  const samples = landformEdgeSamples(records);
+  if (samples.length === 0) return dists;
+  const fx = island.profile.footprintX; const fz = island.profile.footprintZ;
+  const dMax = dists[dists.length - 1];
+  const intervals: Array<[number, number]> = [];
+  for (const s of samples) {
+    const angle = Math.atan2(s.z / fz, s.x / fx);
+    const dir = meridianDir(island, angle);
+    const dirLen = Math.hypot(dir.x, dir.z);
+    if (dirLen < 1e-6) continue;
+    const cos = Math.abs((s.nx * dir.x + s.nz * dir.z) / dirLen);
+    if (cos < GRID_EDGE_RADIAL_COS) continue;
+    const rho = Math.hypot(s.x, s.z);
+    // metric radius of ring d on this meridian = coastWobble(d) * dirLen (monotone in d)
+    const inv = (target: number): number => {
+      let lo = 0; let hi = dMax;
+      if (coastWobble(island, hi, angle) * dirLen <= target) return hi;
+      for (let it = 0; it < 40; it++) {
+        const mid = (lo + hi) * 0.5;
+        if (coastWobble(island, mid, angle) * dirLen < target) lo = mid; else hi = mid;
+      }
+      return (lo + hi) * 0.5;
+    };
+    const tol = GRID_EDGE_RING_TOL * 0.9; // chord + float margin
+    const lo = inv(Math.max(0, rho - tol));
+    const hi = inv(rho + tol);
+    if (lo >= dMax || hi <= 0) continue;
+    // a base ring already inside the interval covers it
+    let covered = false;
+    for (const d of dists) { if (d >= lo && d <= hi) { covered = true; break; } }
+    if (!covered) intervals.push([lo, hi]);
+  }
+  if (intervals.length === 0) return dists;
+  intervals.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const extra: number[] = [];
+  let gLo = intervals[0][0]; let gHi = intervals[0][1];
+  for (let i = 1; i <= intervals.length; i++) {
+    const iv = intervals[i];
+    if (iv && iv[0] <= gHi) { gLo = Math.max(gLo, iv[0]); gHi = Math.min(gHi, iv[1]); continue; }
+    extra.push(clamp((gLo + gHi) * 0.5, 1e-4, dMax - 1e-4));
+    if (iv) { gLo = iv[0]; gHi = iv[1]; }
+  }
+  const all = dists.concat(extra).sort((a, b) => a - b);
+  const merged: number[] = [];
+  for (const d of all) if (merged.length === 0 || d - merged[merged.length - 1] > 1e-5) merged.push(d);
+  return merged;
+}
 
 /**
  * Build one island's terrain grid. Pure and deterministic: the same island in
@@ -148,20 +320,49 @@ export function buildTerrainGrid(island: Island, opts: TerrainGridOptions = {}):
   });
   const carve = opts.carveCaveMouth;
 
-  const radialSegments = clamp(Math.round(islandMaxR / GRID_RADIAL_STEP), 16, 60);
-  const rings = radialSegments + GRID_SHORE_RINGS;
-  const ringDist = new Float32Array(rings + 1);
+  const dists = gridRingDists(island, islandMaxR, opts.landforms ?? getIslandLandforms(island));
+  const rings = dists.length - 1;
+  const ringDist = Float32Array.from(dists);
   const ringSegments = new Uint32Array(rings + 1);
   const ringStart = new Uint32Array(rings + 2);
+  // The footprint is linear in distRatio along each meridian, so one xz
+  // direction per ladder angle (the dw = 1 point) gives every ring's DRAWN
+  // vertex: coastWobble(d, angle) * dir. Inlets and hill bulges swing the
+  // radius hard with angle (Castaway Reach: 53 -> 57 m over 1.9 deg), so the
+  // count is chosen off the drawn chord, not the nominal circumference.
+  const dirX = new Float64Array(GRID_SEGMENTS_MAX);
+  const dirZ = new Float64Array(GRID_SEGMENTS_MAX);
+  for (let k = 0; k < GRID_SEGMENTS_MAX; k++) {
+    const dir = meridianDir(island, (k / GRID_SEGMENTS_MAX) * Math.PI * 2);
+    dirX[k] = dir.x; dirZ[k] = dir.z;
+  }
+  const maxChord = (d: number, segs: number): number => {
+    const stride = GRID_SEGMENTS_MAX / segs;
+    let worst = 0;
+    let pw = coastWobble(island, d, 0);
+    let px = dirX[0] * pw; let pz = dirZ[0] * pw;
+    for (let s = 1; s <= segs; s++) {
+      const k = (s % segs) * stride;
+      const w = coastWobble(island, d, (k / GRID_SEGMENTS_MAX) * Math.PI * 2);
+      const x = dirX[k] * w; const z = dirZ[k] * w;
+      const c = Math.hypot(x - px, z - pz);
+      if (c > worst) worst = c;
+      px = x; pz = z;
+    }
+    return worst;
+  };
   let vertexCount = 0;
+  let prevSegs = 1;
   for (let ring = 0; ring <= rings; ring++) {
-    const d = ring <= radialSegments
-      ? (ring === 0 ? 0 : Math.pow(ring / radialSegments, 0.9))
-      : 1 + ((ring - radialSegments) / GRID_SHORE_RINGS) * GRID_APRON_SPAN;
-    ringDist[ring] = d;
+    const d = dists[ring];
     // Ring 0 is ONE vertex: the summit sliver fan (48-176 segments sharing a
     // 5 m circle) is where the shading pinwheel came from.
-    const segs = ring === 0 ? 1 : ringSegmentCount((Math.PI * 2 * islandMaxR * d) / GRID_RIM_ARC_STEP);
+    let segs = 1;
+    if (ring > 0) {
+      segs = Math.max(prevSegs, ringSegmentCount((Math.PI * 2 * islandMaxR * d) / GRID_RIM_ARC_STEP / 1.6));
+      while (segs < GRID_SEGMENTS_MAX && maxChord(d, segs) > GRID_RIM_ARC_STEP * 0.98) segs *= 2;
+    }
+    prevSegs = segs;
     ringSegments[ring] = segs;
     ringStart[ring] = vertexCount;
     vertexCount += segs;
@@ -295,7 +496,7 @@ function bakeVertexAO(
 ): Float32Array {
   const count = positions.length / 3;
   const ao = new Float32Array(count);
-  const STRIDES = [1, 2, 5];
+  const STRIDES = [2, 4, 10]; // 4 / 8 / 20 m at the 2 m step, as before
   for (let ring = 0; ring <= rings; ring++) {
     const segs = ringSegments[ring];
     const base = ringStart[ring];
@@ -391,7 +592,9 @@ export class GridGround {
     this.minY = loy;
     this.maxY = hiy;
     const span = Math.max(hix - lox, hiz - loz, 1);
-    this.cellSize = Math.max(3, span / 64);
+    // Cells shrink with the grid (b4.4c): at 2 m the old span/64 buckets held
+    // ~4x the triangles, i.e. ~4x the barycentric tests per walker step.
+    this.cellSize = Math.max(1, span / 176);
     this.minX = lox - this.cellSize;
     this.minZ = loz - this.cellSize;
     this.nx = Math.ceil((hix - this.minX) / this.cellSize) + 2;
@@ -469,6 +672,15 @@ export class GridGround {
     return best;
   }
 
+  /** Triangles `hit(x, z)` tests: the walker's per-step query cost (gates). */
+  queryCost(x: number, z: number): number {
+    const cx = Math.floor((x - this.minX) / this.cellSize);
+    const cz = Math.floor((z - this.minZ) / this.cellSize);
+    if (cx < 0 || cz < 0 || cx >= this.nx || cz >= this.nz) return 0;
+    const cell = cz * this.nx + cx;
+    return this.cellStart[cell + 1] - this.cellStart[cell];
+  }
+
   /** Drawn ground height under (x, z), island-local, or null off the grid. */
   heightAt(x: number, z: number): number | null {
     const h = this.hit(x, z);
@@ -541,4 +753,83 @@ export function getIslandGround(island: Island): GridGround {
 /** Drawn ground height at WORLD (x, z) for one island, or null off the cap. */
 export function drawnIslandSurfaceY(island: Island, x: number, z: number): number | null {
   return getIslandGround(island).heightAt(x - island.position.x, z - island.position.z);
+}
+
+// ── b4.4c: the 2 m grid is built OFF the main thread ────────────────────────
+//
+// At 2 m radial / 2.5 m arc an island is up to ~50k vertices and the analytic
+// field costs ~4 us a sample (world-space fbm/ridge octaves, spurs, landforms),
+// so one grid is 30-200 ms: a long task per island if the renderer builds it
+// during the drain. The static-world worker (b4.1c, D30) already regenerates
+// the world from the seed; it now builds every island's grid right after it
+// posts the world and transfers the buffers. TerrainMeshBuilder takes the
+// prebuilt grid (main thread only wraps buffers); a grid that has not arrived,
+// or a world_sync world, falls back to building here. Bit-identical either way:
+// same code, same island, same carve (sharedCaveMouthCarver is the client's
+// makeCaveMouthCarver on the same two shared functions).
+
+/** The client's cave-mouth carver (CaveBuilder.makeCaveMouthCarver), in shared
+ *  code so the worker can run it: trig-only reject first, then the cut. */
+export function sharedCaveMouthCarver(island: Island): (worldX: number, worldZ: number, y: number) => { y: number; carved: number } {
+  return (worldX, worldZ, y) => {
+    if (!isNearCaveMouthCut(island, worldX, worldZ)) return { y, carved: 0 };
+    const c = getCaveMouthCarve(island, worldX, worldZ);
+    return { y: Math.min(y, c.y), carved: c.carved };
+  };
+}
+
+/** What the terrain depends on. A grid only answers for the island it was
+ *  built from (a world_sync after a hash mismatch reuses the ids). */
+export function terrainGridKey(island: Island): string {
+  return JSON.stringify([island.id, island.position, island.radius, island.profile, island.caves, island.stamps ?? null]);
+}
+
+export type WorkerTerrainGrid = {
+  kind: 'terrain-grid';
+  job: number;
+  key: string;
+  islandId: string;
+  grid: TerrainGrid;
+  buildMs: number;
+};
+
+/** Worker side: the client build (default surface point, shared carve, AO). */
+export function buildWorkerTerrainGrid(job: number, island: Island): { msg: WorkerTerrainGrid; transfer: ArrayBuffer[] } {
+  const t0 = performance.now();
+  const grid = buildTerrainGrid(island, { carveCaveMouth: sharedCaveMouthCarver(island), withAO: true });
+  const transfer = [grid.positions, grid.indices, grid.mouthCarveDepth, grid.ringStart, grid.ringSegments, grid.ringDist]
+    .map((a) => a.buffer as ArrayBuffer);
+  if (grid.ao) transfer.push(grid.ao.buffer as ArrayBuffer);
+  return { msg: { kind: 'terrain-grid', job, key: terrainGridKey(island), islandId: island.id, grid, buildMs: performance.now() - t0 }, transfer };
+}
+
+/** Worker side: grids in build order, the focus (the local ship) first. */
+export function terrainGridBuildOrder(islands: Island[], focus?: { x: number; z: number } | null): Island[] {
+  if (!focus) return islands.slice();
+  const d = (i: Island) => Math.hypot(i.position.x - focus.x, i.position.z - focus.z);
+  return islands.slice().sort((a, b) => d(a) - d(b));
+}
+
+const prebuiltGrids = new Map<string, WorkerTerrainGrid>();
+let prebuiltJob = -1;
+/** Counters the perf probe and the gate read: grids taken vs built here. */
+export const terrainGridSource = { worker: 0, main: 0 };
+
+/** Main side: keep a worker grid; a newer join drops the older job's grids.
+ *  Returns false for any other message so the caller handles it. */
+export function adoptWorkerTerrainGrid(data: unknown): boolean {
+  const m = data as WorkerTerrainGrid | null;
+  if (!m || m.kind !== 'terrain-grid') return false;
+  if (m.job < prebuiltJob) return true;
+  if (m.job > prebuiltJob) { prebuiltGrids.clear(); prebuiltJob = m.job; }
+  prebuiltGrids.set(m.islandId, m);
+  return true;
+}
+
+/** Main side: the island's prebuilt grid (one-shot), or null to build it here. */
+export function takeWorkerTerrainGrid(island: Island): TerrainGrid | null {
+  const m = prebuiltGrids.get(island.id);
+  if (!m) return null;
+  prebuiltGrids.delete(island.id);
+  return m.key === terrainGridKey(island) ? m.grid : null;
 }

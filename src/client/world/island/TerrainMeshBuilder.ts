@@ -8,7 +8,7 @@
  */
 import * as THREE from 'three';
 import { getIslandCoastWeights } from '../../../shared/utils/index.js';
-import { buildTerrainGrid, coastWobble, setIslandGround } from '../../../shared/terrainGrid.js';
+import { buildTerrainGrid, coastWobble, setIslandGround, takeWorkerTerrainGrid, terrainGridSource } from '../../../shared/terrainGrid.js';
 import { buildTerrainLodChunks } from '../../../shared/terrainLod.js';
 import { TerrainLodSwitch } from './TerrainLod.js';
 import type { Island } from '../../../shared/types/index.js';
@@ -441,7 +441,11 @@ export function buildTerrainHeightfield(args: {
   /** Bake vertex AO (the mesh path); the pure suites can skip it. */
   withAO?: boolean;
 }): TerrainField {
-  const grid = buildTerrainGrid(args.island, {
+  // b4.4c: the static-world worker built this grid off the main thread (same
+  // code, same carve, bit-identical); build here only when it has not arrived.
+  const prebuilt = args.withAO !== false ? takeWorkerTerrainGrid(args.island) : null;
+  if (prebuilt) terrainGridSource.worker++; else terrainGridSource.main++;
+  const grid = prebuilt ?? buildTerrainGrid(args.island, {
     surfacePoint: args.surfacePoint,
     carveCaveMouth: args.carveCaveMouth,
     withAO: args.withAO !== false,
