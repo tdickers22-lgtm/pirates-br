@@ -336,6 +336,52 @@ def sculpt(obj, seed, macro=(0.10, 1.6), heights=((0, 2.6, 0.050), (1, 0.9, 0.02
 
 
 # ── LOD0 from the high sculpt ─────────────────────────────────────────────────────────────────
+GATE_WELD = 5e-4
+
+
+def gate_safe_weld(me, dist=GATE_WELD):
+    """Collapse leaves sliver triangles whose corners sit a fraction of a millimetre apart. The far
+    gate (test-far-lod-integrity) welds the shipped file by ROUNDING positions to a 1e-4 grid, which
+    can fuse corners up to ~1.7e-4 apart: those slivers become degenerate there and open boundary
+    loops Blender never counted (searock_a LOD0: 2 loops, searock_b far: 13). Weld at 0.5 mm and
+    dissolve the degenerate faces here, so the gate's census and the build's agree."""
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=dist)
+    bmesh.ops.dissolve_degenerate(bm, dist=dist, edges=bm.edges)
+    bm.faces.index_update()
+    # Loose crumbs: the voxel remesh leaves sub-centimetre islands that Collapse reduces to a lone
+    # open triangle (searock_a shipped two: 2 boundary loops). A rock part under 32 faces goes.
+    seen, crumbs = set(), []
+    for f in bm.faces:
+        if f.index in seen:
+            continue
+        comp, stack = [], [f]
+        seen.add(f.index)
+        while stack:
+            g = stack.pop()
+            comp.append(g)
+            for e in g.edges:
+                for h in e.link_faces:
+                    if h.index not in seen:
+                        seen.add(h.index)
+                        stack.append(h)
+        if len(comp) < 32:
+            crumbs.extend(comp)
+    if crumbs:
+        bmesh.ops.delete(bm, geom=crumbs, context='FACES')
+        print(f'ROCK-WELD dropped {len(crumbs)} crumb faces in {me.name}', flush=True)
+    # A rock is closed: cap any hole Collapse tore open (searock_a LOD0 shipped 2 loops).
+    open_edges = [e for e in bm.edges if len(e.link_faces) == 1]
+    if open_edges:
+        bmesh.ops.holes_fill(bm, edges=open_edges, sides=0)
+        print(f'ROCK-WELD capped {len(open_edges)} open edges in {me.name}', flush=True)
+    bmesh.ops.triangulate(bm, faces=[f for f in bm.faces if len(f.verts) > 3])
+    bm.to_mesh(me)
+    bm.free()
+    me.update()
+
+
 def lod0(high, name, coll, target, sharp_deg=58.0):
     """Collapse-decimate a copy of the welded high mesh into the band, then face-area weighted
     normals with sharp edges only on creases steeper than sharp_deg. Returns the LOD0 object."""
@@ -349,6 +395,7 @@ def lod0(high, name, coll, target, sharp_deg=58.0):
     dm.ratio = ratio
     _apply(low, dm)
     me = low.data
+    gate_safe_weld(me)
     me.shade_smooth()
     me.set_sharp_from_angle(angle=math.radians(sharp_deg))
     wn = low.modifiers.new('rk_wn', 'WEIGHTED_NORMAL')
@@ -426,21 +473,53 @@ def rock_finish(coll, name, moss=0.40, low_band=0.65, strata_freq=9.0):
     return _join(objs, name) if len(objs) > 1 else objs[0]
 
 
-def decimated_copy(src, name, coll, ratio):
-    o = src.copy()
-    o.data = src.data.copy()
-    o.name = name
-    coll.objects.link(o)
-    dm = o.modifiers.new('rk_far', 'DECIMATE')
-    dm.decimate_type = 'COLLAPSE'
-    dm.ratio = ratio
-    _apply(o, dm)
-    # a far rock never floats: re-seat its lowest point on the source's lowest point
+def decimated_copy(src, name, coll, ratio, ceil=0.03, min_keep=0.94, rescale_cap=1.18):
+    """The far rock: a Collapse decimation of the welded LOD0 that the far gate
+    (test-far-lod-integrity) passes by construction. The ratio climbs from `ratio` toward the tier
+    ceiling `ceil` until the gate-welded (1e-4) copy opens no boundary loop; Collapse then pulls
+    the jointed, notched surface inward (70-88% of the source area at 2.5%), so the copy is scaled
+    about its own centre back to `min_keep` of the source area (capped at `rescale_cap`) and its
+    lowest point re-seated on the source's lowest point (a far rock never floats or sinks)."""
+    import build_far_lods as F  # helpers only: its build is guarded by __main__
+    area_src = F.world_area(src)
+    steps = max(1, int(math.ceil(math.log(ceil / ratio) / math.log(1.04)))) + 1
+    best = None
+    for k in range(steps):
+        r = min(ceil, ratio * (1.04 ** k))
+        o = src.copy()
+        o.data = src.data.copy()
+        o.name = name
+        coll.objects.link(o)
+        dm = o.modifiers.new('rk_far', 'DECIMATE')
+        dm.decimate_type = 'COLLAPSE'
+        dm.ratio = r
+        _apply(o, dm)
+        gate_safe_weld(o.data)
+        st = F.surface_stats(o.data)
+        if best is not None:
+            bpy.data.objects.remove(best[0], do_unlink=True)
+        best = (o, r, st)
+        if st['loops'] == 0 and F.world_area(o) * rescale_cap ** 2 >= 0.93 * area_src:
+            break
+    o, r, st = best
+    keep0 = F.world_area(o) / max(area_src, 1e-12)
+    if keep0 < min_keep:
+        s = min(rescale_cap, math.sqrt(min_keep / keep0))
+        me = o.data
+        xs = [v.co.x for v in me.vertices]; ys = [v.co.y for v in me.vertices]; zs = [v.co.z for v in me.vertices]
+        c = Vector(((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2, (min(zs) + max(zs)) / 2))
+        for v in me.vertices:
+            v.co = c + (v.co - c) * s
     zs = min(v.co.z for v in src.data.vertices)
     zf = min(v.co.z for v in o.data.vertices)
     for v in o.data.vertices:
         v.co.z += zs - zf
     o.data.update()
+    keep = F.world_area(o) / max(area_src, 1e-12)
+    rep = {'ratio': round(r, 4), 'tris': st['tris'], 'loops': st['loops'],
+           'area_decimated': round(keep0, 3), 'area': round(keep, 3)}
+    print(f'ROCK-FAR {name} {rep}', flush=True)
+    assert st['loops'] == 0 and keep >= 0.92, (name, 'far LOD fails the far gate', rep)
     return o
 
 

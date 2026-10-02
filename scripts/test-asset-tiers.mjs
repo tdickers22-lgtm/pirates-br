@@ -216,13 +216,13 @@ export const RATCHET = [
   'flower_patch:lods', 'flower_patch:textures',
   'wildflowers:band', 'wildflowers:lods', 'wildflowers:textures',
   // boulders
-  'boulder_a:band', 'boulder_a:lods', 'boulder_a:textures', 'boulder_a:verts',
-  'boulder_b:band', 'boulder_b:lods', 'boulder_b:textures', 'boulder_b:verts',
-  'boulder_c:band', 'boulder_c:lods', 'boulder_c:textures', 'boulder_c:verts',
+  'boulder_a:textures',
+  'boulder_b:textures',
+  'boulder_c:textures',
   // searocks
-  'searock_a:band', 'searock_a:lods', 'searock_a:textures', 'searock_a:verts',
-  'searock_b:band', 'searock_b:lods', 'searock_b:textures', 'searock_b:verts',
-  'searock_c:band', 'searock_c:lods', 'searock_c:textures', 'searock_c:verts',
+  'searock_a:textures',
+  'searock_b:textures',
+  'searock_c:textures',
   // arches
   'rock_arch:band', 'rock_arch:lods', 'rock_arch:textures', 'rock_arch:verts',
   // cliff

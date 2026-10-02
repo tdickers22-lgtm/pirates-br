@@ -16,7 +16,8 @@
 # game-space AABB (_nature.NATURE_BOUNDS: colliders, propBaseLift, test-asset-bounds), AO + moss +
 # low wet band baked into COLOR_0, material names kept in the 'rock' detail family (the runtime
 # triplanar rock grain and the one-draw instancing collapse still apply).
-# `<name>_far.glb` is a ~2.5% decimation of the same welded LOD0, re-seated on its lowest point;
+# `<name>_far.glb` is a 2.5-3% decimation of the same welded LOD0 (ratio climbs until no boundary loop,
+# then scaled back to >= 94% of the LOD0 area: _rock.decimated_copy), re-seated on its lowest point;
 # `<name>_lods.glb` (LOD1/LOD2/far nodes) comes from build_lods.py (BR_LODS_ONLY=<names>).
 #
 # Headless:  /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup -P scripts/blender/build_rocks.py
