@@ -104,13 +104,19 @@ expect('applyShadowMapSize re-derives the bias after a governor step',
   /applyShadowMapSize[\s\S]{0,900}?applyShadowBias\(\)/.test(rendererSrc), 'not re-derived on resize');
 
 // ── 2. the island casts ─────────────────────────────────────────────────────
-console.log('\n2. the heightfield casts, and casts BackSide');
+console.log('\n2. the heightfield casts, from its far side');
 const terrainSrc = read('src/client/world/island/TerrainMeshBuilder.ts');
 expect('terrain.castShadow = true', /terrain\.castShadow\s*=\s*true/.test(terrainSrc),
   'the 90 m peak still throws nothing on its own beach');
-expect('the DoubleSide heightfield renders the shadow pass BackSide',
-  /terrainMat\.shadowSide\s*=\s*THREE\.BackSide/.test(terrainSrc),
-  'without shadowSide the DoubleSide receiver writes its own front-face depth: acne wash');
+// The far side is the one facing AWAY from the sun, so it depends on the
+// winding: the shared grid winds its fronts DOWN (b4.4d), making FrontSide the
+// far side. Grade the pair, not one literal.
+const gridSrc = read('src/shared/terrainGrid.ts');
+const windsDown = /tris\.push\(inA, bo \+ \(\(i \* k\) % no\), inB\)/.test(gridSrc);
+const farSide = windsDown ? 'FrontSide' : 'BackSide';
+expect(`the DoubleSide heightfield renders the shadow pass on its far side (${farSide})`,
+  new RegExp(`terrainMat\\.shadowSide\\s*=\\s*THREE\\.${farSide}`).test(terrainSrc),
+  'the shadow pass writes the sunlit top surface: every island sits in its own shadow');
 expect('the proxy/far LOD mesh does NOT cast (it is a silhouette, not a surface)',
   /proxy[\s\S]{0,400}?castShadow\s*=\s*false/i.test(terrainSrc) || !/proxy/i.test(terrainSrc),
   'a low-poly proxy casting beside the real cap double-shadows the same island');
