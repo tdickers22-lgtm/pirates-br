@@ -42,7 +42,7 @@ expect('Old Maw Caldera anchors the center', (() => {
 // stale client a different world under the same name. One pin per version: a
 // world slice bumps WORLD_VERSION (src/shared/staticWorld.ts) and adds its row
 // in a re-pin commit that states the signature diff.
-const SIGNATURE_PINS = { 1: '83f3f8241a029ccb', 2: '4455b027bde69f13' }; // v2: b4.4d islet beach rings + cays
+const SIGNATURE_PINS = { 1: '83f3f8241a029ccb', 2: '4455b027bde69f13', 3: '5d5eee4df1675b8f' }; // v2: b4.4d islet beach rings + cays; v3: b4.4e archetype landforms + no global terracing
 const signatureHash = hashString(worldSignature(a));
 expect(`the fixed-world signature is pinned for WORLD_VERSION ${WORLD_VERSION}`,
   SIGNATURE_PINS[WORLD_VERSION] === signatureHash,
