@@ -2,6 +2,7 @@ import { createNoise2D } from 'simplex-noise';
 import type { Island, IslandCave, IslandDock, IslandGeyser, IslandTavern, SeaRock, SeaRockCollider, Ship, ShipType, Vec3, Vec2 } from '../types/index.js';
 import { SHIP, SHIP_STATS, PLAYER, STORM_TAILWIND, BERTH_FRAME_ALONG_SLACK, BERTH_FRAME_LATERAL_SLACK } from '../constants/index.js';
 import { getMastHeight } from '../hull.js';
+import { applyLandforms } from '../landforms.js';
 
 export function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
@@ -692,6 +693,12 @@ function getIslandRelief(island: Island): IslandRelief {
   }
   islandReliefCache.set(island, relief);
   return relief;
+}
+
+/** The derived sand cays (island-local metres): the relief gate grades their
+ *  tops against the calm crest (b4.4b, archipelago row). */
+export function getIslandCays(island: Island): IslandRelief['cays'] {
+  return getIslandRelief(island).cays;
 }
 
 /** Derived summit centres do not consume the established content RNG stream. */
@@ -1388,6 +1395,15 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   // landing back on a sloped shelf.
   const cliffY = lerp(naturalY, -5.5, smoothstep(1.0, 1.05, distRatio));
   let surfaceY = coast.beach * beachY + coast.rocky * rockyY + coast.cliff * cliffY;
+
+  // ── Authored landforms (b4.4b, D29): scarps, gorges, mesas, basins... on the
+  // natural coast-blended surface, before the stamps. Scaled by the cave collar
+  // weight (0 under baseRelief), so cave corridors and the cave generator's
+  // reference topography never move. Zero rng; no records = no work.
+  if (reliefWeight > 0) {
+    const authored = applyLandforms(island, localX, localZ, surfaceY);
+    if (authored !== surfaceY) surfaceY = lerp(surfaceY, authored, reliefWeight);
+  }
 
   // ── Structure stamps: flatten discs so buildings sit on level ground ──
   if (island.stamps && island.stamps.length > 0) {
