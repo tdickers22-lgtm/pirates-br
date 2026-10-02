@@ -2,6 +2,7 @@
 // painted with. Extracted verbatim from ShipRenderer (codehealth-03 phase 1,
 // HULLGEO-01 slice a); scripts/test-ship-geometry-hash.mjs pins the move.
 import * as THREE from 'three';
+import { drawSailEmblem } from './emblems.js';
 
 /** Marks canvas art as sRGB (authored colors, not linear data) and enables
  *  anisotropic filtering so deck planks stay crisp at grazing angles. */
@@ -153,6 +154,8 @@ export function sailTexture(teamColor?: number, seed = 0x5a11 ^ ((teamColor ?? 0
     ctx.globalAlpha = 0.5;
     ctx.fillRect(0, 210, 256, 7);
     ctx.globalAlpha = 1;
+    // Crew emblem above the band (b4.3e, crossdevice-15): shape, not hue alone.
+    drawSailEmblem(ctx, teamColor);
   }
   // Bolt rope: the roped edge all round (drawn last so it sits on the band).
   ctx.strokeStyle = '#8a7449';
