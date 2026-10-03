@@ -11,6 +11,9 @@
 # Material names are a client API (PropScatterer sway/tint reads Leaf_*): do not rename.
 # Origin = trunk base on the ground, +Z up in Blender (+Y in the GLB). Seeds are crc32(name): the
 # build is deterministic.
+# Outputs (public/assets/models/): tree_broadleaf_a.glb, tree_broadleaf_b.glb, tree_buttress.glb, tree_mangrove.glb, tree_dead_a.glb,
+#   tree_dead_b.glb, banana_plant.glb, fern_giant.glb, tall_grass.glb
+#   (+ scripts/blender/lod_proxies/<key>_<LOD1|LOD2|far>.glb for build_lods.py).
 # Headless: /Applications/Blender.app/Contents/MacOS/Blender --factory-startup -b -P scripts/blender/build_flora_canopy.py
 # BR_CANOPY_ONLY=tree_broadleaf_a,tall_grass builds a subset; CANOPY_RENDER_DIR=<dir> writes review renders.
 import bpy
@@ -162,6 +165,205 @@ def finish_canopy(coll, name):
     lo, hi = BAND[name]
     info = finish_nature(coll, name, budget=hi, floor=lo)
     print('CANOPY_TRIS', name, info['tris'])
+    write_canopy_proxies(coll, name)
+
+
+# LOD PROXIES (b4.7d-rest). build_lods.py cannot reach the canopy ceilings by Collapse: every open
+# leaf blade is a boundary loop its surface contract keeps (tree_broadleaf_a LOD1 stuck at 59%).
+# So this build writes the chain itself to lod_proxies/<key>_<LOD1|LOD2|far>.glb, which build_lods.py
+# prefers (graded as a proxy, extras.lod_reuse):
+#   trees (broadleaf, buttress, mangrove): leaf blades k-means-clustered into closed jittered
+#     ellipsoid blobs (80 tris near, 20 far), one per cluster, on the cluster's dominant leaf material;
+#   understory + grass: a deterministic subset of whole blades (slightly enlarged) near, blobs far;
+#   wood: the largest bark/stem parts (smallest twigs dropped further out), Collapse-decimated.
+# Vertex colour (AO + tint) is copied from the nearest LOD0 vertex so a swap never pops brighter.
+PROXY_DIR = os.path.join(HERE, 'lod_proxies')
+# (LOD1, LOD2, far) ceilings: the test-asset-tiers canopy-* CHAIN rows. Aim 0.88 of each.
+PROXY_RATIOS = {
+    'tree_broadleaf_a': (0.23, 0.08, 0.025), 'tree_broadleaf_b': (0.23, 0.08, 0.025),
+    'tree_buttress': (0.18, 0.06, 0.02), 'tree_mangrove': (0.3, 0.1, 0.03),
+    'tree_dead_a': (0.4, 0.15, 0.05), 'tree_dead_b': (0.4, 0.15, 0.05),
+    'banana_plant': (0.4, 0.12, 0.04), 'fern_giant': (0.4, 0.12, 0.04), 'tall_grass': (0.4, 0.12, 0.04),
+}
+BLOB_KEYS = ('tree_broadleaf_a', 'tree_broadleaf_b', 'tree_buttress', 'tree_mangrove')
+LEAF_MATS = ('Leaf_A', 'Leaf_B', 'Leaf_C', 'Banana_Leaf', 'Grass_Tall')
+WOOD_KEEP = {'LOD1': 1.0, 'LOD2': 0.92, 'far': 0.8}     # cumulative wood area kept, largest parts first
+
+
+def _components(bm, faces):
+    """Connected face sets (by shared edge) among `faces`."""
+    pool = set(faces)
+    out = []
+    while pool:
+        seed = pool.pop()
+        comp, stack = [seed], [seed]
+        while stack:
+            f = stack.pop()
+            for e in f.edges:
+                for g in e.link_faces:
+                    if g in pool:
+                        pool.discard(g)
+                        comp.append(g)
+                        stack.append(g)
+        out.append(comp)
+    return out
+
+
+def _tris(faces):
+    return sum(len(f.verts) - 2 for f in faces)
+
+
+def _kmeans(pts, wts, k, iters=8):
+    """Deterministic weighted k-means (farthest-point init) -> list of member index lists."""
+    cents = [pts[max(range(len(pts)), key=lambda i: wts[i])]]
+    while len(cents) < k:
+        cents.append(pts[max(range(len(pts)), key=lambda i: min((pts[i] - c).length for c in cents))])
+    for _ in range(iters):
+        groups = [[] for _ in cents]
+        for i, p in enumerate(pts):
+            groups[min(range(len(cents)), key=lambda j: (p - cents[j]).length)].append(i)
+        cents = [sum((pts[i] * wts[i] for i in g), Vector()) / max(1e-9, sum(wts[i] for i in g)) if g else c
+                 for g, c in zip(groups, cents)]
+    return [g for g in groups if g]
+
+
+def write_canopy_proxies(coll, name):
+    from mathutils.kdtree import KDTree
+    src = [o for o in coll.objects if o.type == 'MESH'][0]
+    me0 = src.data
+    bm0 = bmesh.new()
+    bm0.from_mesh(me0)
+    bm0.transform(src.matrix_world)
+    n0 = _tris(bm0.faces)
+    names = [m.name if m else '' for m in me0.materials]
+    leafset = {i for i, m in enumerate(names) if m.split('.')[0] in LEAF_MATS}
+    leaf_comps = _components(bm0, [f for f in bm0.faces if f.material_index in leafset])
+    wood_comps = _components(bm0, [f for f in bm0.faces if f.material_index not in leafset])
+    wood_comps.sort(key=lambda c: -sum(f.calc_area() for f in c))
+    wood_area = sum(f.calc_area() for c in wood_comps for f in c) or 1.0
+    col0 = me0.color_attributes.get('Col')
+    kd = KDTree(len(bm0.verts))
+    for v in bm0.verts:
+        kd.insert(v.co, v.index)
+    kd.balance()
+    src_cols = [tuple(col0.data[i].color) for i in range(len(bm0.verts))] if col0 and col0.domain == 'POINT' else None
+    rng = rng_of(name + '_proxy')
+    os.makedirs(PROXY_DIR, exist_ok=True)
+    for label, ceil in zip(('LOD1', 'LOD2', 'far'), PROXY_RATIOS[name]):
+        for attempt in range(8):
+            target = int(n0 * ceil * 0.88 * 0.85 ** attempt)
+            bm = bmesh.new()
+            # Wood: largest parts to the kept area share, copied in, decimated below.
+            acc, wood = 0.0, []
+            for c in wood_comps:
+                if wood and acc / wood_area >= WOOD_KEEP[label] * 0.8 ** attempt:
+                    break
+                wood.append(c)
+                acc += sum(f.calc_area() for f in c)
+            wood_t = _tris([f for c in wood for f in c])
+            wood_goal = wood_t if not leaf_comps else min(wood_t, max(24, int(target * 0.4)))
+            if not leaf_comps:
+                wood_goal = min(wood_t, target)
+            vmap = {}
+
+            def copy_faces(faces, scale_about=None, s=1.0):
+                for f in faces:
+                    vs = []
+                    for v in f.verts:
+                        key = (v.index, id(faces))
+                        if key not in vmap:
+                            co = v.co if scale_about is None else scale_about + (v.co - scale_about) * s
+                            vmap[key] = bm.verts.new(co)
+                        vs.append(vmap[key])
+                    try:
+                        nf = bm.faces.new(vs)
+                        nf.material_index = f.material_index
+                        nf.smooth = True
+                    except ValueError:
+                        pass
+
+            wood_faces = [f for c in wood for f in c]
+            copy_faces(wood_faces)
+            bm.faces.ensure_lookup_table()
+            nwood = len(bm.faces)
+            leaf_goal = max(0, target - wood_goal)
+            leaf_t = _tris([f for c in leaf_comps for f in c])
+            if leaf_comps and (name not in BLOB_KEYS) and label != 'far':
+                # Whole-blade subset, enlarged about each blade's foot so the clump keeps its mass.
+                keep = max(1, min(len(leaf_comps), int(len(leaf_comps) * leaf_goal / max(1, leaf_t))))
+                order = sorted(range(len(leaf_comps)), key=lambda i: rng.random())[:keep]
+                s = min(1.3, (len(leaf_comps) / keep) ** 0.2)
+                for i in order:
+                    c = leaf_comps[i]
+                    foot = min((v.co for f in c for v in f.verts), key=lambda co: co.z)
+                    copy_faces(c, foot.copy(), s)
+            elif leaf_comps:
+                sub = 1 if leaf_goal >= 80 * 6 else 0
+                per = 80 if sub else 20
+                k = max(1, min(len(leaf_comps), leaf_goal // per))
+                pts = [sum((f.calc_center_median() for f in c), Vector()) / len(c) for c in leaf_comps]
+                wts = [sum(f.calc_area() for f in c) for c in leaf_comps]
+                for g in _kmeans(pts, wts, k):
+                    vs = [v.co for i in g for f in leaf_comps[i] for v in f.verts]
+                    lo = Vector((min(v.x for v in vs), min(v.y for v in vs), min(v.z for v in vs)))
+                    hi = Vector((max(v.x for v in vs), max(v.y for v in vs), max(v.z for v in vs)))
+                    ctr, half = (lo + hi) / 2, (hi - lo) / 2
+                    mats = {}
+                    for i in g:
+                        m = leaf_comps[i][0].material_index
+                        mats[m] = mats.get(m, 0) + wts[i]
+                    mi = max(mats, key=mats.get)
+                    res = bmesh.ops.create_icosphere(bm, subdivisions=sub, radius=1.0)
+                    for v in res['verts']:
+                        j = 1.0 + rng.uniform(-0.12, 0.12)
+                        v.co = ctr + Vector((v.co.x * max(0.12, half.x * 0.85), v.co.y * max(0.12, half.y * 0.85),
+                                             v.co.z * max(0.1, half.z * 0.8))) * j
+                    for f in {f for v in res['verts'] for f in v.link_faces}:
+                        f.material_index = mi
+                        f.smooth = True
+            o_me = bpy.data.meshes.new(f'{name}_{label}')
+            bm.to_mesh(o_me)
+            bm.free()
+            for m in me0.materials:
+                o_me.materials.append(m)
+            lcoll = asset_collection(f'{name}_{label}')
+            o = bpy.data.objects.new(f'{name}_{label}', o_me)
+            lcoll.objects.link(o)
+            if wood_goal < wood_t and nwood:
+                # Collapse only the wood: the leaf faces sit in a vertex group the modifier leaves alone.
+                vg = o.vertex_groups.new(name='wood')
+                vg.add([v for p in o_me.polygons[:nwood] for v in p.vertices], 1.0, 'REPLACE')
+                dc = o.modifiers.new('dc', 'DECIMATE')
+                dc.decimate_type = 'COLLAPSE'
+                # Collapse's ratio counts the WHOLE mesh; the leaf faces (weight 0) are held.
+                tot = sum(len(p.vertices) - 2 for p in o_me.polygons)
+                dc.ratio = max(0.01, (tot - (wood_t - wood_goal)) / tot)
+                dc.vertex_group = 'wood'
+                dc.use_collapse_triangulate = True
+                bpy.context.view_layer.objects.active = o
+                bpy.ops.object.modifier_apply(modifier=dc.name)
+            if src_cols is not None:
+                ca = o_me.color_attributes.new('Col', col0.data_type, 'POINT')
+                for v in o_me.vertices:
+                    ca.data[v.index].color = src_cols[kd.find(v.co)[1]]
+                o_me.color_attributes.active_color = ca
+            tris = sum(len(p.vertices) - 2 for p in o_me.polygons)
+            print(f'CANOPY_PROXY {name} {label} tris {tris} ({100 * tris / n0:.1f}%, ceiling {100 * ceil:.1f}%)')
+            if tris > n0 * ceil:
+                # Thin twigs refuse to collapse further: rebuild the level on a smaller budget.
+                bpy.data.objects.remove(o, do_unlink=True)
+                continue
+            global EXPORT_DIR
+            keep_dir, EXPORT_DIR = EXPORT_DIR, PROXY_DIR
+            try:
+                export_collection_vc(lcoll, f'{name}_{label}.glb')
+            finally:
+                EXPORT_DIR = keep_dir
+            o.hide_render = True
+            break
+        else:
+            raise AssertionError((name, label, 'proxy over its ceiling after 8 budgets'))
+    bm0.free()
 
 
 def build_broadleaf(name, height, crown_r, lean, leaf_mats, leaf_len, per_tip):

@@ -19,6 +19,13 @@ import { ensureMeshGround } from './GroundTruth.js';
 import { queueContactShadow } from './ContactShadows.js';
 import { attachCoverLod, attachInstanceFarLod, attachInstanceLod, attachLazyStoryLod } from './InstanceLod.js';
 
+/** b4.7d canopy flora kit: drawn with its <key>_lods.glb chain (LOD1 near on low, far node past FAR_SWAP_M). */
+const CANOPY_KIT: ReadonlySet<string> = new Set([
+  'tree_broadleaf_a', 'tree_broadleaf_b', 'tree_buttress', 'tree_mangrove', 'tree_dead_a', 'tree_dead_b', 'banana_plant', 'fern_giant', 'tall_grass',
+]);
+/** Phone lever 3 (PLAN 3.14): canopy >= 40% of high. Phones draw half the canopy instances, biggest first. */
+export const CANOPY_PHONE_SHARE = 0.5;
+
 /** Instanced prop types that bend in the wind (palms + soft foliage; not rocks). */
 const SWAYING_FOLIAGE: ReadonlySet<string> = new Set([
   'palm_a', 'palm_b', 'palm_c', 'palm_tall', 'palm_ground',
@@ -580,8 +587,19 @@ export function buildServerProps(ctx: IslandBuildCtx) {
   const quat = new THREE.Quaternion();
   const euler = new THREE.Euler();
   const scl = new THREE.Vector3();
-  for (const [type, list] of buckets) {
-    const merged = instancedTypes.has(type) ? assets.mergedGeometry(type as AssetName) : null;
+  const phone = storyPhoneProfile();
+  for (const [type, fullList] of buckets) {
+    const canopy = CANOPY_KIT.has(type);
+    const lods = `${type}_lods` as AssetName;
+    // b4.7d canopy kit: the low tier draws the LOD1 node of <key>_lods.glb near (D27: low never draws
+    // LOD0 beyond 8 m props); high draws LOD0.
+    const merged = !instancedTypes.has(type) ? null
+      : (canopy && lowDetail ? assets.mergedNodeGeometry(lods, `${type}_LOD1`) : null) ?? assets.mergedGeometry(type as AssetName);
+    // Phone lever 3 (PLAN 3.14, render-only): phones draw CANOPY_PHONE_SHARE of the canopy instances,
+    // the biggest first (sorted below); the served world and its trunk colliders are unchanged.
+    const list = canopy && phone && merged
+      ? [...fullList].sort((a, b) => (b.scale - a.scale) || ((a.id ?? 0) - (b.id ?? 0))).slice(0, Math.ceil(fullList.length * CANOPY_PHONE_SHARE))
+      : fullList;
     if (merged) {
       if (SWAYING_FOLIAGE.has(type)) applyFoliageSway(merged.material, host);
       // Once per geometry per session, latched inside — see GROUND_CONTACT.
@@ -623,7 +641,7 @@ export function buildServerProps(ctx: IslandBuildCtx) {
       // The decimated sibling for the rebuilt nature GLBs: same material
       // collapse, same sway patch, ~20-30% of the triangles, swapped in by
       // InstanceLod once the island's edge is beyond the tier's FAR_SWAP_M.
-      const far = assets.mergedFarGeometry(type as AssetName);
+      const far = assets.mergedFarGeometry(type as AssetName) ?? (canopy ? assets.mergedNodeGeometry(lods, `${type}_far`) : null);
       if (far) {
         if (SWAYING_FOLIAGE.has(type)) applyFoliageSway(far.material, host);
         // The far sibling gets the identical bake or the LOD swap pops brighter.
