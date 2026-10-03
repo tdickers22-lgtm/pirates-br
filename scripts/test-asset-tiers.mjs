@@ -288,7 +288,6 @@ export const RATCHET = [
   'wrecker_tower:band', 'wrecker_tower:lods', 'wrecker_tower:textures',
   'rum_still:band', 'rum_still:lods', 'rum_still:textures',
   'crow_roost:band', 'crow_roost:lods', 'crow_roost:textures',
-  'mermaid_shrine:band', 'mermaid_shrine:lods', 'mermaid_shrine:textures',
   'castaway_camp:band', 'castaway_camp:lods', 'castaway_camp:textures',
   'dig_site:band', 'dig_site:lods', 'dig_site:textures',
   'gallows:band', 'gallows:lods', 'gallows:textures',

@@ -115,21 +115,26 @@ def subsurf(obj, levels=1):
 def story_pbrify(parts, procedural, L=1.0, sub=0, tile=1.0):
     """Story-scene material pass: palette materials in TRIM_OF go on the trim sheets (trimify), names in
     `procedural` {name: wet_flesh_material kwargs} are rebuilt IN PLACE as original procedural PBR and
-    box-UV'd. Returns the kept parts (trimify drops DROP blobs)."""
+    box-UV'd. A procedural entry may carry '_tile' (metres per map repeat) and '_sub' (Catmull-Clark
+    levels) overriding the call-wide tile/sub; a procedural name wins over its TRIM_OF row (the giant
+    skull's Rock_Dark read as basket weave on the 0.5 m rubble strip). Returns the kept parts."""
     built = set()
     for name, kw in procedural.items():
         if name not in built and bpy.data.materials.get(name) is not None:
-            wet_flesh_material(name, **kw)
+            wet_flesh_material(name, **{k: v for k, v in kw.items() if not k.startswith("_")})
             built.add(name)
-    if sub:
-        for o in parts:
-            mname = o.data.materials[0].name if o.data.materials else ""
-            if mname in procedural:
-                subsurf(o, sub)
     for o in parts:
         mname = o.data.materials[0].name if o.data.materials else ""
-        if mname in procedural:
-            for poly in o.data.polygons:
-                poly.use_smooth = True
-            box_uv(o, tile)
-    return trimify(parts, L)
+        if mname not in procedural:
+            continue
+        lv = procedural[mname].get("_sub", sub)
+        if lv:
+            subsurf(o, lv)
+        for poly in o.data.polygons:
+            poly.use_smooth = True
+        box_uv(o, procedural[mname].get("_tile", tile))
+    saved = {k: TRIM_OF.pop(k) for k in list(TRIM_OF) if k in procedural}
+    try:
+        return trimify(parts, L)
+    finally:
+        TRIM_OF.update(saved)

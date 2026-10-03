@@ -30,6 +30,30 @@ exec(open(os.path.join(HERE, "_helpers.py")).read())
 exec(open(os.path.join(HERE, "_ao.py")).read())
 exec(open(os.path.join(HERE, "_detail.py")).read())
 exec(open(os.path.join(HERE, "_story_props.py")).read())
+import sys
+sys.path.insert(0, HERE)
+import _trim as TR
+exec(open(os.path.join(HERE, "_trimkit.py")).read())     # b5.1c: wood/rowboat on the trim sheets
+exec(open(os.path.join(HERE, "_story_pbr.py")).read())   # original procedural shell/coral/rock/verdigris PBR
+# b5.1c: the flanking sea rocks come from the shared ROCK KIT (voronoi fracture cells, planar breaks),
+# exec'd into its own namespace so its single-object tri_count / _join never shadow the trim kit's.
+RK = dict(globals())
+exec(open(os.path.join(HERE, "_rock.py")).read(), RK)
+STORY_SHEETS = os.path.join(HERE, "..", "..", "docs", "asset-sheets", "story")
+STORY_LEVELS = (("LOD1", 0.36), ("LOD2", 0.10), ("far", 0.035, 3600))
+STORY_PBR = {
+    # tidal rock: cold grey-green, algae-damp lows, bedding bands (ring_freq) = the strata read
+    "Rock_Sea": dict(base=(0.36, 0.38, 0.38), belly=(0.22, 0.30, 0.27), rough=0.80, ring_freq=7, seed=71, nrm_s=6.0,
+                     _tile=1.6, _sub=0),   # facets stay planar (rock-kit fracture read)
+    "Shell_Pearl": dict(base=(0.88, 0.82, 0.74), belly=(0.74, 0.80, 0.88), rough=0.32, ring_freq=11, seed=81, nrm_s=2.5),
+    "Coral": dict(base=(0.80, 0.32, 0.20), belly=(0.94, 0.56, 0.36), rough=0.72, ring_freq=6, seed=82, nrm_s=5.0),
+    "Coral_Pink": dict(base=(0.90, 0.46, 0.55), belly=(0.97, 0.72, 0.72), rough=0.70, ring_freq=6, seed=83, nrm_s=5.0),
+    "Verdigris": dict(base=(0.30, 0.56, 0.48), belly=(0.52, 0.42, 0.26), rough=0.62, ring_freq=2, seed=84, nrm_s=2.0),
+    "Bone": dict(base=(0.72, 0.68, 0.56), belly=(0.86, 0.83, 0.72), rough=0.72, ring_freq=3, seed=21, nrm_s=3.0),
+    "Gold": dict(base=(0.80, 0.62, 0.24), belly=(0.92, 0.76, 0.36), rough=0.30, ring_freq=1, seed=51, nrm_s=1.0,
+                 _sub=0),   # coins stay crisp discs (Catmull-Clark pillows them)
+    "Rust": dict(base=(0.40, 0.20, 0.10), belly=(0.55, 0.30, 0.14), rough=0.85, ring_freq=2, seed=61, nrm_s=4.0),
+}
 
 RENDER_DIR = os.environ.get("BR_RENDER_DIR", "")
 EXPORT_DIR = os.environ.get("BR_EXPORT_DIR", EXPORT_DIR)
@@ -505,11 +529,17 @@ def build():
     # ── tidal rock slab: strata plates + flanking sea rocks ──
     top = strata_rock(coll, "slab", 0.0, 0.75, 2.15, 1.85, 4, parts, seed=3,
                       z0=-0.04, waist=0.88)
+    # flanking sea rocks: rock-kit voronoi cells (capped = bedded slab tops, planar fracture flanks)
     for ri, (rx, ry, rs, plates) in enumerate((
             (-1.95, -0.60, 1.05, 3), (2.00, -0.30, 0.85, 3),
             (0.55, 2.50, 0.95, 2), (-2.45, 1.35, 0.70, 2))):
-        strata_rock(coll, f"rock{ri}", rx, ry, rs * 1.05, rs * 0.92, plates,
-                    parts, seed=11 + ri, z0=-0.05, waist=0.84)
+        cell = RK["voronoi_cell"](f"rock{ri}", coll, 11 + ri,
+                                  scale=(rs * 1.05, rs * 0.92, 0.30 * plates * rs),
+                                  planes=12, points=int(os.environ.get("B51C_ROCK_PTS", "1600")),
+                                  up_bias=1.2, caps=(0.78,))
+        RK["place"](cell, (rx, ry, 0.30 * plates * rs * 0.55 - 0.05), (0, 0, rng.uniform(0, 360)))
+        cell.data.materials.append(mat("Rock_Sea"))
+        parts.append(cell)
     # wet skirt: darker damp plate ring at the waterline
     for i in range(10):
         a = i * math.tau / 10 + 0.3
@@ -527,7 +557,7 @@ def build():
     for i in range(16):
         a = rng.uniform(0, math.tau)
         r = rng.uniform(0.035, 0.075)
-        bp = bm_icosphere(r, 2)
+        bp = bm_icosphere(r, 1)                 # ico-1 cage, rounded by the story subsurf pass
         bmesh.ops.scale(bp, vec=Vector((1, 1, 0.7)), verts=bp.verts)
         xform(bp, T(math.cos(a) * 1.95, 0.75 + math.sin(a) * 1.7,
                     rng.uniform(0.06, 0.34)))
@@ -577,7 +607,7 @@ def build():
             (-1.32, 0.30, 0.42, 0.34, "Coral"),
             (1.28, 0.42, 0.44, 0.28, "Coral_Pink"),
             (0.28, 1.82, 0.46, 0.24, "Coral"))):
-        dm = bm_icosphere(br, 3)
+        dm = bm_icosphere(br, 2)                # ico-2 cage: the story Catmull-Clark pass rounds it
         bmesh.ops.scale(dm, vec=Vector((1.15, 1.0, 0.72)), verts=dm.verts)
         for v in dm.verts:                      # brain-coral grooving
             v.co *= 1.0 + 0.07 * math.sin(v.co.x * 22) * math.sin(v.co.y * 19)
@@ -628,24 +658,14 @@ def build():
     skeleton(coll, "bowed", k_loc, face_yaw(k_loc, (0, 0.8)), POSE_KNEEL_BOWED)
     fiddle(coll, "fiddle", (2.0, -3.1, 0.0), 1.1, parts)
 
-    SPEC = tint_spec(moss=0.30)
-    SPEC['Rock_Sea'] = dict(
-        tone=0.16, hue=((1.16, 1.16, 1.10), (0.72, 0.80, 0.94)), scale=1.1,
-        mottle=0.13, mscale=0.30,
-        patch=dict(col=(0.55, 0.95, 0.45), amt=0.55, scale=0.70, thresh=0.60,
-                   width=0.14, up=0.75),
-        low=dict(z=0.42, amt=0.50, col=(0.40, 0.52, 0.52)))
-    SPEC['Shell_Pearl'] = dict(
-        tone=0.14, hue=((1.20, 1.08, 0.94), (0.82, 0.92, 1.10)), scale=0.35,
-        mottle=0.10, mscale=0.12,
-        low=dict(z=0.50, amt=0.36, col=(0.55, 0.66, 0.72)))
-    SPEC['Verdigris'] = dict(
-        tone=0.12, hue=((1.24, 1.10, 0.92), (0.76, 0.98, 1.02)), scale=0.30,
-        mottle=0.16, mscale=0.10,
-        patch=dict(col=(1.30, 0.85, 0.55), amt=0.45, scale=0.25, thresh=0.66,
-                   width=0.12, up=0.3))
-    ship_asset(coll, name, spec=SPEC, ao=dict(samples=22, floor=0.42),
-               render_dir=RENDER_DIR, views=4, elev=13)
+    # b5.1c: shell/coral/rock/verdigris/bone/gold/rust as ORIGINAL procedural PBR (box UV), wood on the
+    # trim sheets, Candle_Wax stays emissive (exempt); LOD0 + authored proxies + sheets via the trim kit.
+    # every mesh in the collection: skeleton() returns its own parts list, which build() never kept
+    parts = [o for o in coll.objects if o.type == "MESH"]
+    parts = story_pbrify(parts, STORY_PBR, L=float(os.environ.get("B51C_L_MERMAID", "0.5")),
+                         sub=int(os.environ.get("B51C_SUB_MERMAID", "1")), tile=1.2)
+    print(f"B51C mermaid tris: {tri_count(parts)}")
+    ship_building([join(parts, name)], name, sheet_dir=STORY_SHEETS, levels=STORY_LEVELS, four=True)
     print(f"built {name}")
 
 

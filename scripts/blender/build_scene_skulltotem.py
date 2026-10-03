@@ -29,6 +29,10 @@ STORY_PBR = {
     "Feather_Black": dict(base=(0.06, 0.06, 0.07), belly=(0.12, 0.13, 0.16), rough=0.55, ring_freq=14, seed=41, nrm_s=2.0),
     "Gold": dict(base=(0.80, 0.62, 0.24), belly=(0.92, 0.76, 0.36), rough=0.30, ring_freq=1, seed=51, nrm_s=1.0),
     "Rust": dict(base=(0.40, 0.20, 0.10), belly=(0.55, 0.30, 0.14), rough=0.85, ring_freq=2, seed=61, nrm_s=4.0),
+    # carved monolith + cairn: weathered dark basalt, one map repeat per 2.4 m and no subdivision (keeps the
+    # chisel facets); was the stone 'rubble' trim strip, which tiled into a basket weave across the skull
+    "Rock_Dark": dict(base=(0.40, 0.38, 0.34), belly=(0.54, 0.50, 0.44), rough=0.86, ring_freq=2, seed=91,
+                      nrm_s=4.0, _tile=2.4, _sub=0),
 }
 
 RENDER_DIR = os.environ.get("BR_RENDER_DIR", "")
