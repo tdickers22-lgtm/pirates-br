@@ -409,48 +409,18 @@ export function buildInteriorDressing(ctx: IslandBuildCtx) {
   }
 }
 
-/** Dead bone-grey snags, the mossy fallen log and the beached
- *  dinghy in the dunes. */
+/** The mossy fallen log and the beached dinghy in the dunes. */
 export function buildTreesAndStrays(ctx: IslandBuildCtx) {
   const {
     group, r, rng, lowDetail, surfacePoint, isSolidDecorPoint,
-    islandSeed, islandHeading, SURFACE_ABOVE_WATER, scaledCount,
+    islandSeed, islandHeading, SURFACE_ABOVE_WATER,
   } = ctx;
   const ground = ensureMeshGround(ctx);
   // The primitive banana tree (6-sided cylinder + flat planes, islands-09) is gone: banana_plant.glb is
   // placed as a server prop by the canopy kit (b4.7d) and drawn instanced by PropScatterer.
 
-  // ── Dead/weathered trees — bone-grey snags ──
-  {
-    const deadCount = scaledCount(Math.round(r / 52), 0);
-    const deadMat = new THREE.MeshStandardMaterial({ color: 0xa19684, roughness: 1 });
-    for (let i = 0; i < deadCount; i++) {
-      const angle = rng(i * 367 + 29) * Math.PI * 2;
-      const distRatio = 0.32 + rng(i * 369) * 0.36;
-      const pos = surfacePoint(distRatio, angle, 0);
-      if (!isSolidDecorPoint(pos, SURFACE_ABOVE_WATER, -0.2)) continue;
-      const tree = new THREE.Group();
-      tree.name = 'decor-dead-snag';
-      tree.position.copy(snapToDrawnGround(ground, pos, -0.12));
-      queueContactShadow(ctx, pos.x, pos.z, 0.72, 0.75);
-      const trunkH = 2.6 + rng(i * 371) * 2.2;
-      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.22, trunkH, 5), deadMat);
-      trunk.rotation.z = (rng(i * 373) - 0.5) * 0.18;
-      trunk.position.y = trunkH * 0.5;
-      trunk.castShadow = true;
-      tree.add(trunk);
-      // Two-three angular branches
-      const branchCount = 2 + Math.floor(rng(i * 377) * 2);
-      for (let b = 0; b < branchCount; b++) {
-        const branch = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.08, 1.0 + rng(b * 379 + i) * 0.8, 5), deadMat);
-        const ba = rng(b * 381 + i) * Math.PI * 2;
-        branch.position.set(Math.cos(ba) * 0.3, trunkH - 0.2 - b * 0.4, Math.sin(ba) * 0.3);
-        branch.rotation.set(rng(b * 383 + i) * 0.6 + 0.4, ba, rng(b * 387 + i) * 0.4);
-        tree.add(branch);
-      }
-      group.add(tree);
-    }
-  }
+  // The primitive bone-grey snags (5-sided cylinders + branch sticks) are gone: tree_dead_a/b.glb are placed
+  // as server props by the canopy kit (b4.7d) with trunk colliders, and drawn instanced by PropScatterer.
 
   // ── Mossy fallen log on the jungle floor ──
   if (!lowDetail && r > 40) {
