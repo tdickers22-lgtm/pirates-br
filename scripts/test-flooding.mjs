@@ -685,8 +685,11 @@ console.log('\nThe founder is a SCENE: crew ride the deck down, no anchor, down 
   // different berth would only buy the next terrain lane the same failure.)
   // Pinned to clear water instead, and the clearance is ASSERTED below so a
   // future map change cannot silently re-berth her.
-  ship.position.x = -640;
-  ship.position.z = -350;
+  // b4.gate: re-pinned from (-640, -350). The b4 static world (WORLD_VERSION 12
+  // under the harness seed 20260801) put seaRocks.6 at (-617, -363), 10 m off
+  // her old spot. (-800, -480) has 164 m to the nearest island edge or rock.
+  ship.position.x = -800;
+  ship.position.z = -480;
   ship.position.y = 0;
   ship.rotation = 0;
   ship.pitch = 0;
