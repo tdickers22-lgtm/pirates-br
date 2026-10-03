@@ -28,6 +28,9 @@
 //     nothing), or lists a signature with neither a fix commit that exists in
 //     git and is tagged [<batch>.0-><lane>] nor a prepended <batch>.<lane>.z0
 //     slice. --self-test first proves every one of those red cases is red.
+//     For the final batch (b5) the first real pull also opens the 72 h
+//     sign-off window (signOffWindow.opensAt, kept across re-pulls) that
+//     b5.6a grades; a pulled b5 report without it, or with it shortened, FAILS.
 //   $D = PIRATES_BR_CAMPAIGN_DIR or the 2026-09-22 campaign dir (--dir overrides).
 
 export const FPS_LINES = { phone: 24, tablet: 24, desktop: 45 };
@@ -128,6 +131,11 @@ export function summariseFlyLogs(text) {
  * result or null (then `blockedOn` says why). Resolutions already filled in
  * `previous` survive a re-pull.
  */
+/** The last batch: its triage pull opens the window b5.6a grades (0 uncaught signatures over the final 72 h, floor 20 sessions). */
+export const SIGNOFF_BATCH = 'b5';
+export const SIGNOFF_HOURS = 72;
+export const SIGNOFF_FLOOR_SESSIONS = 20;
+
 export function buildReport({ batch, pull = null, blockedOn = null, fly = null, previous = null, now = new Date() }) {
   const prior = new Map((previous?.signatures ?? []).map((g) => [g.key, g]));
   const signatures = (pull?.signatures ?? []).map((g) => {
@@ -136,11 +144,21 @@ export function buildReport({ batch, pull = null, blockedOn = null, fly = null, 
     return { key, count: g.count, kind: g.kind, message: g.message, topFrame: g.topFrame ?? '', builds: g.builds ?? {}, devices: g.devices ?? {},
       fixCommit: was.fixCommit ?? null, prependedSlice: was.prependedSlice ?? null, note: was.note ?? null };
   });
-  return {
+  const rep = {
     batch, generatedAt: now.toISOString(), pulled: !!pull, blockedOn: pull ? null : (blockedOn ?? 'unknown'),
     url: pull?.url ?? null, sinceDays: pull?.sinceDays ?? null, minSessions: pull?.minSessions ?? 3,
     sessions: pull?.sessions ?? 0, errorsTotal: pull?.errorsTotal ?? 0, fly, classes: pull?.classes ?? {}, signatures,
   };
+  if (batch === SIGNOFF_BATCH) {
+    // Opened by the first real pull, never moved by a re-pull; b5.6a grades the
+    // last SIGNOFF_HOURS before its sign-off and cannot sign off before earliestSignOff.
+    const opensAt = previous?.signOffWindow?.opensAt ?? (pull ? now.toISOString() : null);
+    rep.signOffWindow = {
+      opensAt, hours: SIGNOFF_HOURS, floorSessions: SIGNOFF_FLOOR_SESSIONS, maxUncaughtSignatures: 0, gradedBy: 'b5.6a',
+      earliestSignOff: opensAt ? new Date(Date.parse(opensAt) + SIGNOFF_HOURS * 3600e3).toISOString() : null,
+    };
+  }
+  return rep;
 }
 
 /**
@@ -153,6 +171,12 @@ export function checkTriage(report, { batch, commitSubject }) {
   if (!report) { bad(`no triage report for ${batch} (run --report --batch ${batch})`); return { ok: false, lines }; }
   if (report.batch !== batch) bad(`report is for ${report.batch}, the gate is ${batch}`);
   if (!report.pulled) bad(`VACUOUS: the report never pulled real sessions (blockedOn: ${report.blockedOn ?? 'unknown'})`);
+  if (batch === SIGNOFF_BATCH && report.pulled) {
+    const w = report.signOffWindow;
+    if (!w || !Number.isFinite(Date.parse(w.opensAt))) bad(`${batch} pulled but the ${SIGNOFF_HOURS} h sign-off window was never opened`);
+    else if (!(w.hours >= SIGNOFF_HOURS) || w.maxUncaughtSignatures !== 0) bad(`sign-off window weakened (hours ${w.hours}, maxUncaughtSignatures ${w.maxUncaughtSignatures})`);
+    else lines.push(`✓ sign-off window open since ${w.opensAt}; b5.6a may sign off from ${w.earliestSignOff}`);
+  }
   const min = report.minSessions ?? 3;
   const n = batch.replace(/^b/, '');
   const hookTag = new RegExp(`\\[b${n}\\.0->b${n}\\.\\d+\\]`);
@@ -199,6 +223,26 @@ export function selfTest() {
     const got = checkTriage(rep, { batch: 'b2', commitSubject }).ok;
     out.push(`${got === want ? '✓' : '✗'} self-test: ${name} -> ${got ? 'green' : 'red'} (want ${want ? 'green' : 'red'})`);
   }
+  // The final batch's pull opens the 72 h sign-off window b5.6a grades (D35).
+  const now = new Date('2026-10-03T00:00:00Z');
+  const finalPull = { url: 'u', sinceDays: 14, minSessions: 3, sessions: 25, errorsTotal: 0, signatures: [], classes: {} };
+  const winCases = [
+    [`${SIGNOFF_BATCH} pulled without a sign-off window`, { ...buildReport({ batch: SIGNOFF_BATCH, pull: finalPull, now }), signOffWindow: undefined }, false],
+    [`${SIGNOFF_BATCH} pulled, window opened`, buildReport({ batch: SIGNOFF_BATCH, pull: finalPull, now }), true],
+    [`${SIGNOFF_BATCH} window shorter than ${SIGNOFF_HOURS} h`, (() => { const r = buildReport({ batch: SIGNOFF_BATCH, pull: finalPull, now }); r.signOffWindow = { ...r.signOffWindow, hours: 24 }; return r; })(), false],
+  ];
+  for (const [name, rep, want] of winCases) {
+    const got = checkTriage(rep, { batch: SIGNOFF_BATCH, commitSubject }).ok;
+    out.push(`${got === want ? '✓' : '✗'} self-test: ${name} -> ${got ? 'green' : 'red'} (want ${want ? 'green' : 'red'})`);
+  }
+  const first = buildReport({ batch: SIGNOFF_BATCH, pull: finalPull, now });
+  const again = buildReport({ batch: SIGNOFF_BATCH, pull: finalPull, previous: first, now: new Date(now.getTime() + 30 * 3600e3) });
+  const blocked = buildReport({ batch: SIGNOFF_BATCH, blockedOn: 'O2', now });
+  const winOk = first.signOffWindow?.opensAt === now.toISOString()
+    && first.signOffWindow?.earliestSignOff === new Date(now.getTime() + SIGNOFF_HOURS * 3600e3).toISOString()
+    && again.signOffWindow?.opensAt === first.signOffWindow.opensAt
+    && blocked.signOffWindow?.opensAt === null && buildReport({ batch: 'b2', pull: finalPull }).signOffWindow === undefined;
+  out.push(`${winOk ? '✓' : '✗'} self-test: ${SIGNOFF_BATCH} pull opens the window once, a re-pull keeps opensAt, a blocked pull leaves it shut`);
   const prev = { signatures: [{ key: 'k1', fixCommit: 'aaa1111' }] };
   const carried = buildReport({ batch: 'b2', pull: { signatures: [{ sig: 'k1', count: 3 }, { sig: 'k2', count: 3 }] }, previous: prev });
   const keep = carried.signatures[0].fixCommit === 'aaa1111' && carried.signatures[1].fixCommit === null;
