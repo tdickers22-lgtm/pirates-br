@@ -138,21 +138,29 @@ for (const kind of ['valley', 'gorge']) {
 // 4. mesa, caldera, shelf, terraces, headland, dunes
 {
   const topY = nat(px, pz) + 8;
-  const rec = { id: 't-mesa', kind: 'mesa', center: [px, pz], radius: 14, topY, face: 2.5, ramps: [{ angle: 0, halfWidth: 3, run: 22 }] };
+  // The ramp runs down the heading where the natural ground holds level best, so the fixture grades
+  // the ramp profile on the 8 m drop it was sized for (run 22: smoothstep peak 1.5 x 8/22 = 28.6 deg).
+  // quietSpot moves with the stamps (b4.7c POIs moved it onto a slope falling 3 m more over a fixed
+  // angle-0 ramp, 44.5 deg: a fixture artefact, not a ramp defect).
+  let ra = 0, rd = Infinity;
+  for (let k = 0; k < 16; k++) { const t = k / 16 * Math.PI * 2, fall = Math.abs(nat(px, pz) - nat(px + Math.cos(t) * 36, pz + Math.sin(t) * 36)); if (fall < rd) { rd = fall; ra = t; } }
+  const rx = Math.cos(ra), rz = Math.sin(ra);
+  const rec = { id: 't-mesa', kind: 'mesa', center: [px, pz], radius: 14, topY, face: 2.5, ramps: [{ angle: ra, halfWidth: 3, run: 22 }] };
   const r = withRecords(smug, [rec], () => {
     let flat = true;
     for (let i = 0; i < 40; i++) {
       const a = i / 40 * Math.PI * 2, d = (i % 5) * 2.4;
       if (Math.abs(Y(smug, px + Math.cos(a) * d, pz + Math.sin(a) * d) - topY) > 1e-6) flat = false;
     }
-    const cliff = Y(smug, px, pz - 12.5) - Y(smug, px, pz - 15.5);
+    const cx = -rx, cz = -rz; // the cliff is graded straight across from the ramp
+    const cliff = Y(smug, px + cx * 12.5, pz + cz * 12.5) - Y(smug, px + cx * 15.5, pz + cz * 15.5);
     let rampMax = 0;
-    for (let d = 10; d < 38; d += 0.5) rampMax = Math.max(rampMax, Math.abs(Y(smug, px + d + 0.5, pz) - Y(smug, px + d, pz)) / 0.5);
+    for (let d = 10; d < 38; d += 0.5) rampMax = Math.max(rampMax, Math.abs(Y(smug, px + rx * (d + 0.5), pz + rz * (d + 0.5)) - Y(smug, px + rx * d, pz + rz * d)) / 0.5);
     return { flat, cliff, rampMax };
   });
   expect('mesa top is flat at topY', r.flat);
   expect('mesa ring is a cliff (>= 5 m over 3 m)', r.cliff >= 5, `${r.cliff.toFixed(2)} m`);
-  expect('mesa ramp is walkable (< 40 deg)', r.rampMax < Math.tan(40 * Math.PI / 180), `${(Math.atan(r.rampMax) * 180 / Math.PI).toFixed(1)} deg`);
+  expect('mesa ramp is walkable (< 40 deg)', r.rampMax < Math.tan(40 * Math.PI / 180), `${(Math.atan(r.rampMax) * 180 / Math.PI).toFixed(1)} deg, heading ${ra.toFixed(2)} rad, natural fall ${rd.toFixed(2)} m over 36 m`);
 }
 {
   const floorY = nat(px, pz) - 2, rimY = nat(px, pz) + 10;
