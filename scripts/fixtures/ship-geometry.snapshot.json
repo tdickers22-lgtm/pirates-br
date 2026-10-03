@@ -2,9 +2,9 @@
   "note": "Baseline for scripts/test-ship-geometry-hash.mjs. Rebuild ONLY inside a slice that intends the geometry change, and name the moved families in the commit.",
   "hulls": {
     "sloop": {
-      "digest": "183b9f9d",
+      "digest": "852d1920",
       "meshCount": 85,
-      "vertTotal": 107944,
+      "vertTotal": 107980,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 2,
@@ -164,7 +164,7 @@
           "meshes": 7,
           "verts": 9968,
           "tris": 3376,
-          "hash": "558ff79d",
+          "hash": "93b060b1",
           "box": [
             -4.25,
             -0.893,
@@ -190,9 +190,9 @@
         },
         "ship-deck-planking": {
           "meshes": 1,
-          "verts": 2040,
-          "tris": 680,
-          "hash": "fd51c771",
+          "verts": 2076,
+          "tris": 692,
+          "hash": "f15c7bfd",
           "box": [
             -2.8,
             0.21,
@@ -248,7 +248,7 @@
           "meshes": 4,
           "verts": 5536,
           "tris": 1856,
-          "hash": "b473260d",
+          "hash": "0d70e1d5",
           "box": [
             -1.859,
             0.445,
@@ -345,20 +345,20 @@
       }
     },
     "brigantine": {
-      "digest": "a15afd6a",
+      "digest": "5ef57d78",
       "meshCount": 110,
-      "vertTotal": 126076,
+      "vertTotal": 126148,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 4,
           "verts": 304,
           "tris": 192,
-          "hash": "18491005",
+          "hash": "8d94a4f5",
           "box": [
-            -5.12,
+            -5.119,
             3.043,
             -4.917,
-            5.12,
+            5.119,
             3.277,
             3.317
           ]
@@ -367,12 +367,12 @@
           "meshes": 58,
           "verts": 36513,
           "tris": 12896,
-          "hash": "dfca9931",
+          "hash": "33e02ce7",
           "box": [
-            -5.11,
+            -5.109,
             0.447,
             -7.46,
-            5.11,
+            5.109,
             19.54,
             5.315
           ]
@@ -507,7 +507,7 @@
           "meshes": 10,
           "verts": 11396,
           "tris": 3920,
-          "hash": "dea5a010",
+          "hash": "53f08a8e",
           "box": [
             -6.3,
             -1.098,
@@ -533,9 +533,9 @@
         },
         "ship-deck-planking": {
           "meshes": 1,
-          "verts": 2076,
-          "tris": 692,
-          "hash": "2e2f9605",
+          "verts": 2148,
+          "tris": 716,
+          "hash": "4924c595",
           "box": [
             -3.92,
             0.21,
@@ -591,7 +591,7 @@
           "meshes": 4,
           "verts": 4912,
           "tris": 1648,
-          "hash": "6be1cb31",
+          "hash": "45132451",
           "box": [
             -2.737,
             1.045,
@@ -688,20 +688,20 @@
       }
     },
     "galleon": {
-      "digest": "7e14fce8",
+      "digest": "3d7200b2",
       "meshCount": 144,
-      "vertTotal": 154508,
+      "vertTotal": 154688,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 8,
           "verts": 608,
           "tris": 384,
-          "hash": "7d0111c5",
+          "hash": "4db7da05",
           "box": [
-            -6.62,
+            -6.434,
             3.743,
             -6.717,
-            6.62,
+            6.434,
             3.977,
             4.517
           ]
@@ -710,12 +710,12 @@
           "meshes": 83,
           "verts": 55265,
           "tris": 19598,
-          "hash": "7171ad0c",
+          "hash": "0baec798",
           "box": [
-            -6.61,
+            -6.424,
             0.447,
             -10.22,
-            6.61,
+            6.424,
             24.48,
             6.626
           ]
@@ -850,7 +850,7 @@
           "meshes": 12,
           "verts": 12568,
           "tris": 4356,
-          "hash": "75060432",
+          "hash": "76ff2362",
           "box": [
             -9,
             -1.315,
@@ -876,9 +876,9 @@
         },
         "ship-deck-planking": {
           "meshes": 1,
-          "verts": 2112,
-          "tris": 704,
-          "hash": "f0dc5fe1",
+          "verts": 2292,
+          "tris": 764,
+          "hash": "c0362ae5",
           "box": [
             -5.6,
             0.21,
@@ -934,7 +934,7 @@
           "meshes": 4,
           "verts": 5536,
           "tris": 1856,
-          "hash": "a0359696",
+          "hash": "9ee27212",
           "box": [
             -4.056,
             1.745,
