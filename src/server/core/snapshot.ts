@@ -1,3 +1,4 @@
+import { packWireIsland } from '../../shared/propWire.js';
 import type {
   GameState,
   HotSnapshotPayload,
@@ -169,6 +170,13 @@ function quantizeIslandForWire(island: Island): Island {
   };
 }
 
+/** The full-statics wire form of a list of already-quantised islands: props as
+ *  packed columns at the wire's own yaw precision. */
+export function packWireIslands(islands: Island[]): Island[] {
+  const yawScale = ANGLE_KEYS.has('yaw') ? 1000 : 100;
+  return islands.map((island) => packWireIsland(island, yawScale));
+}
+
 /** END-01: how many crews it takes before the chart shows the fleet. */
 export const CHART_REVEAL_CREWS = 3;
 
@@ -201,7 +209,9 @@ export function buildWireSnapshot(snap: GameState, includeStaticWorld: boolean):
     // networks are TRANSMITTED data (not regenerated from a seed), so their now
     // much larger multi-vein segment lists quantize to 2 decimals (~1cm) to keep
     // the world payload lean without touching the island's terrain parameters.
-    islands: includeStaticWorld ? snap.islands.map(quantizeIslandForWire) : [],
+    // b4 gate (test-snapshot-size): props ride as packed columns on the full
+    // wire (src/shared/propWire.ts); the client unpacks them bit-identically.
+    islands: includeStaticWorld ? packWireIslands(snap.islands.map(quantizeIslandForWire)) : [],
     // Sea rocks rode at full float precision, and their collider lists are the
     // single densest run of raw doubles in the world payload: 37 stacks x ~5
     // capsules, each carrying "minY":-3.8040000000000003. 28.8 KB of the 250 KB

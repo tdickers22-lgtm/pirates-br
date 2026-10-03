@@ -27,6 +27,7 @@ import * as Lobby from '../src/server/core/LobbyServer.ts';
 import { FULL_SNAPSHOT_TICKS, SERVER_TICK_MS, SNAPSHOT_RATE } from '../src/shared/constants/index.ts';
 import * as Snapshot from '../src/server/core/snapshot.ts';
 import * as StaticWorld from '../src/shared/staticWorld.ts';
+import { unpackWireIslands } from '../src/shared/propWire.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -100,6 +101,17 @@ expect('31Hz hot payload stays tiny (<8KB)', hot.length < SNAPSHOT_BYTES.hot, `$
 expect('10Hz quantized full stays lean (<35KB)', full.length < SNAPSHOT_BYTES.full, `${full.length}B`);
 expect('static-world full stays sane (<250KB, rides ~1/20s + join)', fullWithWorld.length < SNAPSHOT_BYTES.worldFull, `${fullWithWorld.length}B`);
 expect('statics stripped from ordinary fulls', !full.includes('"caves"'), 'islands leaked into a non-world snapshot');
+// The packed prop columns (src/shared/propWire.ts) must unpack to EXACTLY the
+// plain JSON wire: same props, same doubles, same order, every island.
+{
+  const plain = JSON.stringify(match.buildSnapshot(true).islands.map((i) => JSON.parse(JSON.stringify(Snapshot.staticWorldWireOf([i], []).islands[0]))));
+  const unpacked = unpackWireIslands(JSON.parse(fullWithWorld));
+  const packedIslands = JSON.parse(fullWithWorld).islands.filter((i) => i.propsPacked).length;
+  const propCount = unpacked.islands.reduce((n, i) => n + (i.props?.length ?? 0), 0);
+  expect('packed island props unpack bit-identical to the plain wire', StaticWorld.canonicalJson(unpacked.islands) === StaticWorld.canonicalJson(JSON.parse(plain)),
+    `${packedIslands} packed islands, ${propCount} props`);
+  expect('the full wire actually packs props (no island ships them as plain JSON)', packedIslands > 0 && !fullWithWorld.includes('"props":[{'), `${packedIslands} packed`);
+}
 match.stop();
 
 // ------------------------------------------------------------------- egress
@@ -297,7 +309,7 @@ console.log('\nStatic world from the seed (b4.1b):');
   const sync = frameOf(b.frames, 'world_sync');
   expect('a mismatched worldHash gets a world_sync', !!sync, b.frames.map((d) => d.slice(0, 24)).join(' | '));
   expect('world_sync carries the full CURRENT statics', !!sync && sync.payload.islands.length === m.state.islands.length
-    && StaticWorld.canonicalJson({ islands: sync.payload.islands, seaRocks: sync.payload.seaRocks }) === wireNow());
+    && StaticWorld.canonicalJson({ islands: unpackWireIslands(JSON.parse(JSON.stringify(sync.payload))).islands, seaRocks: sync.payload.seaRocks }) === wireNow());
 
   // A client that never learned the seed protocol still gets today's full join.
   const c = recorder('Legacy', undefined);

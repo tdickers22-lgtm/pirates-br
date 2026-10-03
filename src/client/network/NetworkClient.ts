@@ -11,6 +11,7 @@ import type {
   StaticWorldRef, WorldSyncPayload, Island, SeaRock,
 } from '../../shared/types/index.js';
 import { WORLD_VERSION } from '../../shared/staticWorld.js';
+import { unpackWireIslands } from '../../shared/propWire.js';
 import type { StaticWorldResult } from '../world/staticWorld.worker.js';
 import { adoptWorkerTerrainGrid } from '../../shared/terrainGrid.js';
 import { setPresampledCharts, presampledChartStats } from '../world/chartHeights.js';
@@ -701,6 +702,7 @@ export class NetworkClient {
       }
       case 'join': {
         const p = msg.payload as { playerId: string; shipId: string; snapshot: GameState; world?: StaticWorldRef };
+        unpackWireIslands(p.snapshot);
         // Handshake complete — the match channel is open from here.
         this.joined = true;
         // b4.1c: a seed join names the world instead of carrying it; the worker
@@ -711,12 +713,14 @@ export class NetworkClient {
       }
       case 'world_sync': {
         const p = msg.payload as WorldSyncPayload;
+        unpackWireIslands(p);
         if (this.worldGate) this.releaseWorldGate(p.islands, p.seaRocks, 'sync', false, p.reason);
         else console.warn(`[Net] world_sync (${p.reason}) with no seed join pending; ignored`);
         break;
       }
       case 'state_snapshot': {
         const p = msg.payload as GameState;
+        unpackWireIslands(p);
         this.noteServerClock(p.serverTime, receivedAt);
         this.queueSnapshot(p);
         break;

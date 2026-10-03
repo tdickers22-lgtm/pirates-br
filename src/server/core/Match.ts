@@ -23,7 +23,7 @@ import { PhysicsSystem, applyShipRudderSteering, stormSeaState, FOUNDER_WADE_DEP
 import { FOUNDER, founderPlan, pickRepairTargetHole, takeFounderStages } from '../systems/FloodSystem.js';
 import { holeRepairTime } from '../../shared/flooding/floodModel.js';
 import { BAIL_RETURN_DELAY, bailPoseOf, canScoop, throwLanding, type BailPose } from '../../shared/flooding/bail.js';
-import { buildInputAck, buildHotSnapshot, buildWireSnapshot, diffStaticWorld, staticWorldWire, staticWorldWireOf } from './snapshot.js';
+import { buildInputAck, buildHotSnapshot, buildWireSnapshot, diffStaticWorld, staticWorldWire, staticWorldWireOf, packWireIslands } from './snapshot.js';
 import { WORLD_VERSION, generateStaticWorldWith, hashStaticWorld } from '../../shared/staticWorld.js';
 import type { StaticWorldRef, StaticWorldWire, WorldHashReportPayload, WorldSyncPayload } from '../../shared/types/index.js';
 import { WeaponSystem } from '../systems/WeaponSystem.js';
@@ -2327,6 +2327,8 @@ export class Match {
       ...this.staticWorldRef,
       ...staticWorldWireOf(this.state.islands, this.state.seaRocks),
     };
+    // b4 gate: the fallback carries props as packed columns (propWire.ts).
+    payload.islands = packWireIslands(payload.islands);
     console.warn(`[Match ${this.id}] world_sync (${reason}) to ${client.name}`);
     this.send(client.ws, { type: 'world_sync', ts: Date.now(), payload });
   }
