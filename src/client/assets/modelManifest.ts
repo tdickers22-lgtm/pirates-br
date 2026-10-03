@@ -74,6 +74,9 @@ const FAMILY_MEMBERS: Record<Exclude<ModelFamily, 'shared' | 'instruments'>, rea
     'barrel', 'keg', 'chest_closed', 'chest_open', 'crate', 'campfire', 'bedroll', 'lantern_post', 'tent_a', 'tent_b', 'tent_c',
     'bone_pile', 'driftwood_log', 'grave_marker', 'signal_pyre', 'wall_torch', 'bone_pile_cave', 'skull_shrine',
     'cave_painting_panel', 'rope_bridge_short', 'climb_kit',
+    // POI kit (b4.7c2, build_poi_kit.py): placed at island.pois, drawn by Landmarks.buildPois
+    'poi_ruin_temple', 'poi_ruin_wall_a', 'poi_ruin_wall_b', 'poi_ruin_wall_c', 'poi_ruin_arch', 'poi_stilt_outpost',
+    'poi_skeleton_camp', 'poi_overlook_platform', 'poi_small_lighthouse', 'poi_jungle_shrine', 'poi_grotto_landing',
   ],
   'buildings-story': [
     'dock_mid', 'dock_end', 'watchtower', 'shipwreck', 'standing_stones', 'fort', 'tavern', 'stall',

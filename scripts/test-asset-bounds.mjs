@@ -113,6 +113,11 @@ const PINNED_BASE = {
   // Climb kit (b4.7b): five unit nodes instanced by Landmarks.buildRopeLadder, not a prop set on the ground;
   // the base is the stopper knot centred on its rope line.
   climb_kit: -0.08,
+  // POI kit (b4.7c2): foundations sink below the stamped ground (stamp relief <= 0.35 m) so no POI shows
+  // air; the grotto landing's piles stand 2 m down in the water.
+  poi_ruin_temple: -0.884, poi_ruin_wall_a: -0.332, poi_ruin_wall_b: -0.306, poi_ruin_wall_c: -0.306,
+  poi_ruin_arch: -0.431, poi_stilt_outpost: -0.5, poi_skeleton_camp: -0.3, poi_overlook_platform: -0.4,
+  poi_small_lighthouse: -0.421, poi_jungle_shrine: -0.367, poi_grotto_landing: -2.0,
   castaway_camp: -3.4, crow_roost: -0.342, dig_site: -0.541, fort: -5.006, gallows: -0.611,
   kraken_wreck: -2.503, mermaid_shrine: -0.151, mine_head: -3.028, parley_table: -0.217,
   rock_arch: -0.286, rum_still: -3.0, shipwreck: -0.078, signal_pyre: -0.15, skull_totem: -0.387,

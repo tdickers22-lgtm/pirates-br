@@ -26,7 +26,7 @@ import { buildSeaRockMesh } from './island/SeaRockBuilder.js';
 import { buildDock, buildDockClutter, buildTavern } from './island/DockBuilder.js';
 import { applyFoliageSway, buildGroundCover, buildPropInstance, buildServerProps, buildStoryNpcMesh } from './island/PropScatterer.js';
 import { buildBeachDecor, buildCairns, buildInteriorDressing, buildPebbles, buildRockAndDriftDecor, buildTreesAndStrays, buildVinesAndStakes } from './island/DecorScatter.js';
-import { buildBridges, buildLookoutPost, buildPirateCamp, buildRopeLadder, buildRuin, buildSecondaryWreck, buildStoneIdols, buildTrails } from './island/Landmarks.js';
+import { buildBridges, buildPirateCamp, buildPois, buildRopeLadder, buildSecondaryWreck, buildTrails } from './island/Landmarks.js';
 import { buildCliffStrata, buildPeakMist, buildReefRing, buildRockSpires, buildTerraces } from './island/TerrainFeatures.js';
 import { collapseIslandDecor } from './island/StaticBatcher.js';
 import { buildIslandHlod, HLOD_FAR_RES } from './island/IslandImpostor.js';
@@ -348,7 +348,9 @@ export class IslandBuilder {
     // (Procedural stone arch removed — rock_arch is a real Blender GLB
     // placed by the server prop registry now.)
 
-    buildLookoutPost(ctx);
+    // b4.7c2: the primitive lookout post, stone idols and ruin are gone; POIs come from the Blender kit
+    // at the server-placed island.pois (stamped, reachable, trail-linked).
+    buildPois(ctx);
 
     buildPirateCamp(ctx);
 
@@ -367,8 +369,6 @@ export class IslandBuilder {
 
     buildDockClutter(ctx);
 
-    buildStoneIdols(ctx);
-
     buildVinesAndStakes(ctx);
 
     buildRopeLadder(ctx);
@@ -384,8 +384,6 @@ export class IslandBuilder {
     buildBridges(ctx);
 
     buildPeakMist(ctx);
-
-    buildRuin(ctx);
 
     buildTerraces(ctx);
 

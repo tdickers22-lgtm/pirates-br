@@ -4,11 +4,12 @@
  * between the island's stops, the rope bridges between peaks, and the ruin.
  */
 import * as THREE from 'three';
-import { assets } from '../../assets/AssetLibrary.js';
+import { assets, type AssetName } from '../../assets/AssetLibrary.js';
 import { CLIMB_STANDOFF_M, climbLength, climbPointAt, islandClimbs } from '../../../shared/interactions.js';
 import { getBridgeSpanY, getIslandSurfaceY } from '../../../shared/utils/index.js';
 import { MAX_METALNESS_NO_ENV, MIN_ALBEDO_VALUE } from '../../assets/materialAudit.js';
 import type { IslandBuildCtx } from './context.js';
+import { attachInstanceFarLod, attachInstanceLod } from './InstanceLod.js';
 import { getMeshGround, snapToDrawnGround } from './GroundTruth.js';
 
 /**
@@ -61,102 +62,6 @@ function litPropMaterial(params: {
 function drawnGroundAt(ctx: IslandBuildCtx, localX: number, localZ: number): number {
   const y = getMeshGround(ctx.island)?.heightAt(localX, localZ);
   return y ?? getIslandSurfaceY(ctx.island, localX + ctx.island.position.x, localZ + ctx.island.position.z);
-}
-
-/** Lookout post — wooden tower on or near a high point. */
-export function buildLookoutPost(ctx: IslandBuildCtx) {
-  const { island, group, r, rng, lowDetail, surfacePoint, isSolidDecorPoint, islandSeed, SURFACE_ABOVE_WATER } = ctx;
-  if (!lowDetail && r > 40) {
-    const lookout = new THREE.Group();
-    // A lookout platform IS elevated by design; its LEGS are not, so the whole
-    // piece is claimed by the grounding audit and the legs below must reach.
-    lookout.name = 'decor-lookout';
-    const angle = island.profile.primaryHillAngle + (rng(islandSeed * 83) - 0.5) * 0.6;
-    const distRatio = 0.18 + rng(islandSeed * 89) * 0.18;
-    const base = surfacePoint(distRatio, angle, 0);
-    lookout.position.set(base.x, base.y, base.z);
-    const towerYaw = rng(islandSeed * 97) * Math.PI * 2;
-    lookout.rotation.y = towerYaw;
-    const towerMat = new THREE.MeshStandardMaterial({ color: 0x4a3018, roughness: 1 });
-    const beamMat = new THREE.MeshStandardMaterial({ color: 0x2d1d0e, roughness: 1 });
-    const towerH = 4.2 + rng(islandSeed * 101) * 1.6;
-    // Find the highest leg base so we know how to extend the others
-    const legOffset = 0.7;
-    const legPositions: { sx: number; sz: number; surfaceY: number }[] = [];
-    const cosY = Math.cos(towerYaw);
-    const sinY = Math.sin(towerYaw);
-    for (const sx of [-1, 1] as const) {
-      for (const sz of [-1, 1] as const) {
-        // Local (sx*0.7, sz*0.7) in lookout space → island-local position
-        const lx = base.x + (sx * legOffset * cosY + sz * legOffset * sinY);
-        const lz = base.z + (-sx * legOffset * sinY + sz * legOffset * cosY);
-        // …and each foot lands on the DRAWN hillside, a fingerbreadth into it.
-        legPositions.push({ sx, sz, surfaceY: drawnGroundAt(ctx, lx, lz) - 0.12 });
-      }
-    }
-    const minSurface = Math.min(...legPositions.map((p) => p.surfaceY));
-    const platformY = Math.max(...legPositions.map((p) => p.surfaceY)) + towerH;
-    // Anchor lookout group at the lowest leg base so all positions are >= 0 in local
-    lookout.position.y = minSurface;
-    // Legs extend from each ground point up to the platform
-    for (const { sx, sz, surfaceY } of legPositions) {
-      const localBaseY = surfaceY - minSurface;
-      const localTopY = platformY - minSurface;
-      const legH = localTopY - localBaseY;
-      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.18, legH, 0.18), towerMat);
-      leg.position.set(sx * legOffset, localBaseY + legH * 0.5, sz * legOffset);
-      leg.castShadow = true;
-      lookout.add(leg);
-    }
-    const platformLocalY = platformY - minSurface;
-    // Cross braces
-    for (const sz of [-1, 1] as const) {
-      const brace = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.1, 0.1), beamMat);
-      brace.position.set(0, platformLocalY * 0.5, sz * 0.7);
-      brace.rotation.z = sz * 0.6;
-      lookout.add(brace);
-    }
-    // Platform
-    const deck = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.16, 2.0), towerMat);
-    deck.position.y = platformLocalY;
-    deck.castShadow = true;
-    deck.receiveShadow = true;
-    lookout.add(deck);
-    // Railings
-    for (const sx of [-1, 1] as const) {
-      const rail = new THREE.Mesh(new THREE.BoxGeometry(0.08, 1.1, 2.0), beamMat);
-      rail.position.set(sx * 0.94, platformLocalY + 0.55, 0);
-      lookout.add(rail);
-    }
-    for (const sz of [-1, 1] as const) {
-      const rail = new THREE.Mesh(new THREE.BoxGeometry(2.0, 1.1, 0.08), beamMat);
-      rail.position.set(0, platformLocalY + 0.55, sz * 0.94);
-      lookout.add(rail);
-    }
-    // Flag
-    const flagPole = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 2.5, 5), beamMat);
-    flagPole.position.set(0.6, platformLocalY + 1.25, 0.6);
-    lookout.add(flagPole);
-    const flag = new THREE.Mesh(
-      new THREE.PlaneGeometry(1.0, 0.5),
-      new THREE.MeshStandardMaterial({ color: 0x6e1313, roughness: 0.95, side: THREE.DoubleSide }),
-    );
-    flag.position.set(1.1, platformLocalY + 2.1, 0.6);
-    lookout.add(flag);
-    // Ladder up the front (anchored at the front-corner leg's base)
-    const frontLeg = legPositions.find((p) => p.sz === 1) ?? legPositions[0];
-    const ladderBase = frontLeg.surfaceY - minSurface;
-    const ladderTop = platformLocalY;
-    const rungCount = Math.max(6, Math.floor((ladderTop - ladderBase) / 0.45));
-    for (let rung = 0; rung < rungCount; rung++) {
-      const ry = ladderBase + 0.2 + rung * (ladderTop - ladderBase - 0.4) / Math.max(1, rungCount - 1);
-      const r2 = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.05, 0.06), towerMat);
-      r2.position.set(0, ry, 0.92);
-      lookout.add(r2);
-    }
-    void towerH;
-    if (isSolidDecorPoint(base, SURFACE_ABOVE_WATER, -0.2)) group.add(lookout);
-  }
 }
 
 /** Pirate camp — fire pit, bedrolls, totem, hung skull. */
@@ -305,57 +210,6 @@ export function buildPirateCamp(ctx: IslandBuildCtx) {
       camp.add(stick);
     }
     if (isSolidDecorPoint(base, SURFACE_ABOVE_WATER, -0.2)) group.add(camp);
-  }
-}
-
-/** Stone idol cluster — three carved tiki-style faces. */
-export function buildStoneIdols(ctx: IslandBuildCtx) {
-  const { island, group, r, rng, lowDetail, surfacePoint, isSolidDecorPoint, islandSeed, SURFACE_ABOVE_WATER } = ctx;
-  if (!lowDetail && r > 50) {
-    const idolMat = new THREE.MeshStandardMaterial({ color: 0x4a4338, roughness: 1, flatShading: true });
-    const idolEyeMat = new THREE.MeshStandardMaterial({ color: 0x101010, roughness: 1, emissive: 0x6b1a06, emissiveIntensity: 0.3 });
-    const idolAngle = island.profile.tertiaryHillAngle + (rng(islandSeed * 311) - 0.5) * 0.6;
-    const cluster = new THREE.Group();
-    cluster.name = 'decor-idols';
-    const clusterCenter = surfacePoint(0.34 + rng(islandSeed * 313) * 0.18, idolAngle, 0);
-    snapToDrawnGround(getMeshGround(island), clusterCenter);
-    cluster.position.copy(clusterCenter);
-    cluster.rotation.y = idolAngle + Math.PI;
-    for (let i = 0; i < 3; i++) {
-      const ix = (i - 1) * 1.4;
-      const iz = (i - 1) * 0.3 + (rng(i * 317 + islandSeed) - 0.5) * 0.4;
-      const groundY = drawnGroundAt(ctx, clusterCenter.x + ix, clusterCenter.z + iz) - clusterCenter.y - 0.1;
-      const idolH = 1.8 + rng(i * 319 + islandSeed) * 0.8;
-      // Body block
-      const body = new THREE.Mesh(new THREE.BoxGeometry(0.7, idolH, 0.6), idolMat);
-      body.position.set(ix, groundY + idolH * 0.5, iz);
-      body.rotation.y = (rng(i * 321 + islandSeed) - 0.5) * 0.3;
-      body.castShadow = true;
-      body.receiveShadow = true;
-      cluster.add(body);
-      // Head
-      const head = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.55, 0.55), idolMat);
-      head.position.set(ix, groundY + idolH + 0.27, iz);
-      head.rotation.y = body.rotation.y;
-      cluster.add(head);
-      // Brow
-      const brow = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.12, 0.16), idolMat);
-      brow.position.set(ix, groundY + idolH + 0.35, iz + 0.22);
-      brow.rotation.y = body.rotation.y;
-      cluster.add(brow);
-      // Eyes
-      for (const sx of [-1, 1] as const) {
-        const eye = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.05), idolEyeMat);
-        eye.position.set(ix + sx * 0.14, groundY + idolH + 0.25, iz + 0.3);
-        eye.rotation.y = body.rotation.y;
-        cluster.add(eye);
-      }
-      // Wide mouth
-      const mouth = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.08, 0.04), idolEyeMat);
-      mouth.position.set(ix, groundY + idolH + 0.05, iz + 0.3);
-      cluster.add(mouth);
-    }
-    if (isSolidDecorPoint(clusterCenter, SURFACE_ABOVE_WATER, -0.2)) group.add(cluster);
   }
 }
 
@@ -836,43 +690,62 @@ export function buildBridges(ctx: IslandBuildCtx) {
   }
 }
 
-/** A toppled shrine on the high shoulder — three pillars, a lintel and a bowl. */
-export function buildRuin(ctx: IslandBuildCtx) {
-  const { island, group, r, rng, lowDetail, surfacePoint, isSolidDecorPoint, islandSeed, SURFACE_ABOVE_WATER, shrineMat } = ctx;
-  if (!lowDetail && r > 48) {
-    const ruin = new THREE.Group();
-    ruin.name = 'decor-ruin';
-    const ruinAngle = island.profile.primaryHillAngle + rng(islandSeed * 17) * 0.8;
-    const ruinPos = surfacePoint(0.18 + rng(islandSeed * 23) * 0.18, ruinAngle, 0.02);
-    // Shrine stones stand on the shoulder the player walks, not on the field
-    // the shoulder was sampled from — the pillars stood 4-5m proud of it.
-    snapToDrawnGround(getMeshGround(island), ruinPos, -0.14);
-    ruin.position.copy(ruinPos);
-    ruin.rotation.y = rng(islandSeed * 31) * Math.PI * 2;
+/** b4.7c2: GLB key of a placed POI (server placement/pois.ts; ruin walls carry variant a/b/c). */
+export function poiAssetKey(kind: string, variant: number): string {
+  return kind === 'ruin_wall' ? `poi_ruin_wall_${'abc'[variant] ?? 'a'}` : `poi_${kind}`;
+}
 
-    for (let pillar = 0; pillar < 3; pillar++) {
-      const angle = (pillar / 3) * Math.PI * 2;
-      const height = 1.0 + rng(pillar * 347) * 1.2;
-      const stone = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.22, height, 7), shrineMat);
-      stone.position.set(Math.cos(angle) * 0.9, height * 0.5, Math.sin(angle) * 0.7);
-      stone.rotation.z = (rng(pillar * 349) - 0.5) * 0.18;
-      stone.castShadow = true;
-      ruin.add(stone);
-    }
-
-    const lintel = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.24, 0.34), shrineMat);
-    lintel.position.set(0, 1.62, -0.12);
-    lintel.rotation.z = (rng(islandSeed * 37) - 0.5) * 0.12;
-    lintel.castShadow = true;
-    ruin.add(lintel);
-
-    const bowl = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.28, 0.34, 0.16, 8),
-      new THREE.MeshStandardMaterial({ color: 0x27231d, roughness: 0.9, emissive: 0x3a1e08, emissiveIntensity: 0.28 }),
-    );
-    bowl.position.set(0.18, 0.12, 0.34);
-    ruin.add(bowl);
-
-    if (isSolidDecorPoint(ruinPos, SURFACE_ABOVE_WATER, -0.2)) group.add(ruin);
+/**
+ * b4.7c2 POIs (islands-04): every island.pois entry drawn from the Blender POI kit (build_poi_kit.py),
+ * one InstancedMesh per key at the placed (x, y, z, yaw): world coordinates brought into the island
+ * group, local +Z toward the trail link / the sea. Near = LOD0 (LOD1 on the low tier), InstanceLod's
+ * prop ramp + the `<key>_far` node of `<key>_lods.glb`. Replaces the primitive ruin, lookout post and
+ * stone idols. Returns the number of POIs drawn.
+ */
+export function buildPois(ctx: IslandBuildCtx): number {
+  const pois = (ctx.island as { pois?: ReadonlyArray<{ kind: string; variant: number; x: number; y: number; z: number; yaw: number }> }).pois ?? [];
+  if (pois.length === 0) return 0;
+  const { group, lowDetail } = ctx;
+  group.updateMatrix();
+  const toLocal = group.matrix.clone().invert();
+  const byKey = new Map<string, typeof pois[number][]>();
+  for (const p of pois) {
+    const key = poiAssetKey(p.kind, p.variant);
+    const list = byKey.get(key) ?? [];
+    list.push(p);
+    byKey.set(key, list);
   }
+  const q = new THREE.Quaternion();
+  const pos = new THREE.Vector3();
+  const one = new THREE.Vector3(1, 1, 1);
+  const yAxis = new THREE.Vector3(0, 1, 0);
+  const m = new THREE.Matrix4();
+  let drawn = 0;
+  for (const [key, list] of byKey) {
+    const lods = `${key}_lods` as AssetName;
+    const near = (lowDetail ? assets.mergedNodeGeometry(lods, `${key}_LOD1`) : null) ?? assets.mergedGeometry(key as AssetName);
+    if (!near) {
+      console.warn(`[pois] ${key}.glb not loaded: ${list.length} POI(s) on ${ctx.island.id} have no draw`);
+      continue;
+    }
+    const inst = new THREE.InstancedMesh(near.geometry, near.material, list.length);
+    list.forEach((p, i) => {
+      q.setFromAxisAngle(yAxis, p.yaw);
+      m.compose(pos.set(p.x, p.y, p.z), q, one).premultiply(toLocal);
+      inst.setMatrixAt(i, m);
+    });
+    inst.instanceMatrix.needsUpdate = true;
+    inst.computeBoundingSphere();
+    inst.name = `poi-${key}`;
+    inst.castShadow = !lowDetail;
+    inst.receiveShadow = true;
+    if (!near.geometry.boundingBox) near.geometry.computeBoundingBox();
+    const bb = near.geometry.boundingBox;
+    attachInstanceLod(inst, list.map(() => 1), bb ? bb.max.y - bb.min.y : 0);
+    const far = assets.mergedNodeGeometry(lods, `${key}_far`);
+    if (far) attachInstanceFarLod(inst, { geometry: near.geometry, material: near.material }, far);
+    group.add(inst);
+    drawn += list.length;
+  }
+  return drawn;
 }

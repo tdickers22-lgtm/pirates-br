@@ -79,6 +79,17 @@ export const TIERS = {
   // climb route; the file band is the five together. Palette Wood_Mid + Rope (no maps) and no LOD chain: the
   // routes are built per island and the low-detail proxy draws a 4-sided stand-in from the same matrices.
   'climb-kit': { family: 'props-poi', band: [300, 600], tex: null, lods: null, keys: ['climb_kit'] },
+  // POI kit (b4.7c2, build_poi_kit.py, PLAN section 6 row 19): one GLB per placed kind/variant, drawn by
+  // Landmarks.buildPois at island.pois. Chain 40% / 12% / 3%. tex: null like the climb kit: palette stone /
+  // plank / canvas, the trim-sheet pass is the open half of row 19 (lane report handoff).
+  'poi-temple': { family: 'props-poi', band: [18000, 30000], tex: null, lods: CHAIN(0.40, 0.12, 0.03), keys: ['poi_ruin_temple'] },
+  'poi-walls': { family: 'props-poi', band: [3000, 6000], tex: null, lods: CHAIN(0.40, 0.12, 0.03),
+    keys: ['poi_ruin_wall_a', 'poi_ruin_wall_b', 'poi_ruin_wall_c', 'poi_ruin_arch'] },
+  'poi-huts': { family: 'props-poi', band: [9000, 18000], tex: null, lods: CHAIN(0.40, 0.12, 0.03),
+    keys: ['poi_stilt_outpost', 'poi_skeleton_camp'] },
+  'poi-small': { family: 'props-poi', band: [4000, 10000], tex: null, lods: CHAIN(0.40, 0.12, 0.03),
+    keys: ['poi_overlook_platform', 'poi_jungle_shrine', 'poi_grotto_landing'] },
+  'poi-lighthouse': { family: 'props-poi', band: [16000, 24000], tex: null, lods: CHAIN(0.40, 0.12, 0.03), keys: ['poi_small_lighthouse'] },
   // Flora: cross-card far (2-4 cards; a double-sided card may be modelled as 4 tris, so <= 16).
   palms: { family: 'flora-canopy', band: [10000, 16000], tex: ['base', 'normal'], foliage: true,
     lods: { need: ['LOD1', 'LOD2', 'far'], LOD1: { r: 0.40 }, LOD2: { r: 0.12 }, far: { max: 16 } },
