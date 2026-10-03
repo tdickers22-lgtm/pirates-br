@@ -16,7 +16,7 @@
  * stamp are cleared (their ground moves); any other prop near a site rejects it.
  */
 import type { Island, IslandProp } from '../../../shared/types/index.js';
-import { getIslandSurfaceY, mulberry32 } from '../../../shared/utils/index.js';
+import { getIslandSurfaceY, getIslandCays, mulberry32 } from '../../../shared/utils/index.js';
 import { getLandformLadders } from '../../../shared/landforms.js';
 import { WALK_SLOPE_MAX } from '../../../shared/interactions.js';
 import { getIslandKitPieces, getKitColliders } from '../../../shared/hullCollide.js';
@@ -192,6 +192,9 @@ class PoiPlacer {
     for (const gy of isl.geysers ?? []) if (near(gy, gy.radius + R + 4)) return null;
     for (const b of isl.bridges ?? []) if (near({ x: b.ax, z: b.az }, R + 6) || near({ x: b.bx, z: b.bz }, R + 6)) return null;
     for (const l of getLandformLadders(isl)) if (near({ x: l.x + isl.position.x, z: l.z + isl.position.z }, R + 6)) return null;
+    // Archipelago cays keep their dry crown (0.9-1.4 m over the calm crest): a stamp flattens to the site
+    // mean, which cut a cay to 0.84 m under the Dead Man Shoals lighthouse (b4 gate, test-island-relief Part C).
+    for (const c of getIslandCays(isl)) if (near({ x: c.x + isl.position.x, z: c.z + isl.position.z }, R + Math.max(c.length, c.width) + 1)) return null;
     for (const p of isl.props ?? []) if (!REMOVABLE.test(p.type) && near(p, R + 4)) return null;
     // Cliff-kit pieces stand on the unstamped ground: the stamp never reaches under one.
     for (const k of getIslandKitPieces(isl)) if (near(k, (getKitColliders(k.key)?.radiusXZ ?? 4) * (k.scale ?? 1) + R + 1)) return null;
