@@ -16,9 +16,14 @@ from mathutils import Vector, Matrix
 HERE = os.path.dirname(os.path.abspath(__file__))
 exec(open(os.path.join(HERE, '_helpers.py')).read())
 exec(open(os.path.join(HERE, '_ao.py')).read())
+exec(open(os.path.join(HERE, '_detail.py')).read())
+import sys
+sys.path.insert(0, HERE)
+import _trim as TR
 
 RENDER_DIR = os.environ.get("PBR_RENDER_DIR", "")
 EXPORT_DIR = os.environ.get("PBR_EXPORT_DIR", EXPORT_DIR)  # scratch override for test rounds
+exec(open(os.path.join(HERE, "_trimkit.py")).read())      # trim-sheet kit (watchtower v2, b5.1a3)
 
 clear_default_scene()
 
@@ -102,6 +107,11 @@ def ship_and_export(coll, name, obj):
 # ═════════════════════════════════════════════════════════════
 def build_watchtower(name="watchtower"):
     coll = asset_collection(name)
+    # v2 density knobs (b5.1a3): rounds x2, drum courses, rubble subdivision
+    WT_K = int(os.environ.get("B51A_WT_K", "2"))
+    WT_SEGS = 8 * WT_K
+    WT_CUTS = int(os.environ.get("B51A_WT_CUTS", "5"))
+    WT_ICO = int(os.environ.get("B51A_WT_ICO", "3"))
     rng = random.Random(42)
     stone, dark = mat("Rock_Grey"), mat("Rock_Dark")
     wd, wb = mat("Wood_Dark"), mat("Wood_Bleached")
@@ -110,8 +120,8 @@ def build_watchtower(name="watchtower"):
     BASE_H = 3.4
 
     # ── stone base drum ──
-    bm = bm_cylinder(2.02, 1.70, BASE_H, segs=16)
-    bmesh.ops.subdivide_edges(bm, edges=bm.edges[:], cuts=2, use_grid_fill=True)
+    bm = bm_cylinder(2.02, 1.70, BASE_H, segs=WT_SEGS * 2)
+    bmesh.ops.subdivide_edges(bm, edges=bm.edges[:], cuts=WT_CUTS, use_grid_fill=True)
     bmesh.ops.transform(bm, matrix=Matrix.Translation((0, 0, BASE_H / 2)), verts=bm.verts)
     drum = obj_from_bmesh(f"{name}_drum", bm, coll, stone)
     displace_noise(drum, strength=0.10, scale=0.9, seed=42)
@@ -225,7 +235,7 @@ def build_watchtower(name="watchtower"):
     corners = [(1, 1), (-1, 1), (-1, -1), (1, -1)]
     for i, (sx, sy) in enumerate(corners):
         o = beam(coll, f"{name}_post{i}", post_at(sx, sy, z1), post_at(sx, sy, z2 + 0.15),
-                 0.14, 0.11, wd if i % 2 else wb, segs=8)
+                 0.14, 0.11, wd if i % 2 else wb, segs=8*WT_K)
         parts.append(o); bev_fine.append(o)
     # ring beams
     for zz in (5.5, 7.85):
@@ -244,14 +254,14 @@ def build_watchtower(name="watchtower"):
                     # SNAPPED brace: stub from the lower joint + fallen half
                     pa, pb = post_at(*p, za), post_at(*q, zb)
                     stub_end = pa.lerp(pb, 0.42)
-                    o = beam(coll, f"{name}_snap_stub", pa, stub_end, 0.07, 0.02, wb, segs=6)
+                    o = beam(coll, f"{name}_snap_stub", pa, stub_end, 0.07, 0.02, wb, segs=6*WT_K)
                     parts.append(o)
                     o = beam(coll, f"{name}_snap_fall", (2.35, 1.15, 0.06),
-                             (1.35, 0.72, 2.9), 0.065, 0.025, wb, segs=6)
+                             (1.35, 0.72, 2.9), 0.065, 0.025, wb, segs=6*WT_K)
                     parts.append(o)
                     continue
                 o = beam(coll, f"{name}_brace{li}{i}{d}", post_at(*p, za), post_at(*q, zb),
-                         0.07, 0.07, wb if (i + d) % 2 else wd, segs=6)
+                         0.07, 0.07, wb if (i + d) % 2 else wd, segs=6*WT_K)
                 parts.append(o)
 
     # ── ladder (front face) ──
@@ -259,12 +269,12 @@ def build_watchtower(name="watchtower"):
     ldir = (lt - lb).normalized()
     side = Vector((1, 0, 0)) * 0.27
     for s in (-1, 1):
-        o = beam(coll, f"{name}_lrail{s}", lb + side * s, lt + side * s, 0.05, 0.045, wd, segs=6)
+        o = beam(coll, f"{name}_lrail{s}", lb + side * s, lt + side * s, 0.05, 0.045, wd, segs=6*WT_K)
         parts.append(o)
     nr = 13
     for i in range(1, nr + 1):
         p = lb.lerp(lt, i / (nr + 1))
-        bm = bm_cylinder(0.034, 0.034, 0.62, segs=6)
+        bm = bm_cylinder(0.034, 0.034, 0.62, segs=6*WT_K)
         bmesh.ops.transform(bm, matrix=Matrix.Translation(p) @
                             Matrix.Rotation(math.pi / 2, 4, 'Y'), verts=bm.verts)
         parts.append(obj_from_bmesh(f"{name}_rung{i}", bm, coll, wb, smooth=True))
@@ -299,10 +309,10 @@ def build_watchtower(name="watchtower"):
         a, b = rp[i] + Vector((0, 0, 0.92)), rp[(i + 1) % 4] + Vector((0, 0, 0.92))
         if i == 3:  # broken side: two sagging stubs
             o = beam(coll, f"{name}_railb0", a, a.lerp(b, 0.3) - Vector((0, 0, 0.35)),
-                     0.045, 0.02, wb, segs=5)
+                     0.045, 0.02, wb, segs=5*WT_K)
             parts.append(o)
             o = beam(coll, f"{name}_railb1", b, b.lerp(a, 0.22) - Vector((0, 0, 0.28)),
-                     0.045, 0.02, wb, segs=5)
+                     0.045, 0.02, wb, segs=5*WT_K)
             parts.append(o)
             continue
         o = box_beam(coll, f"{name}_rail{i}", a, b, 0.07, 0.1, wb)
@@ -315,16 +325,16 @@ def build_watchtower(name="watchtower"):
     for i, (sx, sy) in enumerate(corners):
         p = Vector((sx * 0.88 + LEAN, sy * 0.88, deck_z + 0.05))
         q = Vector((sx * 0.74 + LEAN + 0.08, sy * 0.74, 10.15))
-        o = beam(coll, f"{name}_roofpost{i}", p, q, 0.075, 0.06, wd, segs=6)
+        o = beam(coll, f"{name}_roofpost{i}", p, q, 0.075, 0.06, wd, segs=6*WT_K)
         parts.append(o)
-    bm = bm_cylinder(1.85, 0.05, 1.45, segs=4)
+    bm = bm_cylinder(1.85, 0.05, 1.45, segs=4*WT_K)
     bmesh.ops.transform(bm, matrix=Matrix.Translation((LEAN + 0.08, 0, 10.72)) @
                         Matrix.Rotation(math.pi / 4, 4, 'Z'), verts=bm.verts)
     roof = obj_from_bmesh(f"{name}_roof", bm, coll, wd)
     parts.append(roof); bev_fine.append(roof)
     # snapped old flag post leaning off one corner
     o = beam(coll, f"{name}_flagsnag", (-1.35 + LEAN, -1.5, deck_z),
-             (-1.95 + LEAN, -1.85, 10.4), 0.055, 0.02, wd, segs=6)
+             (-1.95 + LEAN, -1.85, 10.4), 0.055, 0.02, wd, segs=6*WT_K)
     parts.append(o)
 
     # ── brazier with ember (on the platform) ──
@@ -332,9 +342,9 @@ def build_watchtower(name="watchtower"):
     for i in range(3):
         a = 2 * math.pi * i / 3 + 0.4
         o = beam(coll, f"{name}_bleg{i}", bz + Vector((0.26 * math.cos(a), 0.26 * math.sin(a), 0)),
-                 bz + Vector((0, 0, 0.42)), 0.03, 0.025, mat("Char_Black"), segs=5)
+                 bz + Vector((0, 0, 0.42)), 0.03, 0.025, mat("Char_Black"), segs=5*WT_K)
         parts.append(o)
-    bm = bm_cylinder(0.34, 0.22, 0.28, segs=10)
+    bm = bm_cylinder(0.34, 0.22, 0.28, segs=10*WT_K)
     bmesh.ops.transform(bm, matrix=Matrix.Translation(bz + Vector((0, 0, 0.52))), verts=bm.verts)
     o = obj_from_bmesh(f"{name}_bowl", bm, coll, mat("Char_Black"), smooth=True)
     parts.append(o); bev_fine.append(o)
@@ -351,7 +361,7 @@ def build_watchtower(name="watchtower"):
     for k in range(9):
         a = rng.uniform(-1.1, 1.1)
         d = rng.uniform(2.2, 3.45)
-        bm = bm_icosphere(rng.uniform(0.28, 0.62), 2)
+        bm = bm_icosphere(rng.uniform(0.28, 0.62), WT_ICO)
         bmesh.ops.scale(bm, vec=Vector((1.35, 1.0, 0.55)), verts=bm.verts)
         bmesh.ops.transform(bm, matrix=Matrix.Translation(
             (d * math.cos(a), d * math.sin(a), 0.12)) @
@@ -361,10 +371,16 @@ def build_watchtower(name="watchtower"):
         apply_modifiers(o)
         parts.append(o)
 
-    finish(bev, width=0.035)
-    finish(bev_fine, width=0.018)
+    finish(bev, width=0.035, segments=2)
+    finish(bev_fine, width=0.018, segments=2)
+    # b5.1a3: trim sheets (stone ashlar/rubble, wood_iron plank_dark/plank_worn/iron_plate) instead of
+    # vertex colours; LOD chain from authored proxies (build_lods reuses lod_proxies/watchtower_*.glb).
+    parts = trimify(parts, float(os.environ.get("B51A_L_WATCHTOWER", "0.6")))
     obj = join(parts, name)
-    ship_and_export(coll, name, obj)
+    ship_building([obj], name, four=True)
+    for o in coll.objects:
+        o.hide_render = True
+    print(f"built {name}")
     return coll, obj
 
 

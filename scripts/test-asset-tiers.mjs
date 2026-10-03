@@ -285,7 +285,6 @@ export const RATCHET = [
   // buildings
   'dock_mid:lods', 'dock_mid:textures',
   'dock_end:lods', 'dock_end:textures',
-  'watchtower:band', 'watchtower:lods', 'watchtower:textures', 'watchtower:verts',
   'shipwreck:band', 'shipwreck:lods', 'shipwreck:textures', 'shipwreck:verts',
   'standing_stones:band', 'standing_stones:lods', 'standing_stones:textures', 'standing_stones:verts',
   'fort:band', 'fort:lods', 'fort:textures',
