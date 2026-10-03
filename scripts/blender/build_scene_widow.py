@@ -25,6 +25,22 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 exec(open(os.path.join(HERE, "_helpers.py")).read())
 exec(open(os.path.join(HERE, "_ao.py")).read())
 exec(open(os.path.join(HERE, "_detail.py")).read())
+import sys
+sys.path.insert(0, HERE)
+import _trim as TR
+exec(open(os.path.join(HERE, "_trimkit.py")).read())     # b5.1d: wood/iron/rope/stone/char on the trim sheets
+exec(open(os.path.join(HERE, "_story_pbr.py")).read())   # original procedural PBR for the non-trim materials
+STORY_SHEETS = os.path.join(HERE, "..", "..", "docs", "asset-sheets", "story")
+STORY_LEVELS = (("LOD1", 0.36), ("LOD2", 0.10), ("far", 0.035, 3600))
+STORY_PBR = {
+    # the widow statue: salt-bleached limestone, lichen in the folds (tight mottle, no masonry joints)
+    "Stone_Statue": dict(base=(0.62, 0.58, 0.50), belly=(0.48, 0.52, 0.42), rough=0.88, ring_freq=2, seed=111, nrm_s=3.0,
+                         _sub=0),
+    "Slate": dict(base=(0.24, 0.25, 0.28), belly=(0.32, 0.33, 0.36), rough=0.80, ring_freq=9, seed=112, nrm_s=4.0, _sub=0),
+    "Verdigris": dict(base=(0.30, 0.56, 0.48), belly=(0.52, 0.42, 0.26), rough=0.62, ring_freq=2, seed=84, nrm_s=2.0),
+    "Rust": dict(base=(0.40, 0.20, 0.10), belly=(0.55, 0.30, 0.14), rough=0.85, ring_freq=2, seed=61, nrm_s=4.0),
+}
+TRIM_OF.update({"Stone_Fort": ("stone", "ashlar"), "Stone_Dark": ("stone", "rubble")})
 
 RENDER_DIR = os.environ.get("BR_RENDER_DIR", "")
 EXPORT_DIR = os.environ.get("BR_EXPORT_DIR", EXPORT_DIR)
@@ -507,30 +523,15 @@ def build():
         parts.append(obj_from_bmesh(f"hip{i}", hp, coll, mat("Rust"),
                                     smooth=True))
 
-    SPEC = tint_spec(moss=0.55)
-    SPEC['Stone_Fort'] = dict(
-        SPEC['Stone_Fort'], tone=0.26,
-        hue=((1.34, 1.10, 0.80), (0.76, 0.84, 0.96)), scale=1.3,
-        mottle=0.15, mscale=0.26,
-        patch=dict(col=(0.34, 0.80, 0.24), amt=0.80, scale=0.80, thresh=0.56,
-                   width=0.16, up=0.45),
-        low=dict(z=0.42, amt=0.38, col=(0.42, 0.48, 0.36)))
-    SPEC['Stone_Dark'] = dict(
-        SPEC['Stone_Dark'], tone=0.22,
-        hue=((1.22, 1.10, 0.92), (0.80, 0.84, 0.92)), scale=1.1)
-    SPEC['Slate'] = dict(tone=0.16, mottle=0.12, mscale=0.18,
-                         hue=((1.20, 1.14, 1.02), (0.80, 0.84, 0.94)), scale=0.6)
-    # the statue takes salt-bleach on the seaward face and lichen in the folds,
-    # on a tighter noise scale than the wall so she never blends into it
-    SPEC['Stone_Statue'] = dict(
-        tone=0.10,
-        hue=((1.26, 1.16, 1.00), (0.74, 0.78, 0.88)), scale=0.55,
-        mottle=0.14, mscale=0.20,
-        patch=dict(col=(0.88, 0.94, 0.72), amt=0.45, scale=0.42, thresh=0.60,
-                   width=0.14, up=0.55),
-        low=dict(z=0.55, amt=0.40, col=(0.46, 0.52, 0.44)))
-    ship_asset(coll, name, spec=SPEC, ao=dict(samples=24, floor=0.40),
-               render_dir=RENDER_DIR, views=4)
+    # b5.1d: story-tier material pass (trim sheets + original procedural maps; emissive panes exempt),
+    # Catmull-Clark on the procedural parts, LOD0 export + authored proxies + 4-angle sheet.
+    objs = [o for o in coll.objects if o.type == "MESH"]
+    objs = story_pbrify(objs, STORY_PBR, L=float(os.environ.get("B51D_L_WIDOW_MEMORIAL", "0.4")),
+                        sub=int(os.environ.get("B51D_SUB_WIDOW_MEMORIAL", "1")), tile=0.6)
+    print(f"B51D {name} tris: {tri_count(objs)}")
+    if os.environ.get("B51D_COUNT_ONLY"):
+        return None
+    path = ship_building([join(objs, name)], name, sheet_dir=STORY_SHEETS, levels=STORY_LEVELS, four=True)
     print(f"built {name}")
 
 

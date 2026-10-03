@@ -16,6 +16,21 @@ from mathutils import Vector, Matrix
 HERE = os.path.dirname(os.path.abspath(__file__))
 exec(open(os.path.join(HERE, "_helpers.py")).read())
 exec(open(os.path.join(HERE, "_ao.py")).read())
+exec(open(os.path.join(HERE, "_detail.py")).read())   # contact_sheet for ship_building
+import sys
+sys.path.insert(0, HERE)
+import _trim as TR
+exec(open(os.path.join(HERE, "_trimkit.py")).read())     # b5.1d: wood/iron/rope/stone/char on the trim sheets
+exec(open(os.path.join(HERE, "_story_pbr.py")).read())   # original procedural PBR for the non-trim materials
+STORY_SHEETS = os.path.join(HERE, "..", "..", "docs", "asset-sheets", "story")
+STORY_LEVELS = (("LOD1", 0.36), ("LOD2", 0.10), ("far", 0.035, 3600))
+STORY_PBR = {
+    # crater basalt (the rubble strip read as basket weave on the totem's big rock: b5.1c)
+    "Rock_Dark": dict(base=(0.30, 0.29, 0.28), belly=(0.44, 0.36, 0.30), rough=0.88, ring_freq=2, seed=131, nrm_s=4.0,
+                      _tile=2.4, _sub=0),
+    "Obsidian": dict(base=(0.04, 0.04, 0.06), belly=(0.10, 0.10, 0.14), rough=0.18, ring_freq=5, seed=132, nrm_s=1.5,
+                     _sub=0),
+}
 
 RENDER_DIR = os.environ.get("BR_RENDER_DIR", "")
 EXPORT_DIR = os.environ.get("BR_EXPORT_DIR", EXPORT_DIR)
@@ -454,12 +469,15 @@ def build_minehead(name="mine_head"):
         o.select_set(True)
     bpy.context.view_layer.objects.active = parts[0]
     bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
-    join(parts, name)
-    bake_ao(coll)
-    export_collection_vc(coll, f"{name}.glb")
-    verify_glb(os.path.join(EXPORT_DIR, f"{name}.glb"))
-    if RENDER_DIR:
-        render_turntable(coll, name, RENDER_DIR)
+    # b5.1d: story-tier material pass (trim sheets + original procedural maps; emissive panes exempt),
+    # Catmull-Clark on the procedural parts, LOD0 export + authored proxies + 4-angle sheet.
+    objs = [o for o in coll.objects if o.type == "MESH"]
+    objs = story_pbrify(objs, STORY_PBR, L=float(os.environ.get("B51D_L_MINE_HEAD", "0.165")),
+                        sub=int(os.environ.get("B51D_SUB_MINE_HEAD", "1")), tile=0.6)
+    print(f"B51D {name} tris: {tri_count(objs)}")
+    if os.environ.get("B51D_COUNT_ONLY"):
+        return None
+    path = ship_building([join(objs, name)], name, sheet_dir=STORY_SHEETS, levels=STORY_LEVELS, four=True)
     print(f"built {name}")
 
 

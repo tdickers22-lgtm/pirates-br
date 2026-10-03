@@ -15,6 +15,22 @@ from mathutils import Vector, Matrix, Euler
 HERE = os.path.dirname(os.path.abspath(__file__))
 exec(open(os.path.join(HERE, '_helpers.py')).read())
 exec(open(os.path.join(HERE, '_ao.py')).read())
+exec(open(os.path.join(HERE, "_detail.py")).read())   # contact_sheet for ship_building
+import sys
+sys.path.insert(0, HERE)
+import _trim as TR
+exec(open(os.path.join(HERE, "_trimkit.py")).read())     # b5.1d: wood/iron/rope/stone/char on the trim sheets
+exec(open(os.path.join(HERE, "_story_pbr.py")).read())   # original procedural PBR for the non-trim materials
+STORY_SHEETS = os.path.join(HERE, "..", "..", "docs", "asset-sheets", "story")
+STORY_LEVELS = (("LOD1", 0.36), ("LOD2", 0.10), ("far", 0.035, 3600))
+STORY_PBR = {
+    "Dirt": dict(base=(0.62, 0.53, 0.38), belly=(0.48, 0.40, 0.28), rough=0.94, ring_freq=3, seed=151, nrm_s=4.0, _sub=0,
+                 _tile=1.6),
+    "Bone": dict(base=(0.72, 0.68, 0.56), belly=(0.86, 0.83, 0.72), rough=0.72, ring_freq=3, seed=21, nrm_s=3.0),
+    "Gold": dict(base=(0.80, 0.62, 0.24), belly=(0.92, 0.76, 0.36), rough=0.30, ring_freq=1, seed=51, nrm_s=1.0, _sub=0),
+    "Flag_Fin": dict(base=(0.12, 0.26, 0.30), belly=(0.09, 0.19, 0.22), rough=0.92, ring_freq=16, seed=143, nrm_s=1.5,
+                     _sub=0, _tile=1.0),
+}
 
 RENDER_DIR = os.environ.get("PBR_RENDER_DIR", "")
 EXPORT_DIR = os.environ.get("PBR_EXPORT_DIR", EXPORT_DIR)
@@ -36,7 +52,13 @@ def M_of(loc=(0, 0, 0), rot=(0, 0, 0)):
     return Matrix.Translation(loc) @ Euler(rot).to_matrix().to_4x4()
 
 
+# b5.1d: round sections were 4-7 sided; story tier rounds them (B51D_SEG_DIG) and densifies the dug ground
+DIG_SEG = float(os.environ.get("B51D_SEG_DIG", "2"))
+DIG_GROUND = float(os.environ.get("B51D_GROUND_DIG", "1.5"))
+
+
 def tube(coll, name, pts, r1, r2, material, segs=6, smooth=True):
+    segs = int(round(segs * DIG_SEG))
     parts = []
     n = len(pts) - 1
     for i in range(n):
@@ -56,6 +78,7 @@ def tube(coll, name, pts, r1, r2, material, segs=6, smooth=True):
 
 def lathe(coll, name, profile, ns, material, loc=(0, 0, 0), rot=(0, 0, 0),
           smooth=True, cap_bottom=True, cap_top=True):
+    ns = int(round(ns * DIG_SEG))
     bm = bmesh.new()
     rings = []
     for (r, z) in profile:
@@ -78,6 +101,7 @@ def lathe(coll, name, profile, ns, material, loc=(0, 0, 0), rot=(0, 0, 0),
 
 def ground_disc(coll, name, R, hfn, m_main, nr=74, ns=130):
     # hfn passed here must already include the rim feather (gfn below)
+    nr, ns = int(nr * DIG_GROUND), int(ns * DIG_GROUND)
     bm = bmesh.new()
     center = bm.verts.new((0, 0, hfn(0, 0)))
     rings = []
@@ -105,14 +129,17 @@ def finish(objs, width=0.014, segments=1):
 
 
 def ship(coll, name, parts):
-    obj = join(parts, name)
-    bake_ao(coll)
-    path = export_collection_vc(coll, f"{name}.glb")
-    verify_glb(path)
-    if RENDER_DIR:
-        render_turntable(coll, name, RENDER_DIR, views=4)
+    # b5.1d: story-tier material pass (trim sheets + original procedural maps; emissive panes exempt),
+    # Catmull-Clark on the procedural parts, LOD0 export + authored proxies + 4-angle sheet.
+    objs = [o for o in coll.objects if o.type == "MESH"]
+    objs = story_pbrify(objs, STORY_PBR, L=float(os.environ.get("B51D_L_DIG_SITE", "0.15")),
+                        sub=int(os.environ.get("B51D_SUB_DIG_SITE", "1")), tile=0.6)
+    print(f"B51D {name} tris: {tri_count(objs)}")
+    if os.environ.get("B51D_COUNT_ONLY"):
+        return None
+    path = ship_building([join(objs, name)], name, sheet_dir=STORY_SHEETS, levels=STORY_LEVELS, four=True)
     print(f"built {name}")
-    return obj
+    return path
 
 
 # ── ground: 3 flat-bottomed crater pits with raised rims ─────

@@ -17,6 +17,21 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 exec(open(os.path.join(HERE, '_helpers.py')).read())
 exec(open(os.path.join(HERE, '_ao.py')).read())
 exec(open(os.path.join(HERE, '_detail.py')).read())
+import sys
+sys.path.insert(0, HERE)
+import _trim as TR
+exec(open(os.path.join(HERE, "_trimkit.py")).read())     # b5.1d: wood/iron/rope/stone/char on the trim sheets
+exec(open(os.path.join(HERE, "_story_pbr.py")).read())   # original procedural PBR for the non-trim materials
+STORY_SHEETS = os.path.join(HERE, "..", "..", "docs", "asset-sheets", "story")
+STORY_LEVELS = (("LOD1", 0.36), ("LOD2", 0.10), ("far", 0.035, 3600))
+STORY_PBR = {
+    "Sand_Pad": dict(base=(0.66, 0.58, 0.42), belly=(0.80, 0.72, 0.55), rough=0.90, ring_freq=2, seed=33, nrm_s=2.0, _sub=0),
+    "Grave_Dirt": dict(base=(0.36, 0.28, 0.19), belly=(0.46, 0.37, 0.25), rough=0.94, ring_freq=3, seed=121, nrm_s=4.0, _sub=0),
+    "Coconut": dict(base=(0.34, 0.24, 0.12), belly=(0.48, 0.36, 0.20), rough=0.82, ring_freq=12, seed=122, nrm_s=4.0),
+    # weathered beach stone (the ashlar strip reads as bricks on a loose rock)
+    "Rock_Grey": dict(base=(0.46, 0.44, 0.40), belly=(0.56, 0.53, 0.47), rough=0.88, ring_freq=2, seed=123, nrm_s=4.0,
+                      _tile=1.6, _sub=0),
+}
 
 RENDER_DIR = os.environ.get("BR_RENDER_DIR", os.environ.get("PBR_RENDER_DIR", ""))
 EXPORT_DIR = os.environ.get("BR_EXPORT_DIR", os.environ.get("PBR_EXPORT_DIR", EXPORT_DIR))
@@ -497,59 +512,16 @@ def build_gallows(name="gallows"):
     # tone and the pad was a paper disc. Sun-bleach the up-faces of the wood,
     # sink a damp band at the sand line, and give the pad a wind-streak so the
     # ripples read in colour as well as in relief.
-    SPEC = tint_spec(moss=0.0, damp=False, seed=17)
-    SPEC['Sand_Pad'] = dict(
-        tone=0.05, hue=((1.13, 1.07, 0.97), (0.83, 0.85, 0.90)), scale=3.2,
-        mottle=0.11, mscale=0.42,
-        streak=dict(axis='y', freq=4.6, amt=0.085),
-        patch=dict(col=(0.78, 0.72, 0.58), amt=0.35, scale=1.4, thresh=0.62,
-                   width=0.18, up=0.55),
-        # damp/shadowed rim: the pad's outer skirt darkens into the terrain
-        # instead of stamping a hard bright ellipse on the grass (audit)
-        low=dict(z=0.34, amt=0.42, col=(0.58, 0.56, 0.50)),
-    )
-    # graves must NOT read as more sand — they are freshly turned wet earth,
-    # so they sit a full stop darker than the pad they are cut into
-    SPEC['Grave_Dirt'] = dict(
-        tone=0.13, hue=((1.02, 0.92, 0.76), (0.60, 0.62, 0.66)), scale=0.9,
-        mottle=0.20, mscale=0.24,
-        patch=dict(col=(0.58, 0.64, 0.42), amt=0.30, scale=0.7, thresh=0.66,
-                   width=0.14, up=0.8),
-        low=dict(z=0.30, amt=0.30, col=(0.55, 0.50, 0.42)),
-    )
-    for w in ('Wood_Dark', 'Wood_Mid', 'Wood_Light', 'Wood_Bleached'):
-        SPEC[w] = dict(
-            tone=0.19,
-            hue=((1.22, 1.12, 0.96), (0.72, 0.71, 0.70)), scale=1.0,
-            mottle=0.09, mscale=0.15,
-            streak=dict(axis='z', freq=12.0, amt=0.13),
-            # sun bleaches the up-facing grain, sand-blast greys the base
-            patch=dict(col=(1.30, 1.24, 1.10), amt=0.34, scale=1.1, thresh=0.52,
-                       width=0.20, up=0.85),
-            low=dict(z=0.55, amt=0.40, col=(0.42, 0.40, 0.35)),
-        )
-    SPEC['Rope'] = dict(
-        tone=0.15, hue=((1.20, 1.10, 0.90), (0.72, 0.71, 0.68)), scale=0.45,
-        mottle=0.13, mscale=0.09,
-        low=dict(z=1.2, amt=0.22, col=(0.55, 0.52, 0.46)),
-    )
-    SPEC['Metal_Band'] = dict(
-        tone=0.10, mottle=0.12, mscale=0.10,
-        patch=dict(col=RUST_C, amt=0.72, scale=0.35, thresh=0.44, width=0.16,
-                   up=0.35))
-    SPEC['Metal_Iron'] = SPEC['Metal_Band']
-    SPEC['Coconut'] = dict(
-        tone=0.20, hue=((1.24, 1.12, 0.94), (0.70, 0.70, 0.72)), scale=0.55,
-        mottle=0.12, mscale=0.14,
-        patch=dict(col=(0.55, 0.55, 0.50), amt=0.32, scale=0.4, thresh=0.60,
-                   width=0.16, up=0.6))
-    SPEC['Rock_Grey'] = dict(tone=0.18, mottle=0.14, mscale=0.20,
-                             hue=((1.16, 1.10, 1.00), (0.78, 0.80, 0.86)),
-                             scale=0.6)
-
-    info = ship_asset(coll, name, spec=SPEC, ao=dict(samples=24, floor=0.42),
-                      tint_seed=17, render_dir=RENDER_DIR,
-                      angles=(-90, -35, 25, 120), elev=15)
+    # b5.1d: story-tier material pass (trim sheets + original procedural maps; emissive panes exempt),
+    # Catmull-Clark on the procedural parts, LOD0 export + authored proxies + 4-angle sheet.
+    objs = [o for o in coll.objects if o.type == "MESH"]
+    objs = story_pbrify(objs, STORY_PBR, L=float(os.environ.get("B51D_L_GALLOWS", "0.105")),
+                        sub=int(os.environ.get("B51D_SUB_GALLOWS", "1")), tile=0.6)
+    print(f"B51D {name} tris: {tri_count(objs)}")
+    if os.environ.get("B51D_COUNT_ONLY"):
+        return None
+    path = ship_building([join(objs, name)], name, sheet_dir=STORY_SHEETS, levels=STORY_LEVELS, four=True)
+    info = path
     print(f"built {name}")
     return info
 

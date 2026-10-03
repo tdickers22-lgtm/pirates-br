@@ -289,11 +289,6 @@ export const RATCHET = [
   'rum_still:band', 'rum_still:lods', 'rum_still:textures',
   'crow_roost:band', 'crow_roost:lods', 'crow_roost:textures',
   'castaway_camp:band', 'castaway_camp:lods', 'castaway_camp:textures',
-  'dig_site:band', 'dig_site:lods', 'dig_site:textures',
-  'gallows:band', 'gallows:lods', 'gallows:textures',
-  'parley_table:band', 'parley_table:lods', 'parley_table:textures',
-  'mine_head:band', 'mine_head:lods', 'mine_head:textures', 'mine_head:verts',
-  'widow_memorial:band', 'widow_memorial:lods', 'widow_memorial:textures', 'widow_memorial:verts',
   'gibbet_cage:band', 'gibbet_cage:lods', 'gibbet_cage:textures',
   // shark
   'shark:lods', 'shark:textures',
