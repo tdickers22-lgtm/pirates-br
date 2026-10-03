@@ -520,7 +520,9 @@ def build_gallows(name="gallows"):
     print(f"B51D {name} tris: {tri_count(objs)}")
     if os.environ.get("B51D_COUNT_ONLY"):
         return None
-    path = ship_building([join(objs, name)], name, sheet_dir=STORY_SHEETS, levels=STORY_LEVELS, four=True)
+    joined = join(objs, name)
+    story_ship_prep(joined, STORY_PBR)   # b5.1d size pass: one UV layer, [0,1] UVs + texture transform, 256/128 maps
+    path = ship_building([joined], name, sheet_dir=STORY_SHEETS, levels=STORY_LEVELS, four=True)
     info = path
     print(f"built {name}")
     return info

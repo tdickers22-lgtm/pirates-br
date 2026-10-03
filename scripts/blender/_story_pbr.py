@@ -138,3 +138,83 @@ def story_pbrify(parts, procedural, L=1.0, sub=0, tile=1.0):
         return trimify(parts, L)
     finally:
         TRIM_OF.update(saved)
+
+
+def _soften(img, k=0.5):
+    """Blend an image with its 3x3 binomial blur (wrapping: the sheets tile in U, strips carry V pads)."""
+    import numpy as np
+    w, h = img.size
+    a = np.empty(w * h * 4, dtype=np.float32)
+    img.pixels.foreach_get(a)
+    a = a.reshape(h, w, 4)
+    b = a.copy()
+    for ax in (0, 1):
+        b = 0.25 * np.roll(b, 1, ax) + 0.5 * b + 0.25 * np.roll(b, -1, ax)
+    out = (1 - k) * a + k * b
+    out[..., 3] = a[..., 3]
+    img.pixels.foreach_set(out.ravel())
+    img.update()
+
+
+def story_ship_prep(obj, procedural, trim_px=None, proc_px=None):
+    """b5.1d size pass on the JOINED scene object, right before ship_building (story scenes <= 1.2 MB
+    packed). Three cuts, none of them visible at story-scene distances:
+    1. Only the active-render UV layer survives. The join carried a second, unreferenced layer
+       (TEXCOORD_1: 30-230 KB of float UVs per packed scene that no material samples).
+    2. Each textured material's UVs are rebased into [0,1] (integer shift, then divided by the integer
+       span S per axis) and a Mapping node scales them back by S, which the glTF exporter writes as
+       KHR_texture_transform. Box-UV'd procedural parts and long trim runs repeat the maps many times,
+       so their UVs ran far outside [0,1] and pack-models could not quantise them (float TEXCOORD_0 was
+       up to 400 KB per scene). The integer shift is invisible (the maps tile with period 1).
+    3. Trim-family sheets are resampled to trim_px (B51D_TRIM_PX, default 256) and the procedural maps
+       to proc_px (B51D_PROC_PX, default 128): 3 maps per family per GLB were 1-1.7 MB of KTX2."""
+    trim_px = trim_px or int(os.environ.get("B51D_TRIM_PX", "256"))
+    proc_px = proc_px or int(os.environ.get("B51D_PROC_PX", "128"))
+    # 4. The resampled stone basecolor packs ashlar joints + grain into 4 mm texels; ETC1S then misses
+    #    the source by mean deltaE 3.56 (test-texture-budget wants < 3). A binomial soften (1.5 passes, B51D_SOFTEN_K)
+    #    soften on that one map (B51D_SOFTEN families) brings it under without touching the normals.
+    soften = [f for f in os.environ.get("B51D_SOFTEN", "stone").split(",") if f]
+    me = obj.data
+    keep = next((l for l in me.uv_layers if l.active_render), me.uv_layers.active)
+    for l in [l for l in me.uv_layers if l.name != keep.name]:
+        me.uv_layers.remove(l)
+    uvl = me.uv_layers[0].data
+    loops_of = {}
+    for p in me.polygons:
+        loops_of.setdefault(p.material_index, []).extend(p.loop_indices)
+    report = []
+    for mi, loops in loops_of.items():
+        m = me.materials[mi] if mi < len(me.materials) else None
+        if m is None or not m.use_nodes:
+            continue
+        imgs = [n for n in m.node_tree.nodes if n.type == "TEX_IMAGE" and n.image is not None]
+        if not imgs or any(n.inputs["Vector"].is_linked for n in imgs):
+            continue
+        us = [uvl[li].uv[0] for li in loops]
+        vs = [uvl[li].uv[1] for li in loops]
+        f_u, f_v = math.floor(min(us)), math.floor(min(vs))
+        s_u, s_v = max(1, math.ceil(max(us) - f_u)), max(1, math.ceil(max(vs) - f_v))
+        if (f_u, f_v, s_u, s_v) != (0, 0, 1, 1):
+            for li in loops:
+                u, v = uvl[li].uv
+                uvl[li].uv = ((u - f_u) / s_u, (v - f_v) / s_v)
+            nt = m.node_tree
+            tc = nt.nodes.new("ShaderNodeTexCoord")
+            mp = nt.nodes.new("ShaderNodeMapping")
+            mp.vector_type = "POINT"
+            mp.inputs["Scale"].default_value = (s_u, s_v, 1.0)
+            nt.links.new(tc.outputs["UV"], mp.inputs["Vector"])
+            for n in imgs:
+                nt.links.new(mp.outputs["Vector"], n.inputs["Vector"])
+        px = proc_px if m.name in procedural else trim_px
+        for n in imgs:
+            w, h = n.image.size
+            if max(w, h) > px:
+                n.image.scale(px, max(1, round(h * px / w)))
+                if any(f"trim_{f}_basecolor" == n.image.name.split(".")[0] for f in soften):
+                    k = float(os.environ.get("B51D_SOFTEN_K", "1.5"))   # 1.0 = one full pass (2.99, no margin)
+                    while k > 1e-6:
+                        _soften(n.image, min(k, 1.0))
+                        k -= 1.0
+        report.append(f"{m.name}:S{s_u}x{s_v}@{px}")
+    print("B51D ship_prep", obj.name, " ".join(report))
