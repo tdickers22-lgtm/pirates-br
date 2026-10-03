@@ -149,8 +149,8 @@ function grade(views, live) {
     if (c.furl && !(c.furl.topsailsShown === 0 && c.furl.coursesShown === c.furl.courses)) fails.push(`${type} at sailHeight 0.3 topsails shown ${c.furl.topsailsShown}, courses shown ${c.furl.coursesShown}/${c.furl.courses} (topsail must furl first)`);
   }
   if (!views.some((v) => OUTBOARD_VIEWS.includes(v.view) && v.hullLuma != null)) fails.push('no outboard view with hull pixels was graded');
-  for (const f of fails) console.log(`[gallery] GATE FAIL ${f}`);
-  if (!fails.length) console.log(`[gallery] gates OK (hullLuma >= ${HULL_LUMA_MIN} on outboard views, band2m white < ${BAND_WHITE_MAX}, mid-broadside sail/hull >= ${SAIL_HULL_MIN}, helm course fade, topsail furls first)`);
+  for (const f of fails) console.log(`FAIL [gallery] GATE ${f}`);
+  if (!fails.length) console.log(`PASS [gallery] gates OK (hullLuma >= ${HULL_LUMA_MIN} on outboard views, band2m white < ${BAND_WHITE_MAX}, mid-broadside sail/hull >= ${SAIL_HULL_MIN}, helm course fade, topsail furls first)`);
   return { hullLumaMin: HULL_LUMA_MIN, bandWhiteMax: BAND_WHITE_MAX, sailHullMin: SAIL_HULL_MIN, fails };
 }
 

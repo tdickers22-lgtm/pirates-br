@@ -817,6 +817,10 @@ export const SERVER = [
   { ...plain('probes/rig-contacts.mjs'), timeoutMs: 900_000 },
   { ...plain('probes/webkit-ktx2-probe.mjs'), timeoutMs: 600_000 },
   { ...plain('probes/viewmodel-states-probe.mjs'), timeoutMs: 900_000 },
+  // b4 probes, registered at the b4 gate. Same shape: own 3101/8091 stack + one browser, killed in finally.
+  //   ship-gallery — b4.2: 3 classes x 10 views; hullLuma >= 45 outboard, 2 m band white < 8 %,
+  //                  mid-broadside sail/hull >= 1.6, helm course fade, topsail furls first (exit 1 on a fail)
+  { ...plain('probes/ship-gallery.mjs'), timeoutMs: 1_500_000 },
 ];
 
 /** Watchdog per tier (ms); an entry's `timeoutMs` overrides it. A suite silent
