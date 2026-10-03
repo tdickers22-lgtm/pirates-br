@@ -1483,7 +1483,15 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   // ── Structure stamps: flatten discs so buildings sit on level ground ──
   if (island.stamps && island.stamps.length > 0) {
     for (const stamp of island.stamps) {
-      const sd = Math.hypot(x - stamp.x, z - stamp.z);
+      // Squared-distance reject first (b4 gate, test-island-relief): Math.hypot
+      // on every stamp of every sample was the per-sample cost b4.7's POI
+      // stamps (10 -> 17 on Old Maw) pushed past the 25 ms grid build. A point
+      // the reject keeps out by rounding would get m = 0 below anyway, so the
+      // surface is bit-identical.
+      const sdx = x - stamp.x;
+      const sdz = z - stamp.z;
+      if (sdx * sdx + sdz * sdz >= stamp.radius * stamp.radius) continue;
+      const sd = Math.hypot(sdx, sdz);
       if (sd >= stamp.radius) continue;
       const inner = stamp.radius * (1 - clamp(stamp.blend, 0.05, 0.95));
       const m = sd <= inner ? 1 : 1 - smoothstep(inner, stamp.radius, sd);
