@@ -1,0 +1,108 @@
+{
+ "renderer": "Cycles CPU 24 spp 640x360, noon sun + sky",
+ "creatures": {
+  "shark": {
+   "clip": "swim",
+   "frame": 8,
+   "clips": [
+    "bite",
+    "swim"
+   ],
+   "bounds": {
+    "min": [
+     -0.863,
+     -1.699,
+     0.722
+    ],
+    "max": [
+     0.849,
+     1.654,
+     2.212
+    ]
+   }
+  },
+  "gull": {
+   "clip": "flap",
+   "frame": 3,
+   "clips": [
+    "flap",
+    "glide",
+    "idle"
+   ],
+   "bounds": {
+    "min": [
+     -0.409,
+     -0.301,
+     0.996
+    ],
+    "max": [
+     0.409,
+     0.305,
+     1.696
+    ]
+   }
+  },
+  "crab": {
+   "clip": "scuttle",
+   "frame": 4,
+   "clips": [
+    "idle",
+    "scuttle"
+   ],
+   "bounds": {
+    "min": [
+     -0.424,
+     -0.432,
+     -0.011
+    ],
+    "max": [
+     0.424,
+     0.221,
+     0.252
+    ]
+   }
+  },
+  "pig": {
+   "clip": "walk",
+   "frame": 8,
+   "clips": [
+    "idle",
+    "peck",
+    "walk"
+   ],
+   "bounds": {
+    "min": [
+     -0.2,
+     -0.566,
+     -0.001
+    ],
+    "max": [
+     0.2,
+     0.443,
+     0.51
+    ]
+   }
+  },
+  "chicken": {
+   "clip": "walk",
+   "frame": 5,
+   "clips": [
+    "idle",
+    "peck",
+    "walk"
+   ],
+   "bounds": {
+    "min": [
+     -0.16,
+     -0.275,
+     -0.012
+    ],
+    "max": [
+     0.161,
+     0.35,
+     0.535
+    ]
+   }
+  }
+ }
+}
