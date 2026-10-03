@@ -289,8 +289,8 @@ export const RATCHET = [
   'shipwreck:band', 'shipwreck:lods', 'shipwreck:textures', 'shipwreck:verts',
   'standing_stones:band', 'standing_stones:lods', 'standing_stones:textures', 'standing_stones:verts',
   'fort:band', 'fort:lods', 'fort:textures',
-  'tavern:band', 'tavern:lods', 'tavern:textures', 'tavern:verts',
-  'stall:band', 'stall:lods', 'stall:textures',
+  'tavern:lods',
+  'stall:lods',
   // story-scenes
   'smuggler_cache:band', 'smuggler_cache:lods', 'smuggler_cache:textures',
   'skull_totem:band', 'skull_totem:lods', 'skull_totem:textures', 'skull_totem:verts',

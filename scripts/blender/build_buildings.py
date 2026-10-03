@@ -13,6 +13,10 @@ from mathutils import Vector, Matrix
 HERE = os.path.dirname(os.path.abspath(__file__))
 exec(open(os.path.join(HERE, "_helpers.py")).read())
 exec(open(os.path.join(HERE, "_ao.py")).read())
+exec(open(os.path.join(HERE, "_detail.py")).read())
+import sys
+sys.path.insert(0, HERE)
+import _trim as TR
 
 RENDER_DIR = os.environ.get(
     "BR_RENDER_DIR",
@@ -38,7 +42,7 @@ _gw.node_tree.nodes.get("Principled BSDF").inputs["Emission Strength"].default_v
 
 def bm_bevel(bm, width=0.02):
     bmesh.ops.bevel(bm, geom=list(bm.edges), offset=width, offset_type='OFFSET',
-                    segments=1, profile=0.72, affect='EDGES', clamp_overlap=True)
+                    segments=2, profile=0.72, affect='EDGES', clamp_overlap=True)
     return bm
 
 
@@ -53,7 +57,7 @@ def box(coll, name, w, d, h, x, y, z, material, rot=None, bev=0.0, smooth=False)
     return obj_from_bmesh(name, bm, coll, mat(material), smooth=smooth)
 
 
-def cyl(coll, name, r1, r2, depth, x, y, z, material, segs=12, rot=None, smooth=True):
+def cyl(coll, name, r1, r2, depth, x, y, z, material, segs=20, rot=None, smooth=True):
     bm = bm_cylinder(r1, r2, depth, segs=segs)
     m = Matrix.Translation((x, y, z))
     if rot is not None:
@@ -85,7 +89,7 @@ def barrel(coll, name, x, y, z, r=0.30, h=0.78, rot_z=0.0, tilt=0.0):
     parts = []
     rot = Matrix.Rotation(rot_z, 4, 'Z') @ Matrix.Rotation(tilt, 4, 'X')
     for sz, z0 in ((1, h * 0.25), (-1, -h * 0.25)):
-        bm = bm_cylinder(r, r * 0.85, h * 0.5, segs=12)
+        bm = bm_cylinder(r, r * 0.85, h * 0.5, segs=20)
         if sz < 0:
             bmesh.ops.scale(bm, vec=Vector((1, 1, -1)), verts=bm.verts)
         bmesh.ops.transform(bm, matrix=Matrix.Translation((0, 0, z0)), verts=bm.verts)
@@ -94,7 +98,7 @@ def barrel(coll, name, x, y, z, r=0.30, h=0.78, rot_z=0.0, tilt=0.0):
         parts.append(obj_from_bmesh(f"{name}_b{sz}", bm, coll, mat("Wood_Mid"), smooth=True))
     for bz in (-h * 0.32, 0.0, h * 0.32):
         bm = bm_cylinder(r * 1.03 - abs(bz) / h * r * 0.24, r * 1.03 - abs(bz) / h * r * 0.24,
-                         0.05, segs=12)
+                         0.05, segs=20)
         bmesh.ops.transform(bm, matrix=Matrix.Translation((x, y, z + h * 0.5)) @ rot @
                             Matrix.Translation((0, 0, bz)), verts=bm.verts)
         parts.append(obj_from_bmesh(f"{name}_band{bz:.2f}", bm, coll, mat("Metal_Iron"), smooth=True))
@@ -113,6 +117,167 @@ def crate(coll, name, s, x, y, z, rot_z, material="Wood_Mid"):
                              x + off.x, y + off.y, z + s * 0.45, "Wood_Dark",
                              rot=rot, bev=0.01))
     return parts
+
+
+# ── b5.1a: buildings v2 on the family trim sheets (assets-12, PLAN 3.12 / section 6 row 21) ──
+# Every part keeps its authored form; its flat colour becomes a strip of a shared PolyHaven-CC0
+# trim sheet (stone / wood_iron / shingle / canvas; plaster = the warm unbleached canvas 'plain'
+# strip, a lime-daub read). Long faces are split along their length first so the strip's V never
+# squeezes past ~2x and U stays continuous along a board (verts/tris <= 1.3 on LOD0: a split row
+# shares its verts, a lone quad does not). GlassWarm stays an emissive pane (tier-exempt).
+TRIM_OF = {
+    "Rock_Grey": ("stone", "ashlar"), "Rock_Dark": ("stone", "rubble"), "Char_Black": ("stone", "rubble"),
+    "Plaster": ("canvas", "plain"), "Canvas": ("canvas", "panel"), "Awning_Red": ("canvas", "patch"),
+    "Awning_Cream": ("canvas", "hem"), "Keg_Red": ("canvas", "patch"),
+    "Timber": ("wood_iron", "plank_dark"), "Wood_Dark": ("wood_iron", "plank_dark"),
+    "Wood_Mid": ("wood_iron", "plank"), "Wood_Bleached": ("wood_iron", "plank_worn"),
+    "Wood_Light": ("wood_iron", "plank_worn"), "Metal_Iron": ("wood_iron", "iron_plate"),
+    "Shingle": ("shingle", "wood_shingle"), "Shingle_Lt": ("shingle", "wood_shingle"),
+}
+DROP = {"Leaf_Green"}          # untextured foliage blobs: a building has no business carrying them
+_SHEETS = {}
+
+
+def _sheet(fam):
+    if fam not in _SHEETS:
+        _SHEETS[fam] = TR.build_sheet(fam, tier="near")
+    return _SHEETS[fam]
+
+
+def densify(obj, L):
+    """Split every edge longer than L (grid-filled), at most 6 passes."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    for _ in range(6):
+        long_e = [e for e in bm.edges if e.calc_length() > L]
+        if not long_e:
+            break
+        bmesh.ops.subdivide_edges(bm, edges=long_e, cuts=1, use_grid_fill=True)
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+
+
+def trimify(parts, L):
+    """UV each single-material part onto its family strip (run = its longest world axis)."""
+    kept = []
+    for o in parts:
+        mname = o.data.materials[0].name if o.data.materials else ""
+        if mname in DROP:
+            bpy.data.objects.remove(o)
+            continue
+        kept.append(o)
+        if mname not in TRIM_OF:
+            continue                     # GlassWarm (emissive pane)
+        densify(o, L)
+        for poly in o.data.polygons:      # one smooth surface per part: normals never split a vertex
+            poly.use_smooth = True
+        fam, strip = TRIM_OF[mname]
+        bb = [o.matrix_world @ Vector(c) for c in o.bound_box]
+        ext = [max(v[i] for v in bb) - min(v[i] for v in bb) for i in range(3)]
+        run = "xyz"[ext.index(max(ext))]
+        sheet = _sheet(fam)
+        TR.trim_uv(o, strip, sheet, run=run)
+        regroup_uv(o, strip, sheet, run)
+    return kept
+
+
+_AX = {"x": Vector((1, 0, 0)), "y": Vector((0, 1, 0)), "z": Vector((0, 0, 1))}
+
+
+def regroup_uv(o, strip, sheet, run):
+    """Box-project each SIDE of a part (faces grouped by dominant normal axis) with ONE V base per
+    side, so a side's faces share their vertices' UVs instead of each face being centred in the
+    strip on its own (trim_uv's per-face fit splits every row: verts/tris 1.4-1.6). A side whose
+    across-run span does not fit the strip keeps trim_uv's per-face fit (no stretch past 1:1)."""
+    v0, v1 = sheet["strips"][strip]
+    pad = TR.PAD_PX / float(sheet["size"])
+    room = (v1 - v0) - 2 * pad
+    bm = bmesh.new()
+    bm.from_mesh(o.data)
+    uvl = bm.loops.layers.uv.verify()
+    mw = o.matrix_world
+    mwi = mw.inverted()
+    room_w = room * TR.SHEET_M
+
+    def sides():
+        g = {}
+        for f in bm.faces:
+            n = (mw.to_3x3() @ f.normal)
+            a = max(range(3), key=lambda i: abs(n[i]))
+            g.setdefault((a, n[a] > 0), []).append(f)
+        return g
+
+    def axes(a):
+        ra = "xyz".index(run)
+        ua = ra if ra != a else min(i for i in range(3) if i != a)
+        return ua, 3 - a - ua
+
+    # an oversize side (a 3 m plaster wall) is cut into bands one strip tall: each band maps 1:1 with
+    # its own base, so vertices split only along the band lines, never per face, and nothing stretches
+    for (a, _s), faces in list(sides().items()):
+        _ua, va = axes(a)
+        vs = [(mw @ v.co)[va] for f in faces for v in f.verts]
+        lo, hi = min(vs), max(vs)
+        if hi - lo <= room_w:
+            continue
+        geom = list({e for f in faces for e in f.edges}) + faces + list({v for f in faces for v in f.verts})
+        cut = lo + room_w
+        while cut < hi - 1e-4:
+            co = Vector((0, 0, 0)); co[va] = cut
+            no = Vector((0, 0, 0)); no[va] = 1.0
+            res = bmesh.ops.bisect_plane(bm, geom=geom, dist=1e-6, plane_co=mwi @ co,
+                                         plane_no=(mwi.to_3x3().transposed().inverted() @ no).normalized())
+            geom = [g for g in res["geom"] if g.is_valid]
+            cut += room_w
+    for (a, _s), faces in sides().items():
+        ua, va = axes(a)
+        vs = [(mw @ v.co)[va] for f in faces for v in f.verts]
+        lo, hi = min(vs), max(vs)
+        single = hi - lo <= room_w
+        for f in faces:
+            if single:
+                b0 = lo - (room_w - (hi - lo)) / 2
+            else:
+                cv = sum((mw @ v.co)[va] for v in f.verts) / len(f.verts)
+                b0 = lo + math.floor((cv - lo) / room_w) * room_w
+            for l in f.loops:
+                p = mw @ l.vert.co
+                v = v0 + pad + (p[va] - b0) / TR.SHEET_M
+                l[uvl].uv = (p[ua] / TR.SHEET_M, min(max(v, v0 + pad * 0.5), v1 - pad * 0.5))
+    bm.to_mesh(o.data)
+    bm.free()
+
+
+def tri_count(objs):
+    return sum(sum(len(p.vertices) - 2 for p in o.data.polygons) for o in objs if o.type == "MESH")
+
+
+SHEET_DIR = os.path.join(HERE, "..", "..", "docs", "asset-sheets", "buildings")
+
+
+def ship_building(objs, name):
+    os.makedirs(SHEET_DIR, exist_ok=True)
+    print(f"B51A {name}: LOD0 {tri_count(objs)} tris before export")
+    # LOD0 only: the chain is build_lods.py's job (geometry-only <name>_lods.glb, adaptive surface
+    # contract). Sheet images ride as JPEG in the SOURCE file; pack-models.mjs turns them into KTX2.
+    import _pbr as P
+    ids = set()
+    for o in objs:
+        for m in o.data.materials:
+            if m is not None:
+                ids |= {i for i in str(m.get("pbr_sources", "")).split(",") if i}
+    P.require_licensed(sorted(ids))
+    bpy.ops.object.select_all(action="DESELECT")
+    for o in objs:
+        o.select_set(True)
+    bpy.context.view_layer.objects.active = objs[0]
+    path = os.path.join(EXPORT_DIR, f"{name}.glb")
+    bpy.ops.export_scene.gltf(filepath=path, export_format="GLB", use_selection=True,
+                              export_image_format="JPEG", export_jpeg_quality=88, export_apply=True)
+    contact_sheet(objs, os.path.join(SHEET_DIR, f"{name}.png"))
+    print(f"B51A {name}: exported {os.path.getsize(path)} B, sources {sorted(ids)}")
+    return path
 
 
 def build_tavern(name="tavern"):
@@ -350,7 +515,10 @@ def build_tavern(name="tavern"):
     parts += barrel(coll, "bar2", -1.85, -D * 0.5 - 0.42, 0.02, r=0.24, h=0.6,
                     rot_z=1.2, tilt=math.radians(4))
 
-    join(parts, name)
+    L = float(os.environ.get("B51A_L_TAVERN", "0.85"))
+    parts = trimify(parts, L)
+    door_parts = trimify(door_parts, L)
+    main_obj = join(parts, name)
     # Door leaf = its OWN object with the origin ON the hinge axis (left jamb
     # edge) so the game can swing it open with a simple rotation. World
     # placement is preserved: vertices shift by -hinge, object moves to +hinge.
@@ -358,10 +526,7 @@ def build_tavern(name="tavern"):
     hinge = Vector((-(doorW - 0.1) * 0.5, -D * 0.5 - 0.04, 0.0))
     door_obj.data.transform(Matrix.Translation(-hinge))
     door_obj.location = hinge
-    bake_ao(coll)
-    export_collection_vc(coll, f"{name}.glb")
-    verify_glb(os.path.join(EXPORT_DIR, f"{name}.glb"))
-    render_turntable(coll, name, RENDER_DIR)
+    ship_building([main_obj, door_obj], name)
     print(f"built {name}")
     return coll
 
@@ -448,11 +613,8 @@ def build_stall(name="stall"):
     parts.append(box(coll, "lamp", 0.16, 0.16, 0.22, W * 0.5 - 0.05, 0.4 - D * 0.5, H - 0.2, "GlassWarm", bev=0.02))
     parts.append(box(coll, "lampcap", 0.2, 0.2, 0.05, W * 0.5 - 0.05, 0.4 - D * 0.5, H - 0.07, "Metal_Iron", bev=0.01))
 
-    join(parts, name)
-    bake_ao(coll)
-    export_collection_vc(coll, f"{name}.glb")
-    verify_glb(os.path.join(EXPORT_DIR, f"{name}.glb"))
-    render_turntable(coll, name, RENDER_DIR)
+    parts = trimify(parts, float(os.environ.get("B51A_L_STALL", "0.12")))
+    ship_building([join(parts, name)], name)
     print(f"built {name}")
     return coll
 
