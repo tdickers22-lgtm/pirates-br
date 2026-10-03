@@ -282,5 +282,5 @@ const prims = (body.match(/new THREE\.(Box|Cylinder|Sphere|Torus|Cone|Circle|Pla
 const primLine = `[primitives] buildShip ${prims} primitive constructors (ratchet ${PRIMITIVE_RATCHET}, target < ${PRIMITIVE_TARGET}${prims < PRIMITIVE_TARGET ? ' MET' : ' open'})`;
 (prims <= PRIMITIVE_RATCHET ? ok : fail)(primLine);
 
-console.log(`\ntest-ship-sockets: ${Object.entries(counts).map(([t, n]) => `${t} ${n}`).join(', ')} sockets; ${fails} failed`);
+console.log(`\n${fails ? "FAIL" : "PASS"} test-ship-sockets: ${Object.entries(counts).map(([t, n]) => `${t} ${n}`).join(', ')} sockets; ${fails} failed`);
 process.exit(fails ? 1 : 0);

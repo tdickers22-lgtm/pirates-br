@@ -293,6 +293,8 @@ export const LOGIC = [
   // b4.7a inland water (islands-03, vm:islands:5): streams monotone 0.5-1.5 m deep to the coast, >= 1 stream per
   // lush/tropical/crescent island, >= 3 ponds that hold water, >= 6 tide shelves, wading 0.7x, 0 new programs (~0.5 s).
   quick(tsx('test-inland-water.mjs')),
+  // b4.7 canopy density: per-island canopy counts from the static world (~4 s generate, logic tier).
+  tsx('test-canopy-density.mjs'),
   quick(tsx('test-island-climb.mjs')),
   // b4.7c POIs (islands-04): count per island by the radius table, footprints clear, reachable from the landing, stamp/loot/trail hooks (~2.5 s, two world gens).
   tsx('test-island-props-poi.mjs'),
