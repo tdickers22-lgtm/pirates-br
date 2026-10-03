@@ -14,6 +14,20 @@ from mathutils import Vector, Matrix
 HERE = os.path.dirname(os.path.abspath(__file__))
 exec(open(os.path.join(HERE, '_helpers.py')).read())
 exec(open(os.path.join(HERE, '_ao.py')).read())
+exec(open(os.path.join(HERE, '_detail.py')).read())
+import sys
+sys.path.insert(0, HERE)
+import _trim as TR
+exec(open(os.path.join(HERE, '_trimkit.py')).read())     # b5.1c: Char_Black on the stone trim sheet
+exec(open(os.path.join(HERE, '_story_pbr.py')).read())   # original procedural Bone / Sand_Pad PBR
+STORY_SHEETS = os.path.join(HERE, "..", "..", "docs", "asset-sheets", "story")
+# Story tier (60-120k LOD0): LOD1 36% / LOD2 10% / far voxel hull ~3% clamped into the 2-4k proxy band.
+STORY_LEVELS = (("LOD1", 0.36), ("LOD2", 0.10), ("far", 0.035, 3600))
+# Dry bone: ivory mottle, growth lines along the run, dark pitting, high roughness (sun-bleached, not wet).
+STORY_PBR = {
+    "Bone": dict(base=(0.74, 0.70, 0.58), belly=(0.88, 0.85, 0.76), rough=0.74, ring_freq=3, seed=21, nrm_s=3.0),
+    "Sand_Pad": dict(base=(0.66, 0.58, 0.42), belly=(0.80, 0.72, 0.55), rough=0.90, ring_freq=2, seed=33, nrm_s=2.0),
+}
 
 RENDER_DIR = os.environ.get("PBR_RENDER_DIR", "")
 EXPORT_DIR = os.environ.get("PBR_EXPORT_DIR", EXPORT_DIR)
@@ -343,12 +357,12 @@ def build_whale_skeleton(name="whale_skeleton"):
         o = obj_from_bmesh(f"{name}_chip{ci}", bm, coll, bone, smooth=True)
         parts.append(o)
 
-    obj = join(parts, name)
-    bake_ao(coll, floor=0.45, height_gradient=0.18)
-    path = export_collection_vc(coll, f"{name}.glb")
-    verify_glb(path)
-    if RENDER_DIR:
-        render_turntable(coll, name, RENDER_DIR, views=5)
+    # b5.1c: one Catmull-Clark pass on the bone/sand cage (rounder shafts, 25k -> story band), original
+    # procedural maps on Bone/Sand_Pad, Char_Black on the stone rubble strip, then LOD0 + proxies + sheets.
+    parts = story_pbrify(parts, STORY_PBR, L=float(os.environ.get("B51C_L_WHALE", "0.6")),
+                         sub=int(os.environ.get("B51C_SUB_WHALE", "1")), tile=1.4)
+    print(f"B51C whale tris: {tri_count(parts)}")
+    ship_building([join(parts, name)], name, sheet_dir=STORY_SHEETS, levels=STORY_LEVELS, four=True)
     print(f"built {name}")
 
 
