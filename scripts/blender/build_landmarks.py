@@ -24,6 +24,7 @@ import _trim as TR
 RENDER_DIR = os.environ.get("PBR_RENDER_DIR", "")
 EXPORT_DIR = os.environ.get("PBR_EXPORT_DIR", EXPORT_DIR)  # scratch override for test rounds
 exec(open(os.path.join(HERE, "_trimkit.py")).read())      # trim-sheet kit (watchtower v2, b5.1a3)
+TRIM_OF.setdefault("Gold", ("wood_iron", "brass"))         # b5.1b: rune inlay + coin hoard
 
 clear_default_scene()
 
@@ -583,6 +584,9 @@ def build_shipwreck(name="shipwreck"):
     parts.append(o); bev.append(o)
 
     finish(bev, width=0.022)
+    # b5.1b material pass: trim strips (wood_iron plank / plank_dark / plank_worn / iron_plate,
+    # canvas patch sail) instead of vertex colours; LOD chain from the authored proxies
+    parts = trimify(parts, float(os.environ.get("B51B_L_SHIPWRECK", "0.3")))
     obj = join(parts, name)
     # settle with a list toward the exposed side
     obj.rotation_euler = (0.12, 0.0, 0.0)
@@ -590,7 +594,9 @@ def build_shipwreck(name="shipwreck"):
     obj.select_set(True)
     bpy.context.view_layer.objects.active = obj
     bpy.ops.object.transform_apply(rotation=True)
-    ship_and_export(coll, name, obj)
+    ship_building([obj], name, four=True)
+    for o in coll.objects:
+        o.hide_render = True
     return coll, obj
 
 
@@ -604,7 +610,7 @@ def build_standing_stones(name="standing_stones"):
     parts, bev = [], []
 
     def stone_bm(w, d, h, taper, srng):
-        bm = sub_box(w, d, h, cuts=3)
+        bm = sub_box(w, d, h, cuts=int(os.environ.get("B51B_STONE_CUTS", "3")))
         for v in bm.verts:
             tz = v.co.z / h + 0.5
             if taper > 0 and tz > 0.35:
@@ -726,9 +732,14 @@ def build_standing_stones(name="standing_stones"):
             Matrix.Rotation(rng.uniform(-0.35, 0.35), 4, 'X'), verts=bm.verts)
         parts.append(obj_from_bmesh(f"{name}_coin{c}", bm, coll, mat("Gold"), smooth=True))
 
-    finish(bev, width=0.03)
+    finish(bev, width=0.03, segments=2)
+    # b5.1b material pass: stone ashlar/rubble strips + brass inlay instead of vertex colours (moss
+    # blob dropped, as on the buildings); LOD chain from the authored proxies
+    parts = trimify(parts, float(os.environ.get("B51B_L_STONES", "0.15")))
     obj = join(parts, name)
-    ship_and_export(coll, name, obj)
+    ship_building([obj], name, four=True)
+    for o in coll.objects:
+        o.hide_render = True
     return coll, obj
 
 
