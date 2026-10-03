@@ -28,6 +28,18 @@ exec(open(os.path.join(HERE, "_detail.py")).read())
 
 RENDER_DIR = os.environ.get("BR_RENDER_DIR", "")
 EXPORT_DIR = os.environ.get("BR_EXPORT_DIR", EXPORT_DIR)
+import sys
+sys.path.insert(0, HERE)
+import _trim as TR
+exec(open(os.path.join(HERE, "_trimkit.py")).read())   # b5.1a3: canvas/rope/wood_iron trim sheets
+TENT_SHEETS = os.path.join(HERE, "..", "..", "docs", "asset-sheets", "tents")
+
+
+def ship_tent(coll, name):
+    """Props tier (2.5-8k, far <= 150): trim UVs instead of baked vertex colour, authored LOD proxies."""
+    parts = [o for o in coll.objects if o.type == "MESH"]
+    parts = trimify(parts, float(os.environ.get("B51A_L_TENT", "0.3")))
+    return ship_building([join(parts, name)], name, sheet_dir=TENT_SHEETS, levels=PROP_LEVELS, four=True)
 
 clear_default_scene()
 agx_palette()
@@ -236,10 +248,7 @@ def build_tent_b():
         parts.append(obj_from_bmesh(f"{name}_tie{k}", tie, coll, mat("Rope"),
                                     smooth=True))
 
-    return ship_asset(coll, name, spec=tent_spec(),
-                      ao=dict(samples=22, floor=0.46), tint_seed=3,
-                      render_dir=RENDER_DIR, angles=(-90, -35, 25, 120),
-                      elev=17)
+    return ship_tent(coll, name)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -384,10 +393,7 @@ def build_tent_c():
         parts.append(obj_from_bmesh(f"{name}_keghoop{hz:.2f}", hp, coll,
                                     mat("Metal_Band"), smooth=True))
 
-    return ship_asset(coll, name, spec=tent_spec(),
-                      ao=dict(samples=22, floor=0.46), tint_seed=7,
-                      render_dir=RENDER_DIR, angles=(-90, -35, 25, 120),
-                      elev=17)
+    return ship_tent(coll, name)
 
 
 def stow(coll_name):

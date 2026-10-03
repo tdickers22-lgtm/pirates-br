@@ -234,8 +234,6 @@ export const RATCHET = [
   'bedroll:lods', 'bedroll:textures',
   'lantern_post:lods', 'lantern_post:textures',
   'tent_a:band', 'tent_a:lods', 'tent_a:textures',
-  'tent_b:lods', 'tent_b:textures',
-  'tent_c:band', 'tent_c:lods', 'tent_c:textures',
   'bone_pile:band', 'bone_pile:lods', 'bone_pile:textures',
   'driftwood_log:band', 'driftwood_log:lods', 'driftwood_log:textures',
   'grave_marker:band', 'grave_marker:lods', 'grave_marker:textures', 'grave_marker:verts',

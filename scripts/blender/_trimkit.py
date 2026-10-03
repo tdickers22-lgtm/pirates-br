@@ -16,6 +16,8 @@ TRIM_OF = {
     "Wood_Mid": ("wood_iron", "plank"), "Wood_Bleached": ("wood_iron", "plank_worn"),
     "Wood_Light": ("wood_iron", "plank_worn"), "Metal_Iron": ("wood_iron", "iron_plate"),
     "Shingle": ("shingle", "wood_shingle"), "Shingle_Lt": ("shingle", "wood_shingle"),
+    # tents (b5.1a3): weathered canvas, lashings, keg hoops
+    "Canvas_Dirty": ("canvas", "patch"), "Rope": ("rope", "rope_thin"), "Metal_Band": ("wood_iron", "iron_plate"),
 }
 DROP = {"Leaf_Green"}          # untextured foliage blobs: a building has no business carrying them
 _SHEETS = {}
