@@ -23,6 +23,8 @@ import { attachCoverLod, attachInstanceFarLod, attachInstanceLod, attachLazyStor
 const SWAYING_FOLIAGE: ReadonlySet<string> = new Set([
   'palm_a', 'palm_b', 'palm_c', 'palm_tall', 'palm_ground',
   'fern_plant', 'bush', 'bush_berry', 'flower_bush', 'wildflowers', 'flower_patch',
+  // b4.7d canopy kit (the bare snags tree_dead_a/_b do not sway).
+  'tree_broadleaf_a', 'tree_broadleaf_b', 'tree_buttress', 'tree_mangrove', 'banana_plant', 'fern_giant', 'tall_grass',
 ]);
 
 /**
@@ -562,6 +564,8 @@ export function buildServerProps(ctx: IslandBuildCtx) {
     'boulder_a', 'boulder_b', 'boulder_c', 'barrel', 'crate',
     'bush', 'bush_berry', 'flower_bush', 'fern_plant', 'flower_patch', 'wildflowers',
     'bone_pile', 'driftwood_log', 'grave_marker',
+    // b4.7d canopy kit: instanced like the palms (LOD chain via attachInstanceLod).
+    'tree_broadleaf_a', 'tree_broadleaf_b', 'tree_buttress', 'tree_mangrove', 'tree_dead_a', 'tree_dead_b', 'banana_plant', 'fern_giant', 'tall_grass',
   ]);
   const buckets = new Map<IslandPropType, IslandProp[]>();
   for (const prop of props) {

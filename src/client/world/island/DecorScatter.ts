@@ -21,9 +21,9 @@ import { attachFleckLod, attachInstanceFarLod, attachInstanceLod } from './Insta
  *  colliders players actually hit.) */
 export function buildRockAndDriftDecor(ctx: IslandBuildCtx) {
   const {
-    island, group, r, rng, lowDetail, surfacePoint, isSolidDecorPoint,
+    group, r, rng, lowDetail, surfacePoint, isSolidDecorPoint,
     islandSeed, islandHeading, SURFACE_ABOVE_WATER, scaledCount,
-    cliffMat, driftwoodMat, bambooMat, bambooGeo, buildPropInstance,
+    cliffMat, driftwoodMat, buildPropInstance,
   } = ctx;
   // Decor is placed on the analytic heightfield but LOOKED AT on the terrain
   // mesh; snap every piece onto the drawn ground (see GroundTruth).
@@ -82,39 +82,8 @@ export function buildRockAndDriftDecor(ctx: IslandBuildCtx) {
     group.add(log);
   }
 
-  // Bamboo clusters on larger islands
-  if (!lowDetail && r > 52) {
-    const bambooClusters = 1 + Math.floor(rng(islandSeed * 3 + 1) * 2);
-    for (let g = 0; g < bambooClusters; g++) {
-      const clusterAngle = rng(g * 251) * Math.PI * 2;
-      const clusterDist = 0.12 + rng(g * 257) * 0.22;
-      const clusterCenter = surfacePoint(clusterDist, clusterAngle);
-      if (!isSolidDecorPoint(clusterCenter)) continue;
-      queueContactShadow(ctx, clusterCenter.x, clusterCenter.z, 1.15, 0.45);
-      const stalkCount = 3 + Math.floor(rng(g * 263) * 3);
-      for (let b = 0; b < stalkCount; b++) {
-        const bh = 3.2 + rng(g * 269 + b) * 2.8;
-        const bamboo = new THREE.Mesh(bambooGeo, bambooMat);
-        // AUDIT P2: every stalk in a cluster shared the CENTRE's ground height,
-        // so on a slope the outer stalks hung 0.3-0.6m in the air with their
-        // bases cut off. Seat each stalk on its own sample (sunk 0.15m).
-        const bx = clusterCenter.x + (rng(b * 271 + g) - 0.5) * 1.4;
-        const bz = clusterCenter.z + (rng(b * 277 + g) - 0.5) * 1.4;
-        const by = (ground?.heightAt(bx, bz)
-          ?? getIslandSurfaceY(island, bx + island.position.x, bz + island.position.z)) - 0.15;
-        bamboo.position.set(bx, bh * 0.5 + by, bz);
-        bamboo.name = 'decor-bamboo';
-        bamboo.rotation.set(
-          (rng(b * 279 + g) - 0.5) * 0.1,
-          rng(b * 281 + g) * Math.PI * 2,
-          (rng(b * 283 + g) - 0.5) * 0.1,
-        );
-        bamboo.scale.y = bh;
-        bamboo.castShadow = false;
-        group.add(bamboo);
-      }
-    }
-  }
+  // Bamboo clusters (5-sided cylinders) removed in b4.7d: the canopy kit's understory (banana_plant,
+  // fern_giant, tall_grass GLBs placed by src/server/world/placement/canopy.ts) is the island's mid layer now.
 
   if (!lowDetail && r > 38) {
     const wreckAngle = islandHeading + Math.PI * (0.55 + rng(islandSeed * 7) * 0.5);
@@ -440,56 +409,16 @@ export function buildInteriorDressing(ctx: IslandBuildCtx) {
   }
 }
 
-/** Banana trees, dead bone-grey snags, the mossy fallen log and the beached
+/** Dead bone-grey snags, the mossy fallen log and the beached
  *  dinghy in the dunes. */
 export function buildTreesAndStrays(ctx: IslandBuildCtx) {
   const {
-    island, group, r, rng, lowDetail, surfacePoint, isSolidDecorPoint,
+    group, r, rng, lowDetail, surfacePoint, isSolidDecorPoint,
     islandSeed, islandHeading, SURFACE_ABOVE_WATER, scaledCount,
   } = ctx;
   const ground = ensureMeshGround(ctx);
-  if (r > 38) {
-    const bananaCount = scaledCount(Math.round(r / 36), 1);
-    const bananaTrunkMat = new THREE.MeshStandardMaterial({ color: 0x6c4d2a, roughness: 1 });
-    const bananaLeafMat = new THREE.MeshStandardMaterial({ color: 0x4ea832, roughness: 0.85, side: THREE.DoubleSide });
-    const bananaFruitMat = new THREE.MeshStandardMaterial({ color: 0xeacf3a, roughness: 0.7 });
-    for (let i = 0; i < bananaCount; i++) {
-      const angle = rng(i * 351 + 23) * Math.PI * 2;
-      const distRatio = 0.18 + rng(i * 357) * 0.34;
-      const pos = surfacePoint(distRatio, angle, 0);
-      const bananaHeightCap = 5.15 + island.radius * 0.0085 + island.radius * 0.085 * (1 + (island.profile.peakBoost ?? 0) * 0.3);
-      if (pos.y > bananaHeightCap) continue;
-      if (!isSolidDecorPoint(pos, SURFACE_ABOVE_WATER, -0.2)) continue;
-      const tree = new THREE.Group();
-      tree.name = 'decor-banana-tree';
-      tree.position.copy(snapToDrawnGround(ground, pos, -0.08));
-      queueContactShadow(ctx, pos.x, pos.z, 1.05, 0.6);
-      const trunkH = 1.8 + rng(i * 359) * 1.0;
-      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.24, trunkH, 6), bananaTrunkMat);
-      trunk.position.y = trunkH * 0.5;
-      trunk.castShadow = true;
-      tree.add(trunk);
-      // 6 broad drooping leaves
-      for (let l = 0; l < 6; l++) {
-        const la = (l / 6) * Math.PI * 2;
-        const leaf = new THREE.Mesh(new THREE.PlaneGeometry(0.6, 1.6), bananaLeafMat);
-        leaf.position.set(Math.cos(la) * 0.5, trunkH + 0.1, Math.sin(la) * 0.5);
-        leaf.rotation.set(-0.5, la, 0);
-        tree.add(leaf);
-      }
-      // Fruit cluster
-      if (rng(i * 363) > 0.4) {
-        for (let f = 0; f < 5; f++) {
-          const fruit = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.22, 5), bananaFruitMat);
-          fruit.rotation.z = Math.PI * 0.5;
-          fruit.rotation.y = (f / 5) * 0.6 - 0.3;
-          fruit.position.set(0.2 + f * 0.04, trunkH - 0.15, 0.12 + (f - 2) * 0.06);
-          tree.add(fruit);
-        }
-      }
-      group.add(tree);
-    }
-  }
+  // The primitive banana tree (6-sided cylinder + flat planes, islands-09) is gone: banana_plant.glb is
+  // placed as a server prop by the canopy kit (b4.7d) and drawn instanced by PropScatterer.
 
   // ── Dead/weathered trees — bone-grey snags ──
   {

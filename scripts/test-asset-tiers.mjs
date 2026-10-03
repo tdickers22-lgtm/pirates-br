@@ -90,6 +90,17 @@ export const TIERS = {
   'poi-small': { family: 'props-poi', band: [4000, 10000], tex: null, lods: CHAIN(0.40, 0.12, 0.03),
     keys: ['poi_overlook_platform', 'poi_jungle_shrine', 'poi_grotto_landing'] },
   'poi-lighthouse': { family: 'props-poi', band: [16000, 24000], tex: null, lods: CHAIN(0.40, 0.12, 0.03), keys: ['poi_small_lighthouse'] },
+  // Canopy flora kit (b4.7d, build_flora_canopy.py, PLAN section 6 row 20): broadleaf 9-12k with LOD1 ~2.5k,
+  // buttress 12-16k, mangrove 6.5-9.5k; snags, understory and grass lighter. tex: null (palette + baked AO
+  // vertex colour like the POI kit; the foliage atlas is the open half of row 20, lane report handoff).
+  'canopy-broadleaf': { family: 'flora-canopy', band: [9000, 12000], tex: null, foliage: true, lods: CHAIN(0.23, 0.08, 0.025),
+    keys: ['tree_broadleaf_a', 'tree_broadleaf_b'] },
+  'canopy-buttress': { family: 'flora-canopy', band: [12000, 16000], tex: null, foliage: true, lods: CHAIN(0.18, 0.06, 0.02), keys: ['tree_buttress'] },
+  'canopy-mangrove': { family: 'flora-canopy', band: [6500, 9500], tex: null, foliage: true, lods: CHAIN(0.3, 0.1, 0.03), keys: ['tree_mangrove'] },
+  'canopy-snags': { family: 'flora-canopy', band: [1500, 5000], tex: null, lods: CHAIN(0.4, 0.15, 0.05), keys: ['tree_dead_a', 'tree_dead_b'] },
+  'canopy-understory': { family: 'flora-canopy', band: [1800, 6000], tex: null, foliage: true, lods: CHAIN(0.4, 0.12, 0.04),
+    keys: ['banana_plant', 'fern_giant'] },
+  'canopy-grass': { family: 'flora-canopy', band: [1000, 3000], tex: null, foliage: true, lods: CHAIN(0.4, 0.12, 0.04), keys: ['tall_grass'] },
   // Flora: cross-card far (2-4 cards; a double-sided card may be modelled as 4 tris, so <= 16).
   palms: { family: 'flora-canopy', band: [10000, 16000], tex: ['base', 'normal'], foliage: true,
     lods: { need: ['LOD1', 'LOD2', 'far'], LOD1: { r: 0.40 }, LOD2: { r: 0.12 }, far: { max: 16 } },
