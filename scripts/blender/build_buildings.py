@@ -140,7 +140,9 @@ _SHEETS = {}
 
 def _sheet(fam):
     if fam not in _SHEETS:
-        _SHEETS[fam] = TR.build_sheet(fam, tier="near")
+        # The 512 'far' tier (~2 px/mm on a 1 m sheet): a building is never closer than a few metres,
+        # and the 1024 near sheets made the packed tavern 6.5 MB (4 families x 3 maps per GLB).
+        _SHEETS[fam] = TR.build_sheet(fam, tier=os.environ.get("B51A_SHEET_TIER", "far"))
     return _SHEETS[fam]
 
 
@@ -256,6 +258,126 @@ def tri_count(objs):
 SHEET_DIR = os.path.join(HERE, "..", "..", "docs", "asset-sheets", "buildings")
 
 
+# LOD PROXIES (b5.1a2). build_lods.py decimates PER LOOSE PART with a 12/8/4-triangle floor per part,
+# and a building is hundreds of loose boards and shingles: the tavern chain landed at LOD1 41%,
+# LOD2 15%, far 5% (ceilings 40/12/3%). The levels are authored here instead, from ONE joined,
+# welded world-space copy (what build_lods grades as the source), and build_lods reuses
+# lod_proxies/<key>_<LOD1|LOD2|far>.glb (extras.lod_reuse):
+#   LOD1 / LOD2: whole-mesh Collapse (the densified coplanar rows collapse first, at ~zero error;
+#                a shingle is merged into its course instead of being held at 12 triangles);
+#   far:         voxel remesh into one closed hull, collapsed to budget, each face takes the nearest
+#                source face's material and each vertex the nearest source vertex's UV, clamped to
+#                the LOD0 box (a far building never grows past its footprint).
+# Geometry only (no images): the runtime binds the LOD0 file's materials by name.
+PROXY_DIR = os.path.join(HERE, "lod_proxies")
+PROXY_LEVELS = (("LOD1", 0.36), ("LOD2", 0.10), ("far", 0.024))
+
+
+def _tris(o):
+    return sum(len(p.vertices) - 2 for p in o.data.polygons)
+
+
+def _apply_mod(o, mod):
+    with bpy.context.temp_override(object=o, active_object=o):
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+
+
+def _collapse_to(o, target):
+    for _ in range(5):
+        t = _tris(o)
+        if t <= target:
+            return
+        dc = o.modifiers.new("dc", "DECIMATE")
+        dc.decimate_type = "COLLAPSE"
+        dc.ratio = max(0.01, target / t * 0.98)
+        dc.use_collapse_triangulate = True
+        _apply_mod(o, dc)
+
+
+def write_lod_proxies(objs, name):
+    from mathutils.bvhtree import BVHTree
+    from mathutils.kdtree import KDTree
+    os.makedirs(PROXY_DIR, exist_ok=True)
+    bpy.context.view_layer.update()
+    copies = []
+    for o in objs:
+        me = o.data.copy()
+        me.transform(o.matrix_world)
+        c = bpy.data.objects.new(f"{o.name}_px", me)
+        bpy.context.scene.collection.objects.link(c)
+        copies.append(c)
+    src = join(copies, f"{name}_pxsrc")
+    bm = bmesh.new()
+    bm.from_mesh(src.data)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=1e-4)
+    bm.to_mesh(src.data)
+    bm.free()
+    n0 = _tris(src)
+    sme = src.data
+    lo = Vector([min(v.co[i] for v in sme.vertices) for i in range(3)])
+    hi = Vector([max(v.co[i] for v in sme.vertices) for i in range(3)])
+    bvh = BVHTree.FromPolygons([v.co.copy() for v in sme.vertices], [list(p.vertices) for p in sme.polygons])
+    mats = [p.material_index for p in sme.polygons]
+    kd = KDTree(len(sme.vertices))
+    for v in sme.vertices:
+        kd.insert(v.co, v.index)
+    kd.balance()
+    uv_of = {}
+    if sme.uv_layers:
+        uvl = sme.uv_layers.active.data
+        for l in sme.loops:
+            uv_of.setdefault(l.vertex_index, tuple(uvl[l.index].uv))
+    span = max(hi - lo)
+    out, prev = [], n0
+    for label, share in PROXY_LEVELS:
+        target = int(n0 * share)
+        o = bpy.data.objects.new(f"{name}_{label}", sme.copy())
+        bpy.context.scene.collection.objects.link(o)
+        if label == "far":
+            for attempt in range(6):
+                if attempt:
+                    bpy.data.objects.remove(o)
+                    o = bpy.data.objects.new(f"{name}_{label}", sme.copy())
+                    bpy.context.scene.collection.objects.link(o)
+                rm = o.modifiers.new("rm", "REMESH")
+                rm.mode = "VOXEL"
+                rm.voxel_size = max(0.04, span / (90.0 * 0.75 ** attempt))
+                rm.adaptivity = 0.0
+                _apply_mod(o, rm)
+                _collapse_to(o, target)
+                if _tris(o) <= target * 1.05:
+                    break
+            me = o.data
+            for p in me.polygons:
+                hit = bvh.find_nearest(p.center)
+                if hit[2] is not None:
+                    p.material_index = mats[hit[2]]
+                p.use_smooth = True
+            for v in me.vertices:
+                v.co = Vector([min(max(v.co[i], lo[i]), hi[i]) for i in range(3)])
+            if uv_of:
+                if not me.uv_layers:
+                    me.uv_layers.new(name="UVMap")
+                d = me.uv_layers.active.data
+                for l in me.loops:
+                    _, idx, _ = kd.find(me.vertices[l.vertex_index].co)
+                    d[l.index].uv = uv_of.get(idx, (0.5, 0.5))
+        else:
+            _collapse_to(o, target)
+        t = _tris(o)
+        assert t < prev, f"{name} {label} proxy {t} tris is not cheaper than {prev}"
+        prev = t
+        print(f"B51A_PROXY {name} {label} tris {t} ({100 * t / n0:.1f}% of {n0})")
+        bpy.ops.object.select_all(action="DESELECT")
+        o.select_set(True)
+        bpy.context.view_layer.objects.active = o
+        bpy.ops.export_scene.gltf(filepath=os.path.join(PROXY_DIR, f"{name}_{label}.glb"), export_format="GLB",
+                                  use_selection=True, export_image_format="NONE", export_apply=True)
+        out.append(o)
+    for o in out + [src]:
+        bpy.data.objects.remove(o)
+
+
 def ship_building(objs, name):
     os.makedirs(SHEET_DIR, exist_ok=True)
     print(f"B51A {name}: LOD0 {tri_count(objs)} tris before export")
@@ -275,6 +397,9 @@ def ship_building(objs, name):
     path = os.path.join(EXPORT_DIR, f"{name}.glb")
     bpy.ops.export_scene.gltf(filepath=path, export_format="GLB", use_selection=True,
                               export_image_format="JPEG", export_jpeg_quality=88, export_apply=True)
+    # proxies BEFORE the contact sheet: contact_sheet lays the parts side by side and restores
+    # .location, leaving matrix_world stale until the next depsgraph update.
+    write_lod_proxies(objs, name)
     contact_sheet(objs, os.path.join(SHEET_DIR, f"{name}.png"))
     print(f"B51A {name}: exported {os.path.getsize(path)} B, sources {sorted(ids)}")
     return path
