@@ -282,9 +282,6 @@ export const RATCHET = [
   // shark
   'shark:lods',
   // critters
-  'crab:band', 'crab:lods', 'crab:textures',
-  'chicken:band', 'chicken:lods', 'chicken:textures',
-  'pig:band', 'pig:lods', 'pig:textures',
   'gull:lods',
   // characters
   'pirate_base:band', 'pirate_base:lods', 'pirate_base:textures',

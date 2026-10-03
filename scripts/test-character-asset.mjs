@@ -996,6 +996,11 @@ async function creatureSection() {
   const CREATURES = [
     { key: 'shark', band: [8000, 12000], bones: 9, clips: ['swim', 'bite'], counterShade: true, fins: true },
     { key: 'gull', band: [2500, 4000], bones: 6, clips: ['flap', 'glide', 'idle'] },
+    // b5.2b walkers: one draw (one primitive), a breathing idle (a scale channel that moves), LOD1 in
+    // <key>_lods.glb (node *_LOD1, skinned, same clips) at <= 40% of LOD0. Crab 10-12 bones.
+    { key: 'crab', band: [2500, 4000], bones: 10, maxBones: 12, clips: ['scuttle', 'idle'], walker: true },
+    { key: 'pig', band: [2500, 4000], bones: 6, clips: ['walk', 'peck', 'idle'], walker: true },
+    { key: 'chicken', band: [2500, 4000], bones: 6, clips: ['walk', 'peck', 'idle'], walker: true },
   ];
   console.log('\n[creatures] rig, clips, band, UVs, PBR maps');
   const lumaAt = (img, uv) => {
@@ -1020,6 +1025,35 @@ async function creatureSection() {
       if (p.attributes.JOINTS_0 === undefined) unskinned += 1;
     }
     expect(`${c.key}: LOD0 ${tris} tris in [${c.band}]`, tris >= c.band[0] && tris <= c.band[1]);
+    if (c.maxBones) expect(`${c.key}: ${joints} bones <= ${c.maxBones}`, joints <= c.maxBones);
+    if (c.walker) {
+      expect(`${c.key}: one draw (${prims} primitive(s), ${(gltf.materials ?? []).length} material(s))`, prims === 1 && (gltf.materials ?? []).length === 1);
+      const idle = (gltf.animations ?? []).find((a) => a.name === 'idle');
+      let breath = 0;
+      for (const ch of idle?.channels ?? []) {
+        if (ch.target.path !== 'scale') continue;
+        const vals = accessor(g, idle.samplers[ch.sampler].output);
+        for (let k = 0; k < 3; k++) {
+          const col = vals.map((v) => v[k]);
+          breath = Math.max(breath, Math.max(...col) - Math.min(...col));
+        }
+      }
+      expect(`${c.key}: idle breathes (scale channel swing ${breath.toFixed(3)} >= 0.04)`, breath >= 0.04);
+      const lf = `${CDIR}/${c.key}_lods.glb`;
+      let l1 = 0; let l1Skinned = false; let l1Clips = [];
+      if (existsSync(lf)) {
+        const L = readGlb(lf).gltf;
+        for (const n of L.nodes ?? []) {
+          if (n.mesh === undefined || !/LOD1$/.test(n.name || '')) continue;
+          for (const p of L.meshes[n.mesh].primitives) {
+            l1 += (p.indices !== undefined ? L.accessors[p.indices].count : L.accessors[p.attributes.POSITION].count) / 3;
+            l1Skinned = p.attributes.JOINTS_0 !== undefined;
+          }
+        }
+        l1Clips = (L.animations ?? []).map((a) => a.name);
+      }
+      expect(`${c.key}: LOD1 ${l1} tris <= 40% of ${tris}, skinned, same clips`, l1 > 0 && l1 <= 0.4 * tris && l1Skinned && c.clips.every((n) => l1Clips.includes(n)));
+    }
     expect(`${c.key}: every primitive has UV0 (${prims - noUv}/${prims})`, prims > 0 && noUv === 0);
     expect(`${c.key}: every primitive is skinned (no rigid part riding the root)`, prims > 0 && unskinned === 0);
     const mats = gltf.materials ?? [];

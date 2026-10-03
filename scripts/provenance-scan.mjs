@@ -69,6 +69,18 @@ export const OVERRIDES = {
     script: 'scripts/blender/build_fauna_v2.py',
     reason: 'shipped gull.glb is the rigged 6-bone gull (flap/glide/idle clips) = build_gull in build_fauna_v2.py (b5.2a, bdfee57a); build_animals.py build_gull() is the superseded unrigged 700-tri version',
   },
+  'crab.glb': {
+    script: 'scripts/blender/build_fauna_v2.py',
+    reason: 'shipped crab.glb is the rigged one-draw walker (b5.2b) = build_walker("crab") in build_fauna_v2.py; build_animals.py build_crab() is the superseded unrigged multi-material version',
+  },
+  'pig.glb': {
+    script: 'scripts/blender/build_fauna_v2.py',
+    reason: 'shipped pig.glb is the rigged one-draw walker (b5.2b) = build_walker("pig") in build_fauna_v2.py; build_animals.py build_pig() is the superseded unrigged multi-material version',
+  },
+  'chicken.glb': {
+    script: 'scripts/blender/build_fauna_v2.py',
+    reason: 'shipped chicken.glb is the rigged one-draw walker (b5.2b) = build_walker("chicken") in build_fauna_v2.py; build_animals.py build_chicken() is the superseded unrigged multi-material version',
+  },
   // b4.5a: the rock kit v2 build writes its own far rocks (_rock.decimated_copy: gate-safe weld, area kept);
   // build_far_lods.py still names the rocks in its legacy list but no longer builds them.
   ...Object.fromEntries(['boulder_a', 'boulder_b', 'boulder_c', 'searock_a', 'searock_b', 'searock_c'].map((k) => [`${k}_far.glb`, {

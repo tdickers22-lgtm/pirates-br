@@ -1192,9 +1192,440 @@ def quick_render(objs, name, cam_pos, target, action=None, frame=1):
         arm.animation_data.action = None
 
 
+# ── walkers (b5.2b, characters-08): crab, pig, chicken ──────────────────────
+# Same recipe as the gull: lofted bodies, every part weighted to a bone BEFORE the join
+# so the result is ONE skinned mesh with ONE material (one draw), a painted
+# baseColor/normal/ORM atlas, AO baked into COLOR_0. Each idle clip breathes (a
+# `chest`/`body` bone scales its girth). LOD1 is the same build at lower loft/segment
+# resolution, exported to <kind>_lods.glb as node `<kind>_LOD1` on the same rig and clips
+# (test-asset-tiers [lods]: LOD1 <= 40% of LOD0). Forward -Y like every animal here;
+# the crab is built facing -Y and the CLIENT turns it 90 degrees so it travels sideways.
+LEG_ROLL = (0.0, -1.0, 0.0)   # a bone pointing straight down rolls its Z to forward
+
+
+def build_rig_r(coll, name, bones):
+    """build_rig with an optional 6th field per bone: the roll target (default world up)."""
+    arm_data = bpy.data.armatures.new(name)
+    arm = bpy.data.objects.new(name, arm_data)
+    coll.objects.link(arm)
+    bpy.context.view_layer.objects.active = arm
+    bpy.ops.object.mode_set(mode='EDIT')
+    made = {}
+    for b in bones:
+        eb = arm_data.edit_bones.new(b[0])
+        eb.head, eb.tail = Vector(b[1]), Vector(b[2])
+        eb.align_roll(Vector(b[5] if len(b) > 5 else (0.0, 0.0, 1.0)))
+        made[b[0]] = eb
+    for b in bones:
+        if b[3]:
+            made[b[0]].parent = made[b[3]]
+            made[b[0]].use_connect = b[4]
+    bpy.ops.object.mode_set(mode='OBJECT')
+    for pb in arm.pose.bones:
+        pb.rotation_mode = 'XYZ'
+    return arm
+
+
+def wpart(obj, spec):
+    """Weight a part before the join: `spec` is a bone name or fn(co) -> [(bone, w)]."""
+    for vi, v in enumerate(obj.data.vertices):
+        ws = [(spec, 1.0)] if isinstance(spec, str) else spec(v.co)
+        tot = sum(w for _b, w in ws) or 1.0
+        for bn, bw in ws:
+            if bw > 1e-4:
+                g = obj.vertex_groups.get(bn) or obj.vertex_groups.new(name=bn)
+                g.add([vi], bw / tot, 'REPLACE')
+    return obj
+
+
+def uv_sw(obj, i):
+    me = obj.data
+    if not me.uv_layers:
+        me.uv_layers.new(name="UVMap")
+    u, v = swatch_uv(i)
+    for lp in me.uv_layers[0].data:
+        lp.uv = (u, v)
+    return obj
+
+
+def uv_side(obj, u0, u1):
+    """Planar UV for a flank part (wing): z -> u in [u0,u1] of the body band, y -> v."""
+    me = obj.data
+    if not me.uv_layers:
+        me.uv_layers.new(name="UVMap")
+    ys = [v.co.y for v in me.vertices]
+    zs = [v.co.z for v in me.vertices]
+    y0, y1, z0, z1 = min(ys), max(ys), min(zs), max(zs)
+    for li, lp in enumerate(me.uv_layers[0].data):
+        co = me.vertices[me.loops[li].vertex_index].co
+        lp.uv = (u0 + (u1 - u0) * (z1 - co.z) / max(z1 - z0, 1e-6),
+                 ATLAS_BODY_V * (0.25 + 0.6 * (co.y - y0) / max(y1 - y0, 1e-6)))
+    return obj
+
+
+def keys(n, step, fn):
+    """n+1 keys (last == first, so LoopRepeat is seamless) every `step` frames."""
+    return [(1 + k * step, fn(k / n * math.tau)) for k in range(n + 1)]
+
+
+# swatch index -> (rgb, roughness): 0 eye, 1 inner/mouth, 2 hoof/claw tip, 3 pale,
+# 4 dark, 5 yellow (beak/shank), 6 red (comb), 7 limb
+WALKER_SW = {
+    "crab": {0: ((0.02, 0.02, 0.02), 0.15), 1: ((0.45, 0.10, 0.06), 0.6), 2: ((0.12, 0.05, 0.04), 0.4),
+             3: ((0.92, 0.80, 0.62), 0.6), 4: ((0.22, 0.06, 0.04), 0.45), 5: ((0.85, 0.55, 0.20), 0.5),
+             6: ((0.80, 0.22, 0.10), 0.45), 7: ((0.70, 0.22, 0.09), 0.45)},
+    "pig": {0: ((0.03, 0.02, 0.02), 0.15), 1: ((0.62, 0.30, 0.30), 0.6), 2: ((0.24, 0.18, 0.15), 0.55),
+            3: ((0.95, 0.78, 0.72), 0.7), 4: ((0.16, 0.10, 0.09), 0.6), 5: ((0.85, 0.60, 0.30), 0.6),
+            6: ((0.86, 0.50, 0.50), 0.6), 7: ((0.88, 0.62, 0.58), 0.72)},
+    "chicken": {0: ((0.02, 0.02, 0.02), 0.12), 1: ((0.60, 0.20, 0.10), 0.6), 2: ((0.30, 0.20, 0.10), 0.6),
+                3: ((0.90, 0.82, 0.66), 0.8), 4: ((0.14, 0.09, 0.05), 0.7), 5: ((0.92, 0.70, 0.22), 0.5),
+                6: ((0.80, 0.12, 0.08), 0.55), 7: ((0.88, 0.72, 0.30), 0.55)},
+}
+
+
+def paint_walker(kind, S=256, seed=20260805):
+    rng = np.random.default_rng(seed + len(kind))
+    base = np.zeros((S, S, 3))
+    rough = np.full((S, S), 0.7)
+    height = np.zeros((S, S))
+    u = (np.arange(S) + 0.5) / S
+    U, V = np.meshgrid(u, u)
+    fine = fbm(rng, S, 48, 3)
+    blot = fbm(rng, S, 6, 3)
+    t = np.clip(V / ATLAS_BODY_V, 0, 1)
+    top = smoothstep(-0.35, 0.45, np.cos(U * math.tau))[..., None]   # loft u=0 is the back
+    if kind == "crab":
+        back = np.array([0.66, 0.17, 0.07]) * (0.80 + 0.30 * blot)[..., None]
+        speck = smoothstep(0.58, 0.66, fine)[..., None]
+        back = back * (1 - 0.45 * speck)
+        col = np.array([0.93, 0.80, 0.60]) * (1 - top) + back * top
+        r = 0.62 - 0.25 * top[..., 0]                                  # wet shell on top
+        h = 0.6 * fine + 0.4 * speck[..., 0]
+    elif kind == "pig":
+        skin = np.array([0.84, 0.57, 0.52]) * top + np.array([0.95, 0.73, 0.68]) * (1 - top)
+        mud = (smoothstep(0.55, 0.68, blot) * (1 - top[..., 0]) * smoothstep(0.35, 0.9, t))[..., None]
+        snout = smoothstep(0.20, 0.12, t)[..., None]
+        skin = skin * (1 - snout) + np.array([0.93, 0.62, 0.60]) * snout
+        col = (skin * (1 - mud) + np.array([0.38, 0.29, 0.21]) * mud) * (0.94 + 0.08 * fine)[..., None]
+        r = 0.72 + 0.15 * mud[..., 0]
+        h = 0.35 * fine + 0.5 * mud[..., 0] * blot
+    else:  # chicken: red-brown hen, shingled feather rows, near-black tail
+        row = (V * 70.0 + 0.5 * np.abs(np.sin(U * 40.0 * math.pi))) % 1.0
+        edge = smoothstep(0.70, 0.95, row)
+        warm = np.array([0.60, 0.33, 0.13]) * (1 - top) + np.array([0.46, 0.23, 0.09]) * top
+        col = warm * (1 - 0.35 * edge)[..., None] * (0.92 + 0.12 * fine)[..., None]
+        tail = smoothstep(0.80, 0.92, t)[..., None]
+        col = col * (1 - tail) + np.array([0.10, 0.09, 0.06]) * tail
+        r = 0.78 - 0.1 * edge
+        h = 0.6 * row * (1 - edge) + 0.2 * fine
+    body = V < ATLAS_BODY_V + 0.005
+    base[body] = col[body]
+    rough[body] = r[body]
+    height[body] = h[body]
+    v0, v1 = int(SW_V0 * S) - 2, int(SW_V1 * S) + 2
+    for i, (c, rr) in WALKER_SW[kind].items():
+        u0, u1 = int(i / 8 * S), int((i + 1) / 8 * S)
+        base[v0:v1, u0:u1] = c
+        rough[v0:v1, u0:u1] = rr
+        height[v0:v1, u0:u1] = 0.0
+    return base, rough, height
+
+
+# ── crab: 0.8 m across the legs, 11 bones (body, 2 claws, 8 legs) ───────────
+CRAB_LEG_Y = (-0.06, 0.0, 0.06, 0.12)
+CRAB_BONES = [("body", (0.0, 0.10, 0.13), (0.0, -0.10, 0.13), None, False)]
+for _sx, _s in ((1, "l"), (-1, "r")):
+    CRAB_BONES.append((f"claw_{_s}", (_sx * 0.15, -0.10, 0.12), (_sx * 0.245, -0.31, 0.10), "body", False))
+    for _i, _hy in enumerate(CRAB_LEG_Y):
+        CRAB_BONES.append((f"leg_{_s}{_i}", (_sx * 0.19, _hy, 0.12), (_sx * 0.30, _hy, 0.12), "body", False))
+
+
+def crab_parts(coll, q):
+    P = [wpart(loft(coll, "cara", [
+        (-0.150, 0.130, 0.0, 0.0), (-0.145, 0.130, 0.10, 0.025), (-0.120, 0.132, 0.17, 0.040),
+        (-0.070, 0.134, 0.205, 0.050), (0.0, 0.135, 0.215, 0.054), (0.060, 0.133, 0.195, 0.050),
+        (0.110, 0.130, 0.14, 0.040), (0.140, 0.128, 0.07, 0.025), (0.150, 0.127, 0.0, 0.0)],
+        radial=q["r"], rings=q["k"]), "body")]
+    for sx, s in ((1, "l"), (-1, "r")):
+        P.append(wpart(uv_sw(seg(coll, "stalk", (sx * 0.05, -0.13, 0.16), (sx * 0.06, -0.165, 0.215),
+                                 0.012, 0.009, "Eye_Black", q["s"]), 7), "body"))
+        P.append(wpart(uv_sw(blob(coll, "eye", 0.018, sx * 0.06, -0.168, 0.222, "Eye_Black", q["e"]), 0), "body"))
+        claw = [uv_sw(seg(coll, "arm", (sx * 0.15, -0.10, 0.12), (sx * 0.22, -0.20, 0.10), 0.030, 0.024,
+                          "Eye_Black", q["s"]), 7),
+                uv_sw(seg(coll, "fore", (sx * 0.22, -0.20, 0.10), (sx * 0.24, -0.27, 0.10), 0.026, 0.030,
+                          "Eye_Black", q["s"]), 7),
+                uv_sw(blob(coll, "palm", 1.0, sx * 0.245, -0.31, 0.10, "Eye_Black", q["c"],
+                           scale=(0.055, 0.075, 0.045)), 6),
+                uv_sw(seg(coll, "pa", (sx * 0.235, -0.37, 0.115), (sx * 0.215, -0.44, 0.105), 0.020, 0.004,
+                          "Eye_Black", q["s"]), 2),
+                uv_sw(seg(coll, "pb", (sx * 0.27, -0.37, 0.085), (sx * 0.24, -0.43, 0.095), 0.018, 0.004,
+                          "Eye_Black", q["s"]), 2)]
+        P += [wpart(o, f"claw_{s}") for o in claw]
+        for i, hy in enumerate(CRAB_LEG_Y):
+            knee = (sx * 0.31, hy + 0.015 * i, 0.19)
+            tip = (sx * 0.40, hy + 0.03 * i, 0.0)
+            leg = [uv_sw(seg(coll, "fem", (sx * 0.19, hy, 0.12), knee, 0.018, 0.015, "Eye_Black", q["s"]), 7),
+                   uv_sw(seg(coll, "tib", knee, tip, 0.014, 0.004, "Eye_Black", q["s"]), 6),
+                   uv_sw(blob(coll, "knee", 0.017, *knee, "Eye_Black", q["e"]), 7)]
+            P += [wpart(o, f"leg_{s}{i}") for o in leg]
+    return P
+
+
+def crab_scuttle(arm):
+    """2.4 Hz sideways tetrapod gait: legs 0/2 of one side swing with 1/3 of the other;
+    each leg lifts (rot x) and reaches out (bone-length scale) a half cycle apart from
+    its neighbours, the body rolls, the claws ride high."""
+    def f(ph):
+        p = {"body": (0.0, 0.05 * math.sin(2 * ph), 0.0),
+             "claw_l": (0.22, 0.0, 0.06 * math.sin(ph)), "claw_r": (0.22, 0.0, -0.06 * math.sin(ph))}
+        for s, so in (("l", 0.0), ("r", math.pi)):
+            for i in range(4):
+                a = ph + so + (math.pi if i % 2 else 0.0)
+                p[f"leg_{s}{i}"] = ((0.38 * max(0.0, math.sin(a)), 0.0, 0.10 * math.cos(a)),
+                                    (1.0, 1.0 + 0.12 * math.cos(a), 1.0))
+        return p
+    return keys(8, 1.25, f)
+
+
+def crab_idle(arm):
+    """2 s: the shell rises and falls (breathing), one claw grooms, legs shift."""
+    def f(ph):
+        b = 1.0 + 0.035 * math.sin(ph)
+        p = {"body": ((0.0, 0.0, 0.0), (b, 1.0, b)),
+             "claw_l": (0.10 + 0.22 * max(0.0, math.sin(ph)), 0.0, -0.15 * max(0.0, math.sin(ph))),
+             "claw_r": (0.08 + 0.03 * math.sin(2 * ph), 0.0, 0.0)}
+        for s in ("l", "r"):
+            for i in range(4):
+                p[f"leg_{s}{i}"] = (0.04 * math.sin(ph + i), 0.0, 0.0)
+        return p
+    return keys(8, 6, f)
+
+
+# ── pig: 0.95 m, 7 bones (root, chest, head, 4 legs) ────────────────────────
+PIG_LEGS = (("fl", 1, -0.17), ("fr", -1, -0.17), ("bl", 1, 0.21), ("br", -1, 0.21))
+PIG_BONES = [("root", (0.0, 0.30, 0.32), (0.0, -0.10, 0.32), None, False),
+             ("chest", (0.0, 0.15, 0.32), (0.0, -0.15, 0.32), "root", False),
+             ("head", (0.0, -0.22, 0.33), (0.0, -0.45, 0.31), "root", False)]
+PIG_BONES += [(f"leg_{n}", (sx * 0.10, hy, 0.24), (sx * 0.10, hy, 0.02), "root", False, LEG_ROLL)
+              for n, sx, hy in PIG_LEGS]
+
+
+def pig_body_w(co):
+    h = float(smoothstep(-0.18, -0.29, co.y))
+    c = 0.7 * float(smoothstep(-0.16, -0.04, co.y) * smoothstep(0.26, 0.12, co.y))
+    return [("head", h), ("chest", c * (1 - h)), ("root", (1 - c) * (1 - h))]
+
+
+def pig_parts(coll, q):
+    P = [wpart(loft(coll, "barrel", [
+        (-0.565, 0.30, 0.0, 0.0), (-0.562, 0.30, 0.050, 0.046), (-0.540, 0.30, 0.063, 0.057),
+        (-0.475, 0.31, 0.074, 0.068), (-0.420, 0.33, 0.110, 0.100), (-0.360, 0.34, 0.150, 0.140),
+        (-0.290, 0.34, 0.160, 0.150), (-0.220, 0.33, 0.165, 0.160), (-0.120, 0.32, 0.190, 0.180),
+        (0.020, 0.32, 0.200, 0.190), (0.160, 0.32, 0.195, 0.185), (0.280, 0.33, 0.170, 0.160),
+        (0.360, 0.34, 0.110, 0.110), (0.395, 0.345, 0.040, 0.040), (0.400, 0.345, 0.0, 0.0)],
+        radial=q["r"], rings=q["k"]), pig_body_w)]
+    for i in range(q["t"]):
+        a = i * 1.05 * 7 / q["t"]
+        P.append(wpart(uv_sw(blob(coll, "tail", 0.020 - i * 0.001 * 7 / q["t"], math.sin(a) * 0.012,
+                                  0.395 + i * 0.006 * 7 / q["t"], 0.37 + math.sin(a * 0.9 + 1.2) * 0.03,
+                                  "Eye_Black", 1), 7), "root"))
+    for sx in (-1, 1):
+        P.append(wpart(uv_sw(blob(coll, "nost", 1.0, sx * 0.022, -0.562, 0.30, "Eye_Black", 1,
+                                  scale=(0.013, 0.006, 0.016)), 4), "head"))
+        P.append(wpart(uv_sw(blob(coll, "eye", 0.017, sx * 0.086, -0.40, 0.395, "Eye_Black", q["e"]), 0), "head"))
+        m = (Matrix.Translation((sx * 0.085, -0.32, 0.455)) @ Matrix.Rotation(sx * math.radians(30), 4, 'Y'))
+        P.append(wpart(uv_sw(fin(coll, "ear", [(-0.03, 0.0), (0.045, 0.02), (-0.13, -0.07)], 0.020,
+                                 "Eye_Black", matrix=m), 6), "head"))
+    for n, sx, hy in PIG_LEGS:
+        P.append(wpart(uv_sw(seg(coll, "pl", (sx * 0.10, hy, 0.24), (sx * 0.10, hy, 0.04), 0.050, 0.035,
+                                 "Eye_Black", q["s"]), 7), f"leg_{n}"))
+        P.append(wpart(uv_sw(seg(coll, "ph", (sx * 0.10, hy, 0.045), (sx * 0.10, hy, 0.0), 0.036, 0.038,
+                                 "Eye_Black", q["s"]), 2), f"leg_{n}"))
+    return P
+
+
+def pig_walk(arm):
+    """1 s trot-walk: diagonal pairs swing together, the head nods twice a stride."""
+    def f(ph):
+        p = {"root": (0.0, 0.03 * math.sin(ph), 0.0), "head": (0.06 * math.sin(2 * ph), 0.0, 0.0)}
+        for n, off in (("fl", 0.0), ("br", 0.0), ("fr", math.pi), ("bl", math.pi)):
+            p[f"leg_{n}"] = (0.36 * math.sin(ph + off), 0.0, 0.0)
+        return p
+    return keys(8, 3, f)
+
+
+def pig_peck(arm):
+    """2 s rooting: snout down to the dirt, two snuffles, back up."""
+    def f(ph):
+        d = 0.5 - 0.5 * math.cos(ph)                                      # 0 -> 1 -> 0
+        return {"head": (-0.55 * d + 0.06 * d * math.sin(4 * ph), 0.0, 0.05 * math.sin(2 * ph)),
+                "root": (-0.06 * d, 0.0, 0.0), "chest": ((0.0, 0.0, 0.0), (1.0 + 0.02 * d, 1.0, 1.0 + 0.02 * d)),
+                "leg_fl": (-0.10 * d, 0.0, 0.0), "leg_fr": (-0.10 * d, 0.0, 0.0)}
+    return keys(8, 6, f)
+
+
+def pig_idle(arm):
+    """3 s: the barrel breathes (chest girth), the head looks about, a weight shift."""
+    def f(ph):
+        b = 1.0 + 0.04 * math.sin(ph)
+        return {"chest": ((0.0, 0.0, 0.0), (b, 1.0, b)),
+                "head": (0.04 * math.sin(2 * ph), 0.0, 0.28 * math.sin(ph)),
+                "root": (0.0, 0.015 * math.sin(ph), 0.0)}
+    return keys(8, 9, f)
+
+
+# ── chicken: 0.52 m hen, 7 bones (root, chest, head, 2 wings, 2 legs) ───────
+CHICK_BONES = [("root", (0.0, 0.15, 0.27), (0.0, -0.08, 0.27), None, False),
+               ("chest", (0.0, 0.06, 0.26), (0.0, -0.10, 0.26), "root", False),
+               ("head", (0.0, -0.10, 0.31), (0.0, -0.165, 0.47), "root", False),
+               ("wing_l", (0.115, -0.06, 0.33), (0.13, 0.14, 0.27), "root", False),
+               ("wing_r", (-0.115, -0.06, 0.33), (-0.13, 0.14, 0.27), "root", False),
+               ("leg_l", (0.045, 0.03, 0.18), (0.045, 0.03, 0.0), "root", False, LEG_ROLL),
+               ("leg_r", (-0.045, 0.03, 0.18), (-0.045, 0.03, 0.0), "root", False, LEG_ROLL)]
+
+
+def chick_body_w(co):
+    c = 0.7 * float(smoothstep(-0.14, -0.05, co.y) * smoothstep(0.14, 0.04, co.y))
+    return [("chest", c), ("root", 1 - c)]
+
+
+def chicken_parts(coll, q):
+    P = [wpart(loft(coll, "torso", [
+        (-0.170, 0.300, 0.0, 0.0), (-0.160, 0.290, 0.060, 0.070), (-0.120, 0.270, 0.110, 0.120),
+        (-0.050, 0.260, 0.135, 0.135), (0.030, 0.265, 0.135, 0.125), (0.100, 0.280, 0.115, 0.105),
+        (0.160, 0.310, 0.080, 0.080), (0.200, 0.340, 0.040, 0.050), (0.215, 0.350, 0.0, 0.0)],
+        radial=q["r"], rings=q["k"]), chick_body_w)]
+    nh = loft(coll, "neckhead", [(-0.215, 0.0, 0.0, 0.0), (-0.21, 0.0, 0.030, 0.035), (-0.19, 0.0, 0.050, 0.058),
+                                 (-0.16, 0.0, 0.055, 0.065), (-0.13, 0.0, 0.045, 0.050), (-0.08, 0.0, 0.045, 0.048),
+                                 (-0.03, 0.0, 0.060, 0.060), (0.0, 0.0, 0.080, 0.075), (0.02, 0.0, 0.0, 0.0)],
+              radial=q["hr"], rings=q["hk"])
+    nh.data.transform(Matrix.Translation((0.0, -0.10, 0.30)) @ Matrix.Rotation(math.radians(-70), 4, 'X'))
+    P.append(wpart(nh, lambda co: [("head", float(smoothstep(0.33, 0.39, co.z))),
+                                   ("root", 1 - float(smoothstep(0.33, 0.39, co.z)))]))
+    hd = [uv_sw(loft(coll, "beak", [(-0.275, 0.447, 0.0, 0.0), (-0.265, 0.449, 0.006, 0.007),
+                                    (-0.245, 0.452, 0.012, 0.013), (-0.222, 0.456, 0.018, 0.018),
+                                    (-0.205, 0.458, 0.020, 0.020)], radial=q["br"], rings=6), 5),
+          uv_sw(blob(coll, "wattle", 1.0, 0.0, -0.215, 0.415, "Eye_Black", q["e"], scale=(0.016, 0.018, 0.028)), 6)]
+    for i in range(3):
+        hd.append(uv_sw(blob(coll, "comb", 1.0, 0.0, -0.195 + i * 0.028, 0.505 - abs(1 - i) * 0.006 + (0.0 if i else -0.004),
+                             "Eye_Black", 1, scale=(0.010, 0.022, 0.030)), 6))
+    for sx in (-1, 1):
+        hd.append(uv_sw(blob(coll, "eye", 0.012, sx * 0.046, -0.185, 0.468, "Eye_Black", q["e"]), 0))
+    P += [wpart(o, "head") for o in hd]
+    for i, az in enumerate((-0.55, -0.28, 0.0, 0.28, 0.55)):
+        m = (Matrix.Translation((0.0, 0.17, 0.32)) @ Matrix.Rotation(az, 4, 'Z'))
+        P.append(wpart(uv_sw(fin(coll, "tailf", [(0.0, 0.0), (0.13, 0.15 - abs(az) * 0.06),
+                                                  (0.18, 0.10 - abs(az) * 0.06), (0.09, -0.02)],
+                                 0.014, "Eye_Black", matrix=m), 4), "root"))
+    for sx, s in ((1, "l"), (-1, "r")):
+        w = blob(coll, "wing", 1.0, sx * 0.125, 0.03, 0.285, "Eye_Black", q["c"], scale=(0.034, 0.14, 0.088),
+                 rot=Matrix.Rotation(math.radians(-14), 4, 'X') @ Matrix.Rotation(sx * math.radians(-8), 4, 'Y'))
+        P.append(wpart(uv_side(w, 0.16 if sx > 0 else 0.68, 0.32 if sx > 0 else 0.84), f"wing_{s}"))
+        leg = [uv_sw(seg(coll, "shank", (sx * 0.045, 0.03, 0.17), (sx * 0.045, 0.03, 0.015), 0.012, 0.010,
+                         "Eye_Black", q["s"]), 7)]
+        for tx, ty in ((0.0, -0.065), (0.035, -0.05), (-0.035, -0.05), (0.0, 0.035)):
+            leg.append(uv_sw(seg(coll, "toe", (sx * 0.045, 0.03, 0.012), (sx * 0.045 + tx, 0.03 + ty, 0.004),
+                                 0.007, 0.004, "Eye_Black", max(4, q["s"] - 2)), 7))
+        P += [wpart(o, f"leg_{s}") for o in leg]
+    return P
+
+
+def chicken_walk(arm):
+    """0.6 s strut: legs alternate, the head nods twice a step, wings stay tucked."""
+    def f(ph):
+        return {"root": (0.0, 0.05 * math.sin(ph), 0.0), "head": (-0.14 * max(0.0, math.sin(2 * ph)), 0.0, 0.0),
+                "leg_l": (0.45 * math.sin(ph), 0.0, 0.0), "leg_r": (-0.45 * math.sin(ph), 0.0, 0.0)}
+    return keys(8, 1.8, f)
+
+
+def chicken_peck(arm):
+    """1.25 s: two quick pecks at the ground, then a look up."""
+    curve = [0.0, 0.85, 1.0, 0.35, 0.95, 1.0, 0.3, 0.0, 0.0]
+    out = []
+    for k, d in enumerate(curve):
+        out.append((1 + k * 3.75, {"head": (-1.15 * d, 0.0, 0.15 * (k == 7)), "root": (-0.28 * d, 0.0, 0.0),
+                                   "wing_l": (0.0, 0.0, 0.04 * d), "wing_r": (0.0, 0.0, -0.04 * d)}))
+    return out
+
+
+def chicken_idle(arm):
+    """2 s: breathing (chest girth), quick head turns, a ruffle of the wings."""
+    def f(ph):
+        b = 1.0 + 0.035 * math.sin(ph)
+        turn = 0.45 * (1 if math.sin(ph) > 0.3 else (-1 if math.sin(ph) < -0.3 else math.sin(ph) / 0.3))
+        return {"chest": ((0.0, 0.0, 0.0), (b, 1.0, b)), "head": (0.05 * math.sin(2 * ph), 0.0, turn),
+                "wing_l": (0.0, 0.0, 0.03 * max(0.0, math.sin(3 * ph))),
+                "wing_r": (0.0, 0.0, -0.03 * max(0.0, math.sin(3 * ph)))}
+    return keys(8, 6, f)
+
+
+WALKERS = {
+    "crab": {"bones": CRAB_BONES, "parts": crab_parts, "clips": {"scuttle": crab_scuttle, "idle": crab_idle},
+             "lod": [dict(r=28, k=24, s=8, e=2, c=3), dict(r=14, k=12, s=5, e=1, c=2)],
+             "cams": [((0.75, -0.95, 0.75), (0, -0.05, 0.12), "idle", 1), ((0.75, -0.95, 0.75), (0, -0.05, 0.12), "scuttle", 3)]},
+    "pig": {"bones": PIG_BONES, "parts": pig_parts, "clips": {"walk": pig_walk, "peck": pig_peck, "idle": pig_idle},
+            "lod": [dict(r=32, k=44, s=10, e=2, t=7), dict(r=16, k=20, s=6, e=1, t=3)],
+            "cams": [((1.3, -1.2, 0.8), (0, -0.05, 0.28), "walk", 7), ((1.3, -1.2, 0.8), (0, -0.05, 0.28), "peck", 25)]},
+    "chicken": {"bones": CHICK_BONES, "parts": chicken_parts,
+                "clips": {"walk": chicken_walk, "peck": chicken_peck, "idle": chicken_idle},
+                "lod": [dict(r=28, k=30, hr=20, hk=20, br=10, s=8, e=2, c=3), dict(r=14, k=12, hr=10, hk=10, br=6, s=5, e=1, c=2)],
+                "cams": [((0.9, -0.85, 0.6), (0, -0.03, 0.26), "walk", 4), ((0.9, -0.85, 0.6), (0, -0.03, 0.26), "peck", 9)]},
+}
+
+
+def build_walker(kind, lod=0, lod0_tris=None):
+    W = WALKERS[kind]
+    name = kind if lod == 0 else f"{kind}_LOD1"
+    coll = asset_collection(name)
+    bpy.context.view_layer.active_layer_collection = (
+        bpy.context.view_layer.layer_collection.children[coll.name])
+    body = join(W["parts"](coll, W["lod"][lod]), name)
+    zmin = min(v.co.z for v in body.data.vertices)
+    for v in body.data.vertices:
+        v.co.z -= zmin                                    # feet on z = 0 (test-asset-bounds WALKERS)
+    bake_ao(coll, samples=10, floor=0.66, height_gradient=0.0)
+    paths = write_maps(kind, *paint_walker(kind), strength=2.0, out_dir=os.path.join(RENDER_DIR, "tex"))
+    share_material([body], paths, kind)
+    arm = build_rig_r(coll, f"{kind}_rig", W["bones"])
+    m = body.modifiers.new("Armature", 'ARMATURE')
+    m.object = arm
+    body.parent = arm
+    for clip, fn in W["clips"].items():
+        make_action_s(arm, clip, fn(arm))
+    objs = [arm, body]
+    path = export_skinned(objs, f"{kind}.glb" if lod == 0 else f"{kind}_lods.glb")
+    info = verify_skinned(path)
+    if lod == 0:
+        assert 2500 <= info['tris'] <= 4000, f"{kind} is {info['tris']} tris, band is 2500-4000"
+        if os.environ.get('BR_FAUNA_RENDER'):
+            for cp, tg, act, fr in W["cams"]:
+                quick_render(objs, f"{kind}_{act}", cp, tg, action=act, frame=fr)
+    else:
+        assert info['tris'] <= 0.40 * lod0_tris, f"{name} is {info['tris']} tris > 40% of {lod0_tris}"
+    assert info['joints'] == len(W["bones"]), f"{kind} rig has {info['joints']} joints"
+    assert set(info['animations']) >= set(W["clips"]), f"{kind} actions missing: {info['animations']}"
+    for o in list(coll.objects):
+        bpy.data.objects.remove(o, do_unlink=True)
+    for a in list(bpy.data.actions):
+        bpy.data.actions.remove(a)
+    for mt in [mt for mt in bpy.data.materials if mt.users == 0]:
+        bpy.data.materials.remove(mt)
+    print(f"built {name} tris={info['tris']}")
+    return info
+
+
 clear_default_scene()
-hero = build_shark_hero()
-gull = build_gull()
-far = build_shark_far() if os.environ.get('BR_FAUNA_FAR') else {'tris': 'kept'}
-print(f"FAUNA V2 DONE hero={hero['tris']} gull={gull['tris']} far={far['tris']} "
-      f"joints={hero['joints']}/{gull['joints']} anims={hero['animations']}/{gull['animations']}")
+ONLY = os.environ.get('BR_FAUNA_ONLY', 'all')
+if ONLY in ('all', 'sea'):
+    hero = build_shark_hero()
+    gull = build_gull()
+    far = build_shark_far() if os.environ.get('BR_FAUNA_FAR') else {'tris': 'kept'}
+    print(f"FAUNA V2 DONE hero={hero['tris']} gull={gull['tris']} far={far['tris']} "
+          f"joints={hero['joints']}/{gull['joints']} anims={hero['animations']}/{gull['animations']}")
+if ONLY in ('all', 'walkers'):
+    # writer literals for provenance-scan: "crab.glb", "pig.glb", "chicken.glb" (+ "<kind>_lods.glb")
+    for _k in (f[:-4] for f in ("crab.glb", "pig.glb", "chicken.glb")):
+        _l0 = build_walker(_k)
+        _l1 = build_walker(_k, 1, _l0['tris'])
+        print(f"WALKER {_k} lod0={_l0['tris']} lod1={_l1['tris']} ({_l1['tris'] / _l0['tris']:.0%}) "
+              f"joints={_l0['joints']} anims={_l0['animations']}")

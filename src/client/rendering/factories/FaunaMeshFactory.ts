@@ -79,30 +79,60 @@ export function gullClip(speed: number, climb: number, t: number, seed: number):
   return ((t + seed * 1.7) % 3.4) < 1.2 ? 'flap' : 'glide';
 }
 
-/** The rigged gull (6 bones; flap / glide / idle), cloned with SkeletonUtils so its
- *  skeleton is its own. Game.syncWildlife only poses named pivot parts, so this mesh
- *  drives its OWN mixer from its world motion in onBeforeRender: that hook runs only
- *  when the gull is visible and in a frustum (off-screen gulls cost nothing), and the
- *  shared mixerStep LOD (45 m full rate, 15 Hz beyond, frozen past 130 m) applies.
- *  Null before the asset is in or if gull.glb ever ships without skin or clips. */
-function buildSkinnedGull(animal: WildlifeAnimal): THREE.Group | null {
-  const src = assets.source('gull' as string as AssetName);
+/** Walker clip choice from its own motion (b5.2b): walking above 0.12 m/s (the crab
+ *  scuttles), otherwise idle, broken by a peck (the pig roots) for part of every cycle,
+ *  phase-shifted per animal so a flock never pecks in unison. Pure. */
+export type WalkerKind = 'crab' | 'pig' | 'chicken';
+export function walkerClip(kind: WalkerKind, speed: number, t: number, seed: number): 'idle' | 'walk' | 'scuttle' | 'peck' {
+  if (speed > 0.12) return kind === 'crab' ? 'scuttle' : 'walk';
+  if (kind === 'crab') return 'idle';
+  const period = kind === 'chicken' ? 4.2 : 7.5;
+  const len = kind === 'chicken' ? 1.25 : 2.0;
+  return ((t + seed * 1.3) % period) < len ? 'peck' : 'idle';
+}
+
+/** Gait playback rate from ground speed, so feet do not skate: the clip's authored
+ *  stride speed (crab 0.9, pig 0.8, chicken 0.6 m/s) maps to 1x, clamped 0.6-1.8. Pure. */
+export function walkerTimeScale(kind: WalkerKind, speed: number): number {
+  const nominal = kind === 'crab' ? 0.9 : kind === 'pig' ? 0.8 : 0.6;
+  return Math.min(1.8, Math.max(0.6, speed / nominal));
+}
+
+type MotionClip = (speed: number, climb: number, t: number, seed: number) => string;
+
+/** A rigged creature (gull b5.2a; crab, pig, chicken b5.2b), cloned with SkeletonUtils so
+ *  its skeleton is its own. Game.syncWildlife only poses named pivot parts, so this mesh
+ *  drives its OWN mixer from its world motion in onBeforeRender: that hook runs only when
+ *  the creature is visible and in a frustum (off-screen ones cost nothing), and the shared
+ *  mixerStep LOD (45 m full rate, 15 Hz beyond, frozen past 130 m) applies. `rate` scales
+ *  the gait clip by ground speed. Null before the asset is in or if the GLB ships without
+ *  a skin or with fewer than two of the named clips. */
+function buildSkinnedCreature(
+  animal: WildlifeAnimal,
+  clipNames: readonly string[],
+  choose: MotionClip,
+  rate?: (clip: string, speed: number) => number,
+  yaw = 0,
+): THREE.Group | null {
+  const src = assets.source(animal.type as string as AssetName);
   if (!src || src.animations.length < 2) return null;
   let skinned: THREE.SkinnedMesh | null = null;
   src.scene.traverse((o) => { if (!skinned && (o as THREE.SkinnedMesh).isSkinnedMesh) skinned = o as THREE.SkinnedMesh; });
   if (!skinned) return null;
   const root = cloneSkinnedScene(src.scene) as THREE.Group;
+  root.rotation.y = yaw;
   const group = new THREE.Group();
   group.name = `wildlife-${animal.id}`;
   group.add(root);
   const mixer = new THREE.AnimationMixer(root);
-  const actions: Partial<Record<'idle' | 'glide' | 'flap', THREE.AnimationAction>> = {};
-  for (const name of ['idle', 'glide', 'flap'] as const) {
+  const actions: Record<string, THREE.AnimationAction> = {};
+  for (const name of clipNames) {
     const clip = THREE.AnimationClip.findByName(src.animations, name);
     if (clip) actions[name] = mixer.clipAction(clip);
   }
-  let current: 'idle' | 'glide' | 'flap' = 'idle';
-  actions.idle?.play();
+  if (Object.keys(actions).length < 2 || !actions.idle) return null;
+  let current = 'idle';
+  actions.idle.play();
   const seed = (animal.position.x * 0.37 + animal.position.z * 0.11) % 10;
   const last = new THREE.Vector3();
   const now = new THREE.Vector3();
@@ -113,7 +143,9 @@ function buildSkinnedGull(animal: WildlifeAnimal): THREE.Group | null {
   let mesh: THREE.SkinnedMesh | null = null;
   root.traverse((o) => { if (!mesh && (o as THREE.SkinnedMesh).isSkinnedMesh) mesh = o as THREE.SkinnedMesh; });
   if (mesh) {
-    (mesh as THREE.SkinnedMesh).onBeforeRender = (_r, _s, camera) => {
+    const m = mesh as THREE.SkinnedMesh;
+    if (animal.type !== 'gull') { m.castShadow = true; m.receiveShadow = true; }
+    m.onBeforeRender = (_r, _s, camera) => {
       if (!(camera as THREE.PerspectiveCamera).isPerspectiveCamera) return; // shadow pass
       const ms = performance.now();
       group.getWorldPosition(now);
@@ -125,12 +157,13 @@ function buildSkinnedGull(animal: WildlifeAnimal): THREE.Group | null {
       speedEma += (now.distanceTo(last) / dt - speedEma) * k;
       climbEma += ((now.y - last.y) / dt - climbEma) * k;
       last.copy(now);
-      const want = gullClip(speedEma, climbEma, ms / 1000, seed);
+      const want = choose(speedEma, climbEma, ms / 1000, seed);
       if (want !== current && actions[want] && actions[current]) {
-        actions[want]!.reset().play();
-        actions[current]!.crossFadeTo(actions[want]!, 0.35, false);
+        actions[want].reset().play();
+        actions[current].crossFadeTo(actions[want], 0.3, false);
         current = want;
       }
+      if (rate) actions[current].timeScale = rate(current, speedEma);
       const { step, carry: c } = mixerStep(dt, carry, camera.position.distanceTo(now));
       carry = c;
       if (step > 0) mixer.update(step);
@@ -143,7 +176,19 @@ function buildSkinnedGull(animal: WildlifeAnimal): THREE.Group | null {
 
 export function buildWildlifeMesh(animal: WildlifeAnimal, quality: RenderQuality): THREE.Group {
     if (animal.type === 'gull') {
-      const g = buildSkinnedGull(animal);
+      const g = buildSkinnedCreature(animal, ['idle', 'glide', 'flap'], gullClip);
+      if (g) return g;
+    } else if (animal.type === 'crab' || animal.type === 'pig' || animal.type === 'chicken') {
+      const kind = animal.type;
+      // The crab GLB faces -Y (game +Z) like every animal; turned -90 deg it travels SIDEWAYS
+      // along its heading, which is how a crab walks.
+      const g = buildSkinnedCreature(
+        animal,
+        kind === 'crab' ? ['idle', 'scuttle'] : ['idle', 'walk', 'peck'],
+        (speed, _climb, t, seed) => walkerClip(kind, speed, t, seed),
+        (clip, speed) => (clip === 'walk' || clip === 'scuttle' ? walkerTimeScale(kind, speed) : 1),
+        kind === 'crab' ? -Math.PI / 2 : 0,
+      );
       if (g) return g;
     }
     // Blender GLB first (authored in parallel — standard part names drive the
