@@ -292,7 +292,7 @@ export const RATCHET = [
   'crow_roost:band', 'crow_roost:lods', 'crow_roost:textures',
   'mermaid_shrine:band', 'mermaid_shrine:lods', 'mermaid_shrine:textures',
   'castaway_camp:band', 'castaway_camp:lods', 'castaway_camp:textures',
-  'kraken_wreck:band', 'kraken_wreck:lods', 'kraken_wreck:textures',
+  'kraken_wreck:lods',
   'dig_site:band', 'dig_site:lods', 'dig_site:textures',
   'gallows:band', 'gallows:lods', 'gallows:textures',
   'parley_table:band', 'parley_table:lods', 'parley_table:textures',

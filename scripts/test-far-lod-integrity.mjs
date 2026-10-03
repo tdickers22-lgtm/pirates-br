@@ -326,7 +326,7 @@ export function lodVerdicts(g, stories = storyAssetNames()) {
     if (culled > MAX_CULL_SHARE * g.near.area) why += `culled ${(100 * culled / g.near.area).toFixed(0)}% of the surface (> ${100 * MAX_CULL_SHARE}%); `;
     if (m.drawnTris >= above) why += `not cheaper than the level above (${above}); `;
     if (reuse) {
-      if (stories.includes(g.key) && (m.drawnTris < STORY_TRIS[0] || m.drawnTris > STORY_TRIS[1])) why += `outside the ${STORY_TRIS[0]}-${STORY_TRIS[1]} story band; `;
+      if (lvl === 'far' && stories.includes(g.key) && (m.drawnTris < STORY_TRIS[0] || m.drawnTris > STORY_TRIS[1])) why += `outside the ${STORY_TRIS[0]}-${STORY_TRIS[1]} story band; `;
     } else {
       const loopsOk = isRock(g.key) ? m.boundaryLoops === 0 : m.boundaryLoops <= g.near.boundaryLoops;
       if (!loopsOk) why += 'opens a hole; ';

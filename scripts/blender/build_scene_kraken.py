@@ -14,6 +14,16 @@ from mathutils import Vector, Matrix
 HERE = os.path.dirname(os.path.abspath(__file__))
 exec(open(os.path.join(HERE, '_helpers.py')).read())
 exec(open(os.path.join(HERE, '_ao.py')).read())
+exec(open(os.path.join(HERE, '_detail.py')).read())
+import sys
+sys.path.insert(0, HERE)
+import _trim as TR
+exec(open(os.path.join(HERE, '_trimkit.py')).read())   # b5.1c: wood/iron/rope/stone on the trim sheets
+TRIM_OF = dict(TRIM_OF, Rock_Grey=("stone", "rubble"))  # a beach slab, not dressed ashlar
+STORY_SHEETS = os.path.join(HERE, "..", "..", "docs", "asset-sheets", "story")
+# Story tier (60-120k LOD0): LOD1 36% / LOD2 10% / far voxel hull ~3% clamped into the 2-4k proxy band.
+STORY_LEVELS = (("LOD1", 0.36), ("LOD2", 0.10), ("far", 0.035, 3600))
+FLESH_CACHE = os.path.join(HERE, ".cache", "kraken_flesh")
 
 RENDER_DIR = os.environ.get("PBR_RENDER_DIR", "")
 EXPORT_DIR = os.environ.get("PBR_EXPORT_DIR", EXPORT_DIR)
@@ -132,6 +142,141 @@ def loft_tube(coll, name, pts, radii, material, segs=16, smooth=True):
     return obj_from_bmesh(name, bm, coll, material, smooth=smooth), frames
 
 
+def _tile_noise(n, rng, beta, k0=2.0):
+    """Periodic (FFT-filtered) noise in [0, 1]: tiles seamlessly in both axes."""
+    import numpy as np
+    w = rng.standard_normal((n, n))
+    ky = np.fft.fftfreq(n)[:, None] * n
+    kx = np.fft.fftfreq(n)[None, :] * n
+    k = np.sqrt(kx * kx + ky * ky)
+    k[0, 0] = 1.0
+    f = np.real(np.fft.ifft2(np.fft.fft2(w) / np.maximum(k, k0) ** beta))
+    return (f - f.min()) / (f.max() - f.min() + 1e-9)
+
+
+def _save_img(name, arr, data):
+    import numpy as np
+    n = arr.shape[0]
+    os.makedirs(FLESH_CACHE, exist_ok=True)
+    path = os.path.join(FLESH_CACHE, f"{name}.png")
+    img = bpy.data.images.new(name, n, n, alpha=False)
+    rgba = np.concatenate([arr, np.ones((n, n, 1))], axis=2)
+    img.pixels.foreach_set(np.flipud(rgba).astype(np.float32).ravel())
+    img.filepath_raw = path
+    img.file_format = "PNG"
+    img.save()
+    img.colorspace_settings.name = "Non-Color" if data else "sRGB"
+    return img
+
+
+def wet_flesh_material(mat_name, base, belly, rough, ring_freq, seed, n=512):
+    """Original procedural PBR set (no third-party source): mottled skin with chromatophore spots,
+    wrinkle rings across the run, a cavity-AO channel and LOW roughness = the wet specular sheen.
+    Rebuilds the palette material IN PLACE so AssetMaterialCollapse keeps classing it by name."""
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    big, mid, fine = _tile_noise(n, rng, 2.2), _tile_noise(n, rng, 1.6), _tile_noise(n, rng, 1.0, 24.0)
+    yy = np.arange(n)[:, None] / n
+    wr = 0.5 + 0.5 * np.sin(2 * np.pi * (ring_freq * yy + 0.9 * mid))           # wrinkle rings
+    spots = np.clip((fine - 0.62) * 6.0, 0, 1) * (0.4 + 0.6 * big)               # chromatophores
+    height = 0.55 * wr + 0.30 * mid + 0.15 * fine
+    lin = lambda c: np.array(c)[None, None, :] ** 2.2
+    col = lin(base) * (1 - big[..., None] * 0.55) + lin(belly) * (big[..., None] * 0.55)
+    col = col * (0.82 + 0.30 * wr[..., None]) * (1 - 0.45 * spots[..., None])
+    col = np.clip(col, 0, 1) ** (1 / 2.2)
+    gy, gx = np.gradient(height)
+    s = 6.0
+    nrm = np.stack([-gx * s * n / 64, gy * s * n / 64, np.ones_like(height)], axis=2)
+    nrm /= np.linalg.norm(nrm, axis=2, keepdims=True)
+    orm = np.stack([0.62 + 0.38 * height, np.clip(rough + 0.14 * mid - 0.08 * wr, 0.08, 0.9),
+                    np.zeros_like(height)], axis=2)
+    m = bpy.data.materials.get(mat_name) or bpy.data.materials.new(mat_name)
+    m.use_nodes = True
+    m.use_backface_culling = True
+    nt = m.node_tree
+    for nd in list(nt.nodes):
+        if nd.type != "OUTPUT_MATERIAL":
+            nt.nodes.remove(nd)
+    bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
+    nt.links.new(bsdf.outputs[0], nt.nodes["Material Output"].inputs["Surface"])
+
+    def tex(img):
+        t = nt.nodes.new("ShaderNodeTexImage")
+        t.image = img
+        return t
+    nt.links.new(tex(_save_img(f"{mat_name}_base", col, False)).outputs["Color"], bsdf.inputs["Base Color"])
+    sep = nt.nodes.new("ShaderNodeSeparateColor")
+    nt.links.new(tex(_save_img(f"{mat_name}_orm", orm, True)).outputs["Color"], sep.inputs["Color"])
+    nt.links.new(sep.outputs["Green"], bsdf.inputs["Roughness"])
+    nt.links.new(sep.outputs["Blue"], bsdf.inputs["Metallic"])
+    grp = nt.nodes.new("ShaderNodeGroup")
+    import _pbr as P
+    grp.node_tree = P._gltf_output_group()
+    nt.links.new(sep.outputs["Red"], grp.inputs["Occlusion"])
+    nm = nt.nodes.new("ShaderNodeNormalMap")
+    nt.links.new(tex(_save_img(f"{mat_name}_nrm", nrm * 0.5 + 0.5, True)).outputs["Color"], nm.inputs["Color"])
+    nt.links.new(nm.outputs["Normal"], bsdf.inputs["Normal"])
+    return m
+
+
+def tube_uv(obj, pts, segs, around=3.0, tile=1.1):
+    """UV a loft_tube: U around (repeats `around` times), V = arc length / tile (wraps)."""
+    arc = [0.0]
+    for i in range(1, len(pts)):
+        arc.append(arc[-1] + (pts[i] - pts[i - 1]).length)
+    me = obj.data
+    uvl = me.uv_layers.new(name="UVMap")
+    nring = len(pts) * segs
+    for p in me.polygons:
+        vs = list(p.vertices)
+        if len(vs) != 4 or max(vs) >= nring:
+            for li in p.loop_indices:
+                uvl.data[li].uv = (0.0, 0.0)
+            continue
+        ss = [v % segs for v in vs]
+        wrap = max(ss) - min(ss) > 1
+        for li, v in zip(p.loop_indices, vs):
+            s, i = v % segs, v // segs
+            if wrap and s == 0:
+                s = segs
+            uvl.data[li].uv = (around * s / segs, arc[i] / tile)
+
+
+CUP_PROFILE = ((0.78, 0.0), (0.97, 0.50), (1.0, 0.84), (0.90, 1.0), (0.70, 0.94),
+               (0.56, 0.62), (0.40, 0.38), (0.18, 0.30), (0.0, 0.34))
+
+
+def sucker_cup(coll, name, sr, h, mtx, material, segs=16):
+    """One sucker: lathed cup (flared base, thick rim lip, hollow throat, dimpled floor), UV'd
+    U around / V up the profile. Instanced along the rows by transform."""
+    bm = bmesh.new()
+    uvl = bm.loops.layers.uv.verify()
+    rings = []
+    for (r, z) in CUP_PROFILE:
+        if r == 0.0:
+            rings.append([bm.verts.new(mtx @ Vector((0, 0, z * h)))])
+            continue
+        rings.append([bm.verts.new(mtx @ Vector((math.cos(2 * math.pi * s / segs) * r * sr,
+                                               math.sin(2 * math.pi * s / segs) * r * sr, z * h)))
+                      for s in range(segs)])
+    nk = len(CUP_PROFILE) - 1
+    for k in range(nk):
+        a, b = rings[k], rings[k + 1]
+        for s in range(segs):
+            s1 = (s + 1) % segs
+            if len(b) == 1:
+                f = bm.faces.new((a[s], a[s1], b[0]))
+                uv = ((s / segs, k / nk), ((s + 1) / segs, k / nk), ((s + 0.5) / segs, 1.0))
+            else:
+                f = bm.faces.new((a[s], a[s1], b[s1], b[s]))
+                uv = ((s / segs, k / nk), ((s + 1) / segs, k / nk), ((s + 1) / segs, (k + 1) / nk),
+                      (s / segs, (k + 1) / nk))
+            for l, t in zip(f.loops, uv):
+                l[uvl].uv = t
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    return obj_from_bmesh(name, bm, coll, material, smooth=True)
+
+
 def finish(objs, width=0.02, segments=1):
     for o in objs:
         bevel_obj(o, width=width, segments=segments)
@@ -145,7 +290,10 @@ def build_kraken_wreck(name="kraken_wreck"):
     coll = asset_collection(name)
     rng = random.Random(42)
     wb, wd, wm = mat("Wood_Bleached"), mat("Wood_Dark"), mat("Wood_Mid")
-    kf, ks = mat("Kraken_Flesh"), mat("Kraken_Sucker")
+    mat("Kraken_Flesh"), mat("Kraken_Sucker")
+    # wine-dark mottled skin, paler belly blush; suckers pale and slicker still (wet specular)
+    kf = wet_flesh_material("Kraken_Flesh", (0.36, 0.10, 0.15), (0.62, 0.30, 0.30), 0.24, 9, 5)
+    ks = wet_flesh_material("Kraken_Sucker", (0.72, 0.60, 0.52), (0.86, 0.72, 0.62), 0.20, 4, 9)
     # local retint: the slab reads as concrete — volcanic rock for this scene
     rock = mat("Rock_Grey")
     rock.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = \
@@ -359,7 +507,9 @@ def build_kraken_wreck(name="kraken_wreck"):
         t = i / NS
         r = 0.92 * (1 - t) ** 0.9 + 0.05
         radii.append(r)
-    tent, frames = loft_tube(coll, f"{name}_tent", tpts, radii, kf, segs=26)
+    TSEG = int(os.environ.get("B51C_TENT_SEGS", "40"))
+    tent, frames = loft_tube(coll, f"{name}_tent", tpts, radii, kf, segs=TSEG)
+    tube_uv(tent, tpts, TSEG)
     displace_noise(tent, strength=0.15, scale=1.5, seed=5)
     displace_noise(tent, strength=0.06, scale=0.55, seed=11)
     apply_modifiers(tent)
@@ -411,14 +561,10 @@ def build_kraken_wreck(name="kraken_wreck"):
                 p = tpts[idx] + d * (rloc * 0.86)
                 h = sr * 0.6
                 q = d.to_track_quat('Z', 'Y')
-                bm = bm_cylinder(sr, sr * 0.70, h, segs=10)
-                bmesh.ops.transform(bm, matrix=Matrix.Translation(p + d * (h * 0.45)) @
-                                    q.to_matrix().to_4x4(), verts=bm.verts)
-                parts.append(obj_from_bmesh(f"{name}_suck{si}{row}", bm, coll, ks, smooth=True))
-                bm = bm_cylinder(sr * 0.42, sr * 0.40, h * 0.5, segs=10)
-                bmesh.ops.transform(bm, matrix=Matrix.Translation(p + d * (h * 0.62)) @
-                                    q.to_matrix().to_4x4(), verts=bm.verts)
-                parts.append(obj_from_bmesh(f"{name}_sucki{si}{row}", bm, coll, kf, smooth=True))
+                # cup seated half into the skin (base ring below the surface), rim proud of it
+                m4 = Matrix.Translation(p - d * (h * 0.35)) @ q.to_matrix().to_4x4()
+                parts.append(sucker_cup(coll, f"{name}_suck{si}{row}", sr, h * 1.25, m4, ks,
+                                        segs=int(os.environ.get("B51C_CUP_SEGS", "12"))))
             si += 1
             s_next += s_step * (0.55 + 0.9 * (1 - t))  # tighter spacing toward tip
         idx += 1
@@ -566,7 +712,6 @@ def build_kraken_wreck(name="kraken_wreck"):
         parts.append(o); bev.append(o)
 
     finish(bev, width=0.018)
-    obj = join(parts, name)
 
     # ── SHOWSTOPPER scale ────────────────────────────────────
     # Authored at a 7.6 m hull, which on the beach read as "a 10 m pink coil
@@ -575,17 +720,15 @@ def build_kraken_wreck(name="kraken_wreck"):
     # tentacle, hull section, harpoons, sucker rows and scar rings all grow
     # together and keep their relative proportions.
     SCENE_SCALE = 1.8
-    obj.scale = (SCENE_SCALE, SCENE_SCALE, SCENE_SCALE)
-    bpy.ops.object.select_all(action='DESELECT')
-    obj.select_set(True)
-    bpy.context.view_layer.objects.active = obj
-    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
-
-    bake_ao(coll)
-    path = export_collection_vc(coll, f"{name}.glb")
-    verify_glb(path)
-    if RENDER_DIR:
-        render_turntable(coll, name, RENDER_DIR, views=5)
+    S = Matrix.Scale(SCENE_SCALE, 4)
+    for o in parts:
+        o.data.transform(S @ o.matrix_world)
+        o.matrix_world = Matrix.Identity(4)
+    # b5.1c: trim UVs on wood/iron/rope/rock (densified to L), the flesh keeps its own tube/cup UVs.
+    flesh = [o for o in parts if o.data.materials and o.data.materials[0].name.startswith("Kraken_")]
+    rest = trimify([o for o in parts if o not in flesh], float(os.environ.get("B51C_L_KRAKEN", "1.1")))
+    print(f"B51C kraken tris: flesh {tri_count(flesh)} rest {tri_count(rest)}")
+    ship_building([join(flesh + rest, name)], name, sheet_dir=STORY_SHEETS, levels=STORY_LEVELS, four=True)
     print(f"built {name}")
 
 
