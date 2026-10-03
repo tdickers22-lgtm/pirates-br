@@ -16,6 +16,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 exec(open(os.path.join(HERE, "_helpers.py")).read())
 exec(open(os.path.join(HERE, "_ao.py")).read())
 exec(open(os.path.join(HERE, "_detail.py")).read())
+import sys
+sys.path.insert(0, HERE)
+import _trim as TR
+exec(open(os.path.join(HERE, "_trimkit.py")).read())     # b5.1c: rock/wood/iron/rope/char on the trim sheets
+exec(open(os.path.join(HERE, "_story_pbr.py")).read())   # original procedural bone/feather/gold/rust PBR
+STORY_SHEETS = os.path.join(HERE, "..", "..", "docs", "asset-sheets", "story")
+STORY_LEVELS = (("LOD1", 0.36), ("LOD2", 0.10), ("far", 0.035, 3600))
+STORY_PBR = {
+    "Bone": dict(base=(0.72, 0.68, 0.56), belly=(0.86, 0.83, 0.72), rough=0.72, ring_freq=3, seed=21, nrm_s=3.0),
+    "Bone_Shadow": dict(base=(0.50, 0.46, 0.37), belly=(0.64, 0.60, 0.49), rough=0.78, ring_freq=3, seed=22, nrm_s=3.0),
+    "Feather_Black": dict(base=(0.06, 0.06, 0.07), belly=(0.12, 0.13, 0.16), rough=0.55, ring_freq=14, seed=41, nrm_s=2.0),
+    "Gold": dict(base=(0.80, 0.62, 0.24), belly=(0.92, 0.76, 0.36), rough=0.30, ring_freq=1, seed=51, nrm_s=1.0),
+    "Rust": dict(base=(0.40, 0.20, 0.10), belly=(0.55, 0.30, 0.14), rough=0.85, ring_freq=2, seed=61, nrm_s=4.0),
+}
 
 RENDER_DIR = os.environ.get("BR_RENDER_DIR", "")
 EXPORT_DIR = os.environ.get("BR_EXPORT_DIR", EXPORT_DIR)
@@ -556,22 +570,13 @@ def build():
         parts.append(obj_from_bmesh(f"sbone{i}", lb, coll, mat("Bone"),
                                     smooth=True))
 
-    SPEC = tint_spec(moss=0.40)
-    SPEC['Rock_Dark'] = dict(
-        tone=0.14, hue=((1.22, 1.10, 0.94), (0.76, 0.82, 0.96)), scale=1.8,
-        mottle=0.13, mscale=0.32,
-        patch=dict(col=(0.45, 0.85, 0.35), amt=0.55, scale=0.9, thresh=0.62,
-                   width=0.14, up=0.8),
-        low=dict(z=0.55, amt=0.30, col=(0.55, 0.52, 0.42)))
-    SPEC['Bone'] = dict(
-        tone=0.14, hue=((1.18, 1.12, 1.00), (0.78, 0.78, 0.74)), scale=0.5,
-        mottle=0.10, mscale=0.13,
-        patch=dict(col=(0.55, 0.72, 0.42), amt=0.45, scale=0.4, thresh=0.66,
-                   width=0.12, up=0.7),
-        low=dict(z=0.25, amt=0.40, col=(0.45, 0.44, 0.36)))
-    SPEC['Feather_Black'] = dict(tone=0.10, mottle=0.12, mscale=0.08)
-    ship_asset(coll, name, spec=SPEC, ao=dict(samples=22, floor=0.42),
-               render_dir=RENDER_DIR, views=4, elev=14)
+    # b5.1c: story-tier material pass (trim sheets + original procedural maps; Ember stays emissive, exempt),
+    # one Catmull-Clark pass on the procedural (bone/feather/gold/rust) parts, LOD0 + proxies + sheets.
+    objs = [o for o in coll.objects if o.type == "MESH"]
+    objs = story_pbrify(objs, STORY_PBR, L=float(os.environ.get("B51C_L_TOTEM", "0.5")),
+                        sub=int(os.environ.get("B51C_SUB_TOTEM", "1")), tile=0.6)
+    print(f"B51C skull_totem tris: {tri_count(objs)}")
+    ship_building([join(objs, name)], name, sheet_dir=STORY_SHEETS, levels=STORY_LEVELS, four=True)
     print(f"built {name}")
 
 
