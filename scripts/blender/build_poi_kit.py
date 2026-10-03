@@ -182,6 +182,83 @@ class Kit:
         if rmax > lim:
             raise SystemExit(f'{self.key}: drawn radius {rmax:.2f} m exceeds POI_FOOTPRINT_M[{kind}] = {lim}')
         export_collection(self.coll, f'{self.key}.glb')
+        write_proxies(self.key, kind, obj, tris)
+
+
+# LOD PROXIES (b4.7c3). A POI is dozens of separate dressed blocks; build_lods.py collapses each
+# loose part on its own with a per-part triangle floor, so a block-built ruin cannot get under the
+# 12% / 3% tier ceilings by decimation (LOD2 landed 12-17%, far 6-13%). The coarse levels are a
+# different mesh instead: the joined piece is VOXEL-REMESHED (one closed hull, the course gaps fill)
+# and collapsed to the level's budget, each face takes the material of the nearest source face, and
+# any vertex the remesh pushed past the footprint is pulled back onto it. build_lods.py reuses
+# scripts/blender/lod_proxies/<key>_<LOD2|far>.glb as that level (graded as a proxy: cheaper than the
+# level above, extras.lod_reuse). LOD2 proxies only for the kinds whose decimated LOD2 sat over 12%.
+PROXY_DIR = os.path.join(HERE, 'lod_proxies')
+PROXY_LEVELS = (('LOD2', 0.10, 150.0), ('far', 0.026, 80.0))   # (level, share of LOD0 tris, voxels across)
+LOD2_PROXY_KINDS = {'ruin_temple', 'ruin_wall', 'ruin_arch', 'skeleton_camp', 'jungle_shrine'}
+
+
+def _apply(o, mod):
+    with bpy.context.temp_override(object=o, active_object=o):
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+
+
+def write_proxies(key, kind, src, n0):
+    from mathutils.bvhtree import BVHTree
+    lim = POI_FOOTPRINT_M[kind]
+    bvh = BVHTree.FromPolygons([v.co.copy() for v in src.data.vertices], [list(p.vertices) for p in src.data.polygons])
+    mats = [p.material_index for p in src.data.polygons]
+    span = max(src.dimensions)
+    os.makedirs(PROXY_DIR, exist_ok=True)
+    for label, share, across in PROXY_LEVELS:
+        if label == 'LOD2' and kind not in LOD2_PROXY_KINDS:
+            continue
+        coll = asset_collection(f'{key}_{label}')
+        target = int(n0 * share)
+        # Thin planks and rails remesh into many small islands that Collapse cannot merge; a level
+        # still over budget is remeshed again coarser (x0.7 voxels across) before it ships.
+        for attempt in range(6):
+            if attempt:
+                bpy.data.objects.remove(o)
+            voxel = max(0.035, span / (across * 0.7 ** attempt))
+            o = bpy.data.objects.new(f'{key}_{label}', src.data.copy())
+            coll.objects.link(o)
+            rm = o.modifiers.new('rm', 'REMESH')
+            rm.mode = 'VOXEL'
+            rm.voxel_size = voxel
+            rm.adaptivity = 0.0
+            _apply(o, rm)
+            t = sum(len(p.vertices) - 2 for p in o.data.polygons)
+            if t > target:
+                dc = o.modifiers.new('dc', 'DECIMATE')
+                dc.decimate_type = 'COLLAPSE'
+                dc.ratio = target / t
+                dc.use_collapse_triangulate = True
+                _apply(o, dc)
+            if sum(len(p.vertices) - 2 for p in o.data.polygons) <= target * 1.08:
+                break
+        me = o.data
+        for p in me.polygons:
+            hit = bvh.find_nearest(p.center)
+            if hit[2] is not None:
+                p.material_index = mats[hit[2]]
+            p.use_smooth = True
+        for v in me.vertices:
+            r = math.hypot(v.co.x, v.co.y)
+            if r > lim * 0.995:
+                k = lim * 0.995 / r
+                v.co.x *= k
+                v.co.y *= k
+        if src.data.uv_layers and not me.uv_layers:
+            me.uv_layers.new(name='UVMap')
+        tris = sum(len(p.vertices) - 2 for p in me.polygons)
+        print(f'POI_PROXY {key} {label} tris {tris} ({100 * tris / n0:.1f}%) voxel {voxel:.3f} attempt {attempt}')
+        global EXPORT_DIR
+        keep, EXPORT_DIR = EXPORT_DIR, PROXY_DIR
+        try:
+            export_collection(coll, f'{key}_{label}.glb')
+        finally:
+            EXPORT_DIR = keep
 
 
 def course_wall(k, x0, x1, y, z0, courses, bw, bd, bh, material, top=None, gap=None, cuts=1):

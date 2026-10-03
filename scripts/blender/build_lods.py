@@ -270,8 +270,13 @@ def build_key(key, spec, boost=None, drop=()):
         top = 0.9 * cap / n0
         row = {'label': label, 'aim': round(aim, 4), 'ceil': ceil}
         c = None
-        if label == 'far' and os.path.exists(far_path):
-            f = import_world(far_path, weld=False)
+        # A hand-built proxy level (build_poi_kit.py lod_proxies/<key>_<label>.glb: the remeshed
+        # POI hulls) wins over the legacy shipped <key>_far.glb, and may stand for LOD2 as well.
+        proxy = os.path.join(HERE, 'lod_proxies', f'{key}_{label}.glb')
+        if not os.path.exists(proxy):
+            proxy = far_path if label == 'far' else None
+        if proxy and os.path.exists(proxy):
+            f = import_world(proxy, weld=False)
             fst = F.surface_stats(f.data)
             if fst['tris'] < cap:
                 c = f
