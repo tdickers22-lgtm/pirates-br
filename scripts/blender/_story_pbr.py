@@ -218,3 +218,95 @@ def story_ship_prep(obj, procedural, trim_px=None, proc_px=None):
                         k -= 1.0
         report.append(f"{m.name}:S{s_u}x{s_v}@{px}")
     print("B51D ship_prep", obj.name, " ".join(report))
+
+
+# ── b5.1e: story scenes III share one preset library and one ship call ─────────────────────────────
+STORY_SHEETS = os.path.join(HERE, "..", "..", "docs", "asset-sheets", "story")
+STORY_LEVELS = (("LOD1", 0.36), ("LOD2", 0.10), ("far", 0.035, 3600))
+# Original procedural looks (no third-party source) for every non-trim, non-emissive palette name the
+# smuggler / wrecker / rum still / crow roost / castaway / gibbet scenes use. Seeds match the b5.1c/d
+# scenes where the name already had a look (Bone 21, Gold 51, Rust 61, Sand_Pad 33, Flag_Fin 143).
+STORY_PBR_LIB = {
+    "Bone": dict(base=(0.72, 0.68, 0.56), belly=(0.86, 0.83, 0.72), rough=0.72, ring_freq=3, seed=21, nrm_s=3.0),
+    "Gold": dict(base=(0.80, 0.62, 0.24), belly=(0.92, 0.76, 0.36), rough=0.30, ring_freq=1, seed=51, nrm_s=1.0,
+                 _sub=0),
+    "Rust": dict(base=(0.40, 0.20, 0.10), belly=(0.55, 0.30, 0.14), rough=0.85, ring_freq=2, seed=61, nrm_s=4.0),
+    "Sand_Pad": dict(base=(0.66, 0.58, 0.42), belly=(0.80, 0.72, 0.55), rough=0.90, ring_freq=2, seed=33, nrm_s=2.0,
+                     _sub=0),
+    "Sand": dict(base=(0.70, 0.62, 0.46), belly=(0.58, 0.50, 0.36), rough=0.92, ring_freq=2, seed=34, nrm_s=2.5,
+                 _sub=0, _tile=1.6),
+    "Flag_Fin": dict(base=(0.12, 0.26, 0.30), belly=(0.09, 0.19, 0.22), rough=0.92, ring_freq=16, seed=143, nrm_s=1.5,
+                     _sub=0, _tile=1.0),
+    # bottle glass: dark green, glossy, faint seed bubbles (ring_freq); dead lantern pane: smoked, sooty
+    "Bottle_Green": dict(base=(0.08, 0.24, 0.12), belly=(0.16, 0.36, 0.18), rough=0.16, ring_freq=7, seed=161,
+                         nrm_s=1.0),
+    "Glass_Dead": dict(base=(0.20, 0.20, 0.17), belly=(0.32, 0.30, 0.24), rough=0.30, ring_freq=5, seed=162,
+                       nrm_s=1.0, _sub=0),
+    # hammered still copper: warm metal, green-brown tarnish in the lows
+    "Copper": dict(base=(0.62, 0.34, 0.20), belly=(0.36, 0.40, 0.28), rough=0.42, ring_freq=4, seed=163, nrm_s=3.0),
+    "Leaf_Dry": dict(base=(0.52, 0.42, 0.22), belly=(0.40, 0.30, 0.16), rough=0.86, ring_freq=12, seed=164, nrm_s=2.0,
+                     _sub=0),
+    "Crow_Black": dict(base=(0.05, 0.05, 0.06), belly=(0.12, 0.13, 0.17), rough=0.55, ring_freq=14, seed=41,
+                       nrm_s=2.0),
+    "Tar_Black": dict(base=(0.05, 0.04, 0.03), belly=(0.10, 0.08, 0.06), rough=0.38, ring_freq=2, seed=165, nrm_s=1.5),
+    # red-lead painted keg staves and a tarred oilcloth tarp: warm, so the cache does not read as the canvas
+    # trim family's cold blue-grey (handoff open with the trim-sheet owner)
+    "Keg_Red": dict(base=(0.46, 0.13, 0.09), belly=(0.32, 0.12, 0.08), rough=0.70, ring_freq=10, seed=167, nrm_s=3.0),
+    "Canvas_Dirty": dict(base=(0.40, 0.34, 0.24), belly=(0.28, 0.24, 0.17), rough=0.86, ring_freq=16, seed=168,
+                         nrm_s=1.5, _sub=0, _tile=1.0),
+    "Trunk_Palm": dict(base=(0.44, 0.34, 0.24), belly=(0.30, 0.23, 0.16), rough=0.86, ring_freq=18, seed=166,
+                       nrm_s=5.0),
+}
+
+
+def _split_by_material(objs):
+    """trimify/story_pbrify read materials[0] only: a multi-material part (rum still's firebox carries
+    Char_Black in a second slot) would ship that slot untextured. Split those parts per material first."""
+    out = []
+    for o in objs:
+        if len({m.name for m in o.data.materials if m}) < 2:
+            out.append(o)
+            continue
+        bpy.ops.object.select_all(action="DESELECT")
+        o.select_set(True)
+        bpy.context.view_layer.objects.active = o
+        bpy.ops.object.mode_set(mode="EDIT")
+        bpy.ops.mesh.select_all(action="SELECT")
+        bpy.ops.mesh.separate(type="MATERIAL")
+        bpy.ops.object.mode_set(mode="OBJECT")
+        pieces = list(bpy.context.selected_objects)
+        for x in pieces:
+            used = {poly.material_index for poly in x.data.polygons}
+            keep = [x.data.materials[i] for i in sorted(used)]
+            x.data.materials.clear()
+            for m in keep:
+                x.data.materials.append(m)
+            for poly in x.data.polygons:
+                poly.material_index = 0
+        print(f"B51E split {o.name} -> {[(x.name, x.data.materials[0].name) for x in pieces]}")
+        out += pieces
+    return out
+
+
+def story_ship(coll, name, L, sub=1, tile=0.6, extra=None):
+    """b5.1e one-call story ship: STORY_PBR_LIB looks for the names this scene uses (+ `extra`), wood/iron/
+    rope/char on the trim sheets, Catmull-Clark on the procedural parts, size prep (one UV layer, [0,1] UVs
+    + texture transform, 256/128 maps), LOD0 + authored LOD chain + 4-angle sheet. B51E_COUNT_ONLY=1 prints
+    the LOD0 tris without exporting."""
+    objs = _split_by_material([o for o in coll.objects if o.type == "MESH"])
+    used = {m.name for o in objs for m in o.data.materials if m}
+    pbr = {k: v for k, v in STORY_PBR_LIB.items() if k in used}
+    pbr.update(extra or {})
+    objs = story_pbrify(objs, pbr, L=L, sub=sub, tile=tile)
+    bare = sorted(m.name for o in objs for m in o.data.materials
+                  if m and m.name not in pbr and m.name not in TRIM_OF)
+    n = tri_count(objs)
+    print(f"B51E {name} tris: {n} untextured: {sorted(set(bare))}")
+    # far proxy aims >= 2400 tris: the node gate counts DRAWN (welded, degenerate-free) triangles against the
+    # 2000-4000 story band, and a 3.5% hull of a ~63k scene (2156 in Blender) drew under 2000 and was dropped
+    levels = STORY_LEVELS[:2] + (("far", max(STORY_LEVELS[2][1], 2400.0 / max(1, n)), STORY_LEVELS[2][2]),)
+    if os.environ.get("B51E_COUNT_ONLY"):
+        return None
+    joined = join(objs, name)
+    story_ship_prep(joined, pbr)
+    return ship_building([joined], name, sheet_dir=STORY_SHEETS, levels=levels, four=True)

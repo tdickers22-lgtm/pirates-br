@@ -17,6 +17,11 @@ exec(open(os.path.join(HERE, "_helpers.py")).read())
 exec(open(os.path.join(HERE, "_ao.py")).read())
 exec(open(os.path.join(HERE, "_detail.py")).read())
 exec(open(os.path.join(HERE, "_story_props.py")).read())
+import sys
+sys.path.insert(0, HERE)
+import _trim as TR
+exec(open(os.path.join(HERE, "_trimkit.py")).read())     # b5.1e: wood/iron/rope/char on the trim sheets
+exec(open(os.path.join(HERE, "_story_pbr.py")).read())   # original procedural PBR + story_ship
 
 RENDER_DIR = os.environ.get("BR_RENDER_DIR", "")
 EXPORT_DIR = os.environ.get("BR_EXPORT_DIR", EXPORT_DIR)
@@ -579,19 +584,9 @@ def build_crowroost(name="crow_roost"):
     # AO first (needs every part separate), then the per-material vertex tint
     # (needs one material per object), THEN the join. Adding the tint pass is
     # what stops the tower reading as one flat brown mass at range.
-    bake_ao(coll, samples=22, floor=0.46)
-    SPEC = tint_spec(moss=0.26, seed=21)
-    SPEC['Crow_Black'] = dict(tone=0.09, mottle=0.11, mscale=0.09,
-                              hue=((1.14, 1.10, 1.14), (0.84, 0.86, 0.94)),
-                              scale=0.25)
-    tint_pass(coll, SPEC, seed=21)
-    join(parts, name)
-    export_collection_vc(coll, f"{name}.glb")
-    verify_glb(os.path.join(EXPORT_DIR, f"{name}.glb"))
-    if RENDER_DIR:
-        preview_vertex_colors(coll)
-        render_orbit(coll, name, RENDER_DIR, angles=(-90, -35, 25, 120),
-                     elev=14)
+    # b5.1e: story-tier material pass + authored LOD chain (AO/tint vertex-colour path retired)
+    story_ship(coll, name, L=float(os.environ.get("B51E_L_CROW_ROOST", "0.28")),
+                      sub=int(os.environ.get("B51E_SUB_CROW_ROOST", "1")))
     print(f"built {name}")
 
 

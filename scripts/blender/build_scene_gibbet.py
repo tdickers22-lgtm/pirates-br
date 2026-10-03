@@ -14,6 +14,12 @@ from mathutils import Vector, Matrix
 HERE = os.path.dirname(os.path.abspath(__file__))
 exec(open(os.path.join(HERE, '_helpers.py')).read())
 exec(open(os.path.join(HERE, '_ao.py')).read())
+exec(open(os.path.join(HERE, "_detail.py")).read())       # b5.1e: contact_sheet for ship_building
+import sys
+sys.path.insert(0, HERE)
+import _trim as TR
+exec(open(os.path.join(HERE, "_trimkit.py")).read())     # b5.1e: wood/iron/rope/char on the trim sheets
+exec(open(os.path.join(HERE, "_story_pbr.py")).read())   # original procedural PBR + story_ship
 
 RENDER_DIR = os.environ.get("PBR_RENDER_DIR", "")
 EXPORT_DIR = os.environ.get("PBR_EXPORT_DIR", EXPORT_DIR)
@@ -301,14 +307,11 @@ def build_gibbet(name="gibbet_cage"):
     for o in bev:
         bevel_obj(o, width=0.018, segments=2)
         apply_modifiers(o)
-    obj = join(parts, name)
-    bake_ao(coll)
-    path = export_collection_vc(coll, f"{name}.glb")
-    verify_glb(path)
-    if RENDER_DIR:
-        render_turntable(coll, name, RENDER_DIR, views=4)
+    # b5.1e: story-tier material pass + authored LOD chain (vertex-colour AO path retired)
+    path = story_ship(coll, name, L=float(os.environ.get("B51E_L_GIBBET_CAGE", "0.08")),
+                      sub=int(os.environ.get("B51E_SUB_GIBBET_CAGE", "2")))
     print(f"built {name}")
-    return obj
+    return path
 
 
 build_gibbet("gibbet_cage")

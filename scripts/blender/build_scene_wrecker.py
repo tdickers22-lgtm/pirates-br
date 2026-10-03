@@ -16,6 +16,12 @@ from mathutils import Vector, Matrix, Euler
 HERE = os.path.dirname(os.path.abspath(__file__))
 exec(open(os.path.join(HERE, '_helpers.py')).read())
 exec(open(os.path.join(HERE, '_ao.py')).read())
+exec(open(os.path.join(HERE, "_detail.py")).read())       # b5.1e: contact_sheet for ship_building
+import sys
+sys.path.insert(0, HERE)
+import _trim as TR
+exec(open(os.path.join(HERE, "_trimkit.py")).read())     # b5.1e: wood/iron/rope/char on the trim sheets
+exec(open(os.path.join(HERE, "_story_pbr.py")).read())   # original procedural PBR + story_ship
 
 RENDER_DIR = os.environ.get("PBR_RENDER_DIR", "")
 EXPORT_DIR = os.environ.get("PBR_EXPORT_DIR", EXPORT_DIR)
@@ -178,15 +184,11 @@ def finish(objs, width=0.014, segments=1):
 
 
 def ship(coll, name, parts):
-    obj = join(parts, name)
-    bake_ao(coll)
-    damp_rim(obj)
-    path = export_collection_vc(coll, f"{name}.glb")
-    verify_glb(path)
-    if RENDER_DIR:
-        render_turntable(coll, name, RENDER_DIR, views=4)
+    # b5.1e: story-tier material pass + authored LOD chain (vertex-colour AO path retired)
+    path = story_ship(coll, name, L=float(os.environ.get("B51E_L_WRECKER_TOWER", "0.12")),
+                      sub=int(os.environ.get("B51E_SUB_WRECKER_TOWER", "1")))
     print(f"built {name}")
-    return obj
+    return path
 
 
 # ── ground: beach with ridged drag furrows from the water (-Y) ─
