@@ -13,6 +13,12 @@ from mathutils import Vector, Matrix
 HERE = os.path.dirname(os.path.abspath(__file__))
 exec(open(os.path.join(HERE, '_helpers.py')).read())
 exec(open(os.path.join(HERE, '_ao.py')).read())
+exec(open(os.path.join(HERE, "_detail.py")).read())       # b5.1e: contact_sheet for ship_building
+import sys
+sys.path.insert(0, HERE)
+import _trim as TR
+exec(open(os.path.join(HERE, "_trimkit.py")).read())     # b5.1e: wood/iron/rope/stone on the trim sheets
+exec(open(os.path.join(HERE, "_story_pbr.py")).read())   # original procedural PBR + story_ship (props tier)
 
 RENDER_DIR = os.environ.get("PBR_RENDER_DIR", "")
 EXPORT_DIR = os.environ.get("PBR_EXPORT_DIR", EXPORT_DIR)
@@ -158,13 +164,10 @@ def build_driftwood(name="driftwood_log"):
                      [0.075, 0.062, 0.05, 0.04, 0.03, 0.02], wm, segs=6)
     parts.append(bark)
 
-    obj = join(parts, name)
-    bake_ao(coll, samples=16)
-    path = export_collection_vc(coll, f"{name}.glb")
-    verify_glb(path)
-    if RENDER_DIR:
-        render_turntable(coll, name, RENDER_DIR, views=4)
-    print(f"built {name}")
+    path = story_ship(coll, name, L=float(os.environ.get("B51E_L_DRIFTWOOD_LOG", "0.3")),
+                      sub=int(os.environ.get("B51E_SUB_DRIFTWOOD_LOG", "0")), levels=PROP_LEVELS,
+                      sheet_dir=PROPS_SHEETS)
+    print(f"built {name} {path}")
 
 
 build_driftwood()

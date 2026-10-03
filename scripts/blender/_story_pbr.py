@@ -188,8 +188,20 @@ def story_ship_prep(obj, procedural, trim_px=None, proc_px=None):
         if m is None or not m.use_nodes:
             continue
         imgs = [n for n in m.node_tree.nodes if n.type == "TEX_IMAGE" and n.image is not None]
+        if imgs and m.get("b51d_prepped"):
+            # b5.1e: a script that ships SEVERAL assets in one process (story props, boneyard) shares the
+            # cached trim materials; the first asset already rebased + mapped this one, so its scale would
+            # land on the next asset's un-rebased UVs. Give this asset its own copy without our mapping.
+            m = m.copy()
+            me.materials[mi] = m
+            nt = m.node_tree
+            for n in [n for n in nt.nodes if n.name.startswith("B51D_")]:
+                nt.nodes.remove(n)
+            del m["b51d_prepped"]
+            imgs = [n for n in nt.nodes if n.type == "TEX_IMAGE" and n.image is not None]
         if not imgs or any(n.inputs["Vector"].is_linked for n in imgs):
             continue
+        m["b51d_prepped"] = 1
         us = [uvl[li].uv[0] for li in loops]
         vs = [uvl[li].uv[1] for li in loops]
         f_u, f_v = math.floor(min(us)), math.floor(min(vs))
@@ -201,6 +213,7 @@ def story_ship_prep(obj, procedural, trim_px=None, proc_px=None):
             nt = m.node_tree
             tc = nt.nodes.new("ShaderNodeTexCoord")
             mp = nt.nodes.new("ShaderNodeMapping")
+            tc.name, mp.name = "B51D_tc", "B51D_map"
             mp.vector_type = "POINT"
             mp.inputs["Scale"].default_value = (s_u, s_v, 1.0)
             nt.links.new(tc.outputs["UV"], mp.inputs["Vector"])
@@ -254,6 +267,11 @@ STORY_PBR_LIB = {
     "Keg_Red": dict(base=(0.46, 0.13, 0.09), belly=(0.32, 0.12, 0.08), rough=0.70, ring_freq=10, seed=167, nrm_s=3.0),
     "Canvas_Dirty": dict(base=(0.40, 0.34, 0.24), belly=(0.28, 0.24, 0.17), rough=0.86, ring_freq=16, seed=168,
                          nrm_s=1.5, _sub=0, _tile=1.0),
+    # rowboat tribute offerings: the mermaid shrine's shell/coral looks (same seeds as build_scene_mermaid.py)
+    "Shell_Pearl": dict(base=(0.88, 0.82, 0.74), belly=(0.74, 0.80, 0.88), rough=0.32, ring_freq=11, seed=81,
+                        nrm_s=2.5),
+    "Coral": dict(base=(0.80, 0.32, 0.20), belly=(0.94, 0.56, 0.36), rough=0.72, ring_freq=6, seed=82, nrm_s=5.0),
+    "Coral_Pink": dict(base=(0.90, 0.46, 0.55), belly=(0.97, 0.72, 0.72), rough=0.70, ring_freq=6, seed=83, nrm_s=5.0),
     "Trunk_Palm": dict(base=(0.44, 0.34, 0.24), belly=(0.30, 0.23, 0.16), rough=0.86, ring_freq=18, seed=166,
                        nrm_s=5.0),
 }
@@ -288,11 +306,16 @@ def _split_by_material(objs):
     return out
 
 
-def story_ship(coll, name, L, sub=1, tile=0.6, extra=None):
+PROPS_SHEETS = os.path.join(HERE, "..", "..", "docs", "asset-sheets", "props")
+
+
+def story_ship(coll, name, L, sub=1, tile=0.6, extra=None, levels=None, sheet_dir=None):
     """b5.1e one-call story ship: STORY_PBR_LIB looks for the names this scene uses (+ `extra`), wood/iron/
     rope/char on the trim sheets, Catmull-Clark on the procedural parts, size prep (one UV layer, [0,1] UVs
     + texture transform, 256/128 maps), LOD0 + authored LOD chain + 4-angle sheet. B51E_COUNT_ONLY=1 prints
-    the LOD0 tris without exporting."""
+    the LOD0 tris without exporting. `levels`/`sheet_dir` override the story tier: the standalone story props
+    (rowboat, signal_pyre, driftwood_log, bone_pile, grave_marker) ship on PROP_LEVELS (far <= 140) into
+    docs/asset-sheets/props."""
     objs = _split_by_material([o for o in coll.objects if o.type == "MESH"])
     used = {m.name for o in objs for m in o.data.materials if m}
     pbr = {k: v for k, v in STORY_PBR_LIB.items() if k in used}
@@ -304,9 +327,10 @@ def story_ship(coll, name, L, sub=1, tile=0.6, extra=None):
     print(f"B51E {name} tris: {n} untextured: {sorted(set(bare))}")
     # far proxy aims >= 2400 tris: the node gate counts DRAWN (welded, degenerate-free) triangles against the
     # 2000-4000 story band, and a 3.5% hull of a ~63k scene (2156 in Blender) drew under 2000 and was dropped
-    levels = STORY_LEVELS[:2] + (("far", max(STORY_LEVELS[2][1], 2400.0 / max(1, n)), STORY_LEVELS[2][2]),)
+    if levels is None:
+        levels = STORY_LEVELS[:2] + (("far", max(STORY_LEVELS[2][1], 2400.0 / max(1, n)), STORY_LEVELS[2][2]),)
     if os.environ.get("B51E_COUNT_ONLY"):
         return None
     joined = join(objs, name)
     story_ship_prep(joined, pbr)
-    return ship_building([joined], name, sheet_dir=STORY_SHEETS, levels=levels, four=True)
+    return ship_building([joined], name, sheet_dir=sheet_dir or STORY_SHEETS, levels=levels, four=True)

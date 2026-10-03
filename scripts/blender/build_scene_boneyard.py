@@ -15,6 +15,12 @@ from mathutils import Vector, Matrix
 HERE = os.path.dirname(os.path.abspath(__file__))
 exec(open(os.path.join(HERE, '_helpers.py')).read())
 exec(open(os.path.join(HERE, '_ao.py')).read())
+exec(open(os.path.join(HERE, "_detail.py")).read())       # b5.1e: contact_sheet for ship_building
+import sys
+sys.path.insert(0, HERE)
+import _trim as TR
+exec(open(os.path.join(HERE, "_trimkit.py")).read())     # b5.1e: wood/iron/rope/stone on the trim sheets
+exec(open(os.path.join(HERE, "_story_pbr.py")).read())   # original procedural PBR + story_ship (props tier)
 
 RENDER_DIR = os.environ.get("PBR_RENDER_DIR", "")
 EXPORT_DIR = os.environ.get("PBR_EXPORT_DIR", EXPORT_DIR)
@@ -45,14 +51,16 @@ def chain_pts(coll, name, pts, r1, r2, material, segs=5, smooth=True):
 
 
 def ship(coll, name):
-    bake_ao(coll)
-    path = export_collection_vc(coll, f"{name}.glb")
-    verify_glb(path)
-    if RENDER_DIR:
-        render_turntable(coll, name, RENDER_DIR)
-    for o in coll.objects:
+    """b5.1e: props tier (2.5-8k, far <= 140) on the trim sheets + procedural bone/sand PBR. Defaults hit the
+    band: bone_pile is bone + sand (procedural, so Catmull-Clark x2 sets the count: 7736), grave_marker is
+    trim wood/rope/stone (densify L 0.05: 3124)."""
+    dl, ds = {"bone_pile": ("0.3", "2"), "grave_marker": ("0.05", "1")}.get(name, ("0.3", "1"))
+    path = story_ship(coll, name, L=float(os.environ.get("B51E_L_" + name.upper(), dl)),
+                      sub=int(os.environ.get("B51E_SUB_" + name.upper(), ds)), levels=PROP_LEVELS,
+                      sheet_dir=PROPS_SHEETS)
+    for o in bpy.data.objects:      # asset + LOD proxies out of the next asset's sheets
         o.hide_render = True
-    print(f"built {name}")
+    print(f"built {name} {path}")
 
 
 # ═════════════════════════════════════════════════════════════
