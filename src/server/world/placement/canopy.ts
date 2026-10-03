@@ -20,7 +20,7 @@
  */
 import type { Island, IslandBiome, IslandProp, IslandPropType } from '../../../shared/types/index.js';
 import { getIslandDistRatio, getIslandSurfaceY, mulberry32 } from '../../../shared/utils/index.js';
-import { getPropSpacingRadius } from '../../../shared/props.js';
+import { PROP_COLLIDERS, getPropSpacingRadius } from '../../../shared/props.js';
 import { getIslandKitPieces, getKitColliders } from '../../../shared/hullCollide.js';
 import { islandPois, poiStampRadius } from './pois.js';
 
@@ -91,6 +91,22 @@ function slopeAt(island: Island, x: number, z: number): number {
   const dx = getIslandSurfaceY(island, x + e, z) - getIslandSurfaceY(island, x - e, z);
   const dz = getIslandSurfaceY(island, x, z + e) - getIslandSurfaceY(island, x, z - e);
   return Math.hypot(dx, dz) / (2 * e);
+}
+
+/** Max terrain rise across a trunk's seat ring (centre + 8 compass points at the collider radius). A
+ *  wide trunk (the buttress roots) seated on a step would dangle its downhill edge over the drop, so
+ *  trees refuse a seat whose ring spans more than SEAT_SPREAD_MAX (audit-floating-props HOVER rows). */
+const SEAT_SPREAD_MAX = 0.6;
+function seatSpread(island: Island, x: number, z: number, r: number): number {
+  let lo = getIslandSurfaceY(island, x, z);
+  let hi = lo;
+  for (let k = 0; k < 8; k++) {
+    const a = (k * Math.PI) / 4;
+    const y = getIslandSurfaceY(island, x + Math.cos(a) * r, z + Math.sin(a) * r);
+    if (y < lo) lo = y;
+    if (y > hi) hi = y;
+  }
+  return hi - lo;
 }
 
 function inStamp(island: Island, x: number, z: number, pad: number): boolean {
@@ -206,6 +222,7 @@ export function placeIslandCanopy(island: Island): Record<CanopyType, number> {
     if (getIslandSurfaceY(island, x, z) < DRY_Y + 0.2) continue;
     if (slopeAt(island, x, z) > (type === 'tree_buttress' ? 0.55 : 0.9)) continue;
     if (inStamp(island, x, z, 1.5)) continue;
+    if (seatSpread(island, x, z, (PROP_COLLIDERS[type as IslandPropType]?.radius ?? 0.5) * scale) > SEAT_SPREAD_MAX) continue;
     if (!p.clear(x, z, getPropSpacingRadius(type as IslandPropType, scale))) continue;
     const t = p.add(type, x, z, yawOf(rng), scale);
     trees.push(t);

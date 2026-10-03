@@ -59,7 +59,11 @@ for (const isl of islands) {
     if (CROWN_R[p.type] && mutate !== 'no-trunk' ? col.shape === 'capsule' : CROWN_R[p.type]) {
       const pr = 0.35;
       const at = resolvePropCollision({ x: p.x + 0.05, y: y + 0.9, z: p.z }, pr, isl);
-      ok(at.pushed && Math.hypot(at.x - p.x, at.z - p.z) >= (col.radius ?? 0) * p.scale + pr - 0.05,
+      // A second trunk inside reach of the probe pulls the resolved point toward it (two snags 1 m apart
+      // resolve to a point between them), so the clearance distance is only asserted for a lone trunk.
+      const lone = !isl.props.some((q) => q !== p && PROP_COLLIDERS[q.type]?.shape === 'capsule'
+        && Math.hypot(q.x - p.x, q.z - p.z) < (col.radius ?? 0) * p.scale + (PROP_COLLIDERS[q.type].radius ?? 0) * q.scale + 2 * pr + 0.2);
+      ok(at.pushed && (!lone || Math.hypot(at.x - p.x, at.z - p.z) >= (col.radius ?? 0) * p.scale + pr - 0.05),
         `[trunk] ${isl.id} ${p.type} ${p.id} trunk pushes a capsule out`, `pushed ${at.pushed}`);
       if (p.type !== 'tree_buttress' && p.type !== 'tree_mangrove') {
         // Under the crown (2.2 m out) is open ground unless something else stands there.
