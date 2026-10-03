@@ -108,7 +108,10 @@ for (const seed of [SEED, 20260702]) {
 
     // Density scales with radius: big islands are 40-120 props, all bounded.
     if (island.radius >= 90 && props.length < 40) { countsOk = false; detail = `${island.name}: ${props.length} props`; }
-    if (props.length < 8 || props.length > 200) { countsOk = false; detail = `${island.name}: ${props.length} props`; }
+    // The 200 ceiling bounds the SCATTER; the b4.7d canopy layers (trees/understory/grass) are graded by
+    // scripts/test-canopy-density.mjs (cover per biome), so they do not count here.
+    const scatterN = props.filter((p) => !/^(tree_|banana_plant|fern_giant|tall_grass)/.test(p.type)).length;
+    if (props.length < 8 || scatterN > 200) { countsOk = false; detail = `${island.name}: ${scatterN} scatter props`; }
 
     for (const p of props) {
       if (!KNOWN_TYPES.has(p.type)) { typesOk = false; detail = `unknown type ${p.type}`; }
@@ -270,7 +273,7 @@ expect('Caves generate across the roster (hillside placement finds sites)', tota
   // decoration pass into the collidable registry.
   // 48 → 50: rowboat + signal_pyre, shipped since 2026-07-25 and referenced by
   // nothing; registered so a scatter pass is one line (assets-04).
-  expect('Every prop type has collider metadata', Object.keys(PROP_COLLIDERS).length === 50);
+  expect('Every prop type has collider metadata', Object.keys(PROP_COLLIDERS).length === 59);
 }
 
 // ── Chest map offsets reconstruct the true world position ──
