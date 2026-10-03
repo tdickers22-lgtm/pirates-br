@@ -69,7 +69,8 @@ const FAMILY_MEMBERS: Record<Exclude<ModelFamily, 'shared' | 'instruments'>, rea
     'sea_arch_a', 'sea_arch_b', 'searock_d', 'searock_e', 'searock_f', 'searock_g', 'basalt_columns_a', 'scree_fan_a',
     'spire_a', 'spire_b', 'spire_c', 'strata_slab_a', 'strata_slab_b', 'strata_slab_c', 'reef_a', 'reef_b', 'reef_c',
   ],
-  'flora-canopy': ['palm_a', 'palm_b', 'palm_c', 'palm_tall', 'palm_ground', 'bush', 'bush_berry', 'flower_bush', 'fern_plant', 'flower_patch', 'wildflowers'],
+  'flora-canopy': ['palm_a', 'palm_b', 'palm_c', 'palm_tall', 'palm_ground', 'bush', 'bush_berry', 'flower_bush', 'fern_plant', 'flower_patch', 'wildflowers',
+    'tree_broadleaf_a', 'tree_broadleaf_b', 'tree_buttress', 'tree_mangrove', 'tree_dead_a', 'tree_dead_b', 'banana_plant', 'fern_giant', 'tall_grass'],
   'props-poi': [
     'barrel', 'keg', 'chest_closed', 'chest_open', 'crate', 'campfire', 'bedroll', 'lantern_post', 'tent_a', 'tent_b', 'tent_c',
     'bone_pile', 'driftwood_log', 'grave_marker', 'signal_pyre', 'wall_torch', 'bone_pile_cave', 'skull_shrine',

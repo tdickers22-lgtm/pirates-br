@@ -230,5 +230,14 @@
  "wildflowers_far": "wildflowers_far.adbac19a.glb",
  "wildflowers_lods": "wildflowers_lods.cdf8e665.glb",
  "wrecker_tower": "wrecker_tower.7c62a5d0.glb",
- "wrecker_tower_far": "wrecker_tower_far.a1adfb7e.glb"
+ "wrecker_tower_far": "wrecker_tower_far.a1adfb7e.glb",
+ "banana_plant": "banana_plant.71364132.glb",
+ "fern_giant": "fern_giant.f2b7367a.glb",
+ "tall_grass": "tall_grass.144d8c7b.glb",
+ "tree_broadleaf_a": "tree_broadleaf_a.f357dfc9.glb",
+ "tree_broadleaf_b": "tree_broadleaf_b.7e0ea81c.glb",
+ "tree_buttress": "tree_buttress.7e68fdea.glb",
+ "tree_dead_a": "tree_dead_a.3769fc11.glb",
+ "tree_dead_b": "tree_dead_b.b091095a.glb",
+ "tree_mangrove": "tree_mangrove.aef028eb.glb"
 }
