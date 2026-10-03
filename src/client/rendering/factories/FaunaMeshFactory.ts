@@ -3,6 +3,7 @@ import { clone as cloneSkinnedScene } from 'three/examples/jsm/utils/SkeletonUti
 import type { WildlifeAnimal } from '../../../shared/types/index.js';
 import { assets, type AssetName } from '../../assets/AssetLibrary.js';
 import type { RenderQuality } from '../QualityPreference.js';
+import { mixerStep } from '../SharkRenderer.js';
 
 /**
  * EVERY CREATURE MESH THE GAME BUILDS, in one place (FAUNAGLB-01, assets-12).
@@ -70,7 +71,81 @@ function buildSkinnedShark(): THREE.Group | null {
   return group;
 }
 
+/** Gull clip choice from its own motion (b5.2a): perched below 0.35 m/s, otherwise
+ *  glide, breaking into a flap while climbing or for ~1.2 s of every ~3.4 s. Pure. */
+export function gullClip(speed: number, climb: number, t: number, seed: number): 'idle' | 'glide' | 'flap' {
+  if (speed < 0.35) return 'idle';
+  if (climb > 0.25) return 'flap';
+  return ((t + seed * 1.7) % 3.4) < 1.2 ? 'flap' : 'glide';
+}
+
+/** The rigged gull (6 bones; flap / glide / idle), cloned with SkeletonUtils so its
+ *  skeleton is its own. Game.syncWildlife only poses named pivot parts, so this mesh
+ *  drives its OWN mixer from its world motion in onBeforeRender: that hook runs only
+ *  when the gull is visible and in a frustum (off-screen gulls cost nothing), and the
+ *  shared mixerStep LOD (45 m full rate, 15 Hz beyond, frozen past 130 m) applies.
+ *  Null before the asset is in or if gull.glb ever ships without skin or clips. */
+function buildSkinnedGull(animal: WildlifeAnimal): THREE.Group | null {
+  const src = assets.source('gull' as string as AssetName);
+  if (!src || src.animations.length < 2) return null;
+  let skinned: THREE.SkinnedMesh | null = null;
+  src.scene.traverse((o) => { if (!skinned && (o as THREE.SkinnedMesh).isSkinnedMesh) skinned = o as THREE.SkinnedMesh; });
+  if (!skinned) return null;
+  const root = cloneSkinnedScene(src.scene) as THREE.Group;
+  const group = new THREE.Group();
+  group.name = `wildlife-${animal.id}`;
+  group.add(root);
+  const mixer = new THREE.AnimationMixer(root);
+  const actions: Partial<Record<'idle' | 'glide' | 'flap', THREE.AnimationAction>> = {};
+  for (const name of ['idle', 'glide', 'flap'] as const) {
+    const clip = THREE.AnimationClip.findByName(src.animations, name);
+    if (clip) actions[name] = mixer.clipAction(clip);
+  }
+  let current: 'idle' | 'glide' | 'flap' = 'idle';
+  actions.idle?.play();
+  const seed = (animal.position.x * 0.37 + animal.position.z * 0.11) % 10;
+  const last = new THREE.Vector3();
+  const now = new THREE.Vector3();
+  let lastMs = -1;
+  let carry = 0;
+  let speedEma = 0;
+  let climbEma = 0;
+  let mesh: THREE.SkinnedMesh | null = null;
+  root.traverse((o) => { if (!mesh && (o as THREE.SkinnedMesh).isSkinnedMesh) mesh = o as THREE.SkinnedMesh; });
+  if (mesh) {
+    (mesh as THREE.SkinnedMesh).onBeforeRender = (_r, _s, camera) => {
+      if (!(camera as THREE.PerspectiveCamera).isPerspectiveCamera) return; // shadow pass
+      const ms = performance.now();
+      group.getWorldPosition(now);
+      if (lastMs < 0) { lastMs = ms; last.copy(now); return; }
+      const dt = Math.min(0.1, (ms - lastMs) / 1000);
+      if (dt < 0.001) return;
+      lastMs = ms;
+      const k = 1 - Math.exp(-dt * 4);
+      speedEma += (now.distanceTo(last) / dt - speedEma) * k;
+      climbEma += ((now.y - last.y) / dt - climbEma) * k;
+      last.copy(now);
+      const want = gullClip(speedEma, climbEma, ms / 1000, seed);
+      if (want !== current && actions[want] && actions[current]) {
+        actions[want]!.reset().play();
+        actions[current]!.crossFadeTo(actions[want]!, 0.35, false);
+        current = want;
+      }
+      const { step, carry: c } = mixerStep(dt, carry, camera.position.distanceTo(now));
+      carry = c;
+      if (step > 0) mixer.update(step);
+    };
+  }
+  group.userData.parts = {};
+  group.userData.fauna = { mixer, skinned: true };
+  return group;
+}
+
 export function buildWildlifeMesh(animal: WildlifeAnimal, quality: RenderQuality): THREE.Group {
+    if (animal.type === 'gull') {
+      const g = buildSkinnedGull(animal);
+      if (g) return g;
+    }
     // Blender GLB first (authored in parallel — standard part names drive the
     // same sync animation); missing asset keeps the procedural fallback.
     const glb = assets.clone(animal.type as string as AssetName);

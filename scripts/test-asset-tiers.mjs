@@ -280,12 +280,12 @@ export const RATCHET = [
   'dock_end:lods', 'dock_end:textures',
   // story-scenes
   // shark
-  'shark:lods', 'shark:textures',
+  'shark:lods',
   // critters
   'crab:band', 'crab:lods', 'crab:textures',
   'chicken:band', 'chicken:lods', 'chicken:textures',
   'pig:band', 'pig:lods', 'pig:textures',
-  'gull:band', 'gull:lods', 'gull:textures',
+  'gull:lods',
   // characters
   'pirate_base:band', 'pirate_base:lods', 'pirate_base:textures',
   // fp-arms

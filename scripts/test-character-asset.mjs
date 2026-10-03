@@ -117,6 +117,11 @@ function worlds(gltf) {
 }
 
 // rest-pose skinned vertices of one mesh node + each vertex's dominant joint name
+if (process.argv.includes('--creatures')) {
+  await creatureSection();
+  console.log(`\n${checks} checks, ${failures} failed`);
+  process.exit(failures ? 1 : 0);
+}
 function skinned(g, W, nodeIdx, wantJoint = null) {
   const { gltf } = g;
   const node = gltf.nodes[nodeIdx];
@@ -975,5 +980,77 @@ if (!argv.includes('--glb')) {
   }
 }
 
+// ── CREATURES (b5.2a, characters-08, vm:assets:4): rigged, animated, UV-textured, in band ─────────
+// A creature is not a rigid toy: it ships a skin with >= MIN bones, the named clips the client drives,
+// a LOD0 triangle count inside its PLAN 3.12 band (too coarse is a primitive tell, too fine outruns
+// the budget), TEXCOORD_0 on every primitive and a full PBR set (baseColor + normal + ORM) on every
+// material. The shark adds two measured art facts: COUNTER-SHADING (texels under downward-facing body
+// vertices are >= 1.8x the luma of texels under upward-facing ones) and THICK FINS (no card fins:
+// every fin-tagged vertex group, i.e. node extras.fins, has root thickness >= 6% of its root chord,
+// read from the build's per-fin report in asset extras).
+// `--creatures-dir <dir>` grades another copy (red run: HEAD's public/assets/models); `--creatures`
+// runs only this section.
+async function creatureSection() {
+  const CD_ARG = process.argv.indexOf('--creatures-dir');
+  const CDIR = CD_ARG > 0 ? process.argv[CD_ARG + 1].replace(/\/$/, '') : `${ROOT}public/assets/models`;
+  const CREATURES = [
+    { key: 'shark', band: [8000, 12000], bones: 9, clips: ['swim', 'bite'], counterShade: true, fins: true },
+    { key: 'gull', band: [2500, 4000], bones: 6, clips: ['flap', 'glide', 'idle'] },
+  ];
+  console.log('\n[creatures] rig, clips, band, UVs, PBR maps');
+  const lumaAt = (img, uv) => {
+    const x = Math.min(img.w - 1, Math.max(0, Math.round((uv[0] - Math.floor(uv[0])) * (img.w - 1))));
+    const y = Math.min(img.h - 1, Math.max(0, Math.round(uv[1] * (img.h - 1))));
+    const o = (y * img.w + x) * img.c;
+    return 0.2126 * img.d[o] + 0.7152 * img.d[o + 1] + 0.0722 * img.d[o + 2];
+  };
+  for (const c of CREATURES) {
+    const file = `${CDIR}/${c.key}.glb`;
+    if (!existsSync(file)) { expect(`${c.key}: ${file} exists`, false); continue; }
+    const g = readGlb(file); const { gltf } = g;
+    const joints = Math.max(0, ...(gltf.skins ?? []).map((s) => s.joints.length));
+    expect(`${c.key}: skinned, ${joints} bones >= ${Math.max(4, c.bones)}`, joints >= Math.max(4, c.bones));
+    const clips = (gltf.animations ?? []).map((a) => a.name);
+    expect(`${c.key}: clips [${clips}] include [${c.clips}] (>= 2)`, clips.length >= 2 && c.clips.every((n) => clips.includes(n)));
+    let tris = 0; let prims = 0; let noUv = 0; let unskinned = 0;
+    for (const m of gltf.meshes ?? []) for (const p of m.primitives) {
+      prims += 1;
+      tris += (p.indices !== undefined ? gltf.accessors[p.indices].count : gltf.accessors[p.attributes.POSITION].count) / 3;
+      if (p.attributes.TEXCOORD_0 === undefined) noUv += 1;
+      if (p.attributes.JOINTS_0 === undefined) unskinned += 1;
+    }
+    expect(`${c.key}: LOD0 ${tris} tris in [${c.band}]`, tris >= c.band[0] && tris <= c.band[1]);
+    expect(`${c.key}: every primitive has UV0 (${prims - noUv}/${prims})`, prims > 0 && noUv === 0);
+    expect(`${c.key}: every primitive is skinned (no rigid part riding the root)`, prims > 0 && unskinned === 0);
+    const mats = gltf.materials ?? [];
+    const bad = mats.filter((m) => !(m.pbrMetallicRoughness?.baseColorTexture && m.normalTexture && m.pbrMetallicRoughness?.metallicRoughnessTexture));
+    expect(`${c.key}: every material carries baseColor + normal + ORM (${bad.map((m) => m.name)})`, mats.length > 0 && bad.length === 0);
+    if (c.counterShade && mats.length && !bad.length) {
+      const ti = mats[0].pbrMetallicRoughness.baseColorTexture.index;
+      const bv = gltf.bufferViews[gltf.images[gltf.textures[ti].source].bufferView];
+      const { data, info } = await sharp(g.bin.subarray(bv.byteOffset || 0, (bv.byteOffset || 0) + bv.byteLength)).raw().toBuffer({ resolveWithObject: true });
+      const img = { d: data, w: info.width, h: info.height, c: info.channels };
+      const bodyNode = gltf.nodes.find((n) => n.mesh !== undefined && n.name === 'shark_body');
+      let up = 0; let nu = 0; let down = 0; let nd = 0;
+      if (bodyNode) {
+        const p = gltf.meshes[bodyNode.mesh].primitives[0];
+        const N = accessor(g, p.attributes.NORMAL); const UV = accessor(g, p.attributes.TEXCOORD_0);
+        for (let i = 0; i < N.length; i++) {
+          if (N[i][1] > 0.7) { up += lumaAt(img, UV[i]); nu += 1; } else if (N[i][1] < -0.7) { down += lumaAt(img, UV[i]); nd += 1; }
+        }
+      }
+      const ratio = nu && nd ? (down / nd) / (up / nu) : 0;
+      expect(`${c.key}: counter-shaded texture, belly/back luma ${ratio.toFixed(2)} >= 1.8 (${nd}/${nu} verts)`, nu > 50 && nd > 50 && ratio >= 1.8);
+    }
+    if (c.fins) {
+      const fins = gltf.asset?.extras?.fins ?? gltf.scenes?.[0]?.extras?.fins;
+      const list = fins ? Object.entries(typeof fins === 'string' ? JSON.parse(fins) : fins) : [];
+      const thin = list.filter(([, f]) => !(f.rootThick / f.rootChord >= 0.06 && f.stations >= 4));
+      expect(`${c.key}: ${list.length} lofted fins, all thick at the root (>= 6% chord) [${thin.map(([n]) => n)}]`, list.length >= 7 && thin.length === 0);
+    }
+  }
+}
+
+await creatureSection();
 console.log(`\n${checks} checks, ${failures} failed`);
 process.exit(failures ? 1 : 0);
