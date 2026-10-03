@@ -24,6 +24,7 @@
 //
 //   node --import tsx scripts/test-ship-lod-budget.mjs
 import { installCanvasStub } from './lib/canvas-stub.mjs';
+import { SHIP_LOD_BUDGETS } from './lib/budgets.mjs';
 installCanvasStub();
 const THREE = await import('three');
 const { ShipRenderer } = await import('../src/client/rendering/ShipRenderer.ts');
@@ -37,12 +38,8 @@ function expect(label, ok, detail = '') {
 }
 
 const CLASSES = ['sloop', 'brigantine', 'galleon'];
-/** D26 LOD0 tri ceilings per class (the floor 70k/100k/150k is the kit's job, b4.3). */
-const LOD0_TRI_CEIL = { sloop: 100_000, brigantine: 140_000, galleon: 200_000 };
-/** LOD0 draws today (pinned 2026-10-01 at b4.2d); D26 target <= 30. Lower only. */
-const LOD0_DRAW_RATCHET = { sloop: 139, brigantine: 177, galleon: 232 };
-const LOW_OWN_CAP = 60_000;
-const PHONE_OWN_CAP = 45_000;
+// Ceilings live in scripts/lib/budgets.mjs (SHIP_LOD_BUDGETS) so test-budget-ratchet can hold them.
+const { LOD0_TRI_CEIL, LOD0_DRAW_RATCHET, LOW_OWN_CAP, PHONE_OWN_CAP } = SHIP_LOD_BUDGETS;
 
 // ── 1. policy ───────────────────────────────────────────────────────────────
 console.log('\n[policy] ship/lod.ts');

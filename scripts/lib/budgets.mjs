@@ -494,3 +494,14 @@ export function flattenBudgets(tree = ALL_BUDGETS, prefix = '') {
   walk(tree, prefix);
   return out;
 }
+
+// ═══ test-ship-lod-budget: ship LOD chains (b4.2d, D26), moved here from the suite at the b4 gate ═══════
+// LOD0_TRI_CEIL = D26 LOD0 tri ceilings per class (the floor 70k/100k/150k is the kit's job, b4.3).
+// LOD0_DRAW_RATCHET = LOD0 draws pinned 2026-10-01 at b4.2d; D26 target <= 30. Lower only.
+// LOW_OWN_CAP / PHONE_OWN_CAP = own-hull tris on the low tier / phone.
+export const SHIP_LOD_BUDGETS = {
+  LOD0_TRI_CEIL: { sloop: 100_000, brigantine: 140_000, galleon: 200_000 },
+  LOD0_DRAW_RATCHET: { sloop: 139, brigantine: 177, galleon: 232 },
+  LOW_OWN_CAP: 60_000,
+  PHONE_OWN_CAP: 45_000,
+};
