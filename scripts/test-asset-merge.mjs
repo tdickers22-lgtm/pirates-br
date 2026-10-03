@@ -93,7 +93,7 @@ globalThis.fetch = async (input, init) => {
   return realFetch(input, init);
 };
 
-const { ASSET_NAMES, FLAT_SHADED_ASSETS, BOOT_ASSET_NAMES, WORLD_ASSET_NAMES, LAZY_ASSET_NAMES, AssetLibrary, assets } = await import('../src/client/assets/AssetLibrary.ts');
+const { ASSET_NAMES, FLAT_SHADED_ASSETS, BOOT_ASSET_NAMES, WORLD_ASSET_NAMES, LAZY_ASSET_NAMES, SHIP_KIT_ASSET_NAMES, AssetLibrary, assets } = await import('../src/client/assets/AssetLibrary.ts');
 
 // Loader failures inside preload() are logged and tolerated by design (callers
 // keep a procedural fallback), so capture them rather than let them scroll past.
@@ -107,6 +107,8 @@ await assets.preload();
 // so this suite still grades all of them — it just has to ask for them the way
 // the game does instead of assuming preload() brought everything.
 await Promise.all(LAZY_ASSET_NAMES.map((n) => assets.ensure(n)));
+// b4.3c: the ship kit is a fourth set, streamed by ShipRenderer.kitReady -> ensure().
+await Promise.all(SHIP_KIT_ASSET_NAMES.map((n) => assets.ensure(n)));
 console.warn = realWarn;
 
 console.log(`asset merge guard — ${ASSET_NAMES.length} assets\n`);
@@ -497,13 +499,16 @@ expect('merged geometry is registered as a shared resource (never disposed by ca
   // lazy (the story tableaux, fetched on approach). The partition rule is the
   // point — a name in two sets is fetched twice, a name in none is never
   // fetched at all and renders as a procedural fallback nobody sees fail.
+  // b4.3c added a fourth: the ship kit (ShipRenderer.kitReady -> ensure on the
+  // first hull inside the LOD0 band), in no other set by design.
   const lazy = [...LAZY_ASSET_NAMES];
-  const sets = [boot, world, lazy];
-  expect('the boot, world and lazy sets partition the library exactly',
-    boot.length + world.length + lazy.length === ASSET_NAMES.length
+  const kit = [...SHIP_KIT_ASSET_NAMES];
+  const sets = [boot, world, lazy, kit];
+  expect('the boot, world, lazy and ship-kit sets partition the library exactly',
+    boot.length + world.length + lazy.length + kit.length === ASSET_NAMES.length
       && sets.every((set) => set.every((n) => ASSET_NAMES.includes(n)))
-      && new Set([...boot, ...world, ...lazy]).size === ASSET_NAMES.length,
-    `${boot.length} boot + ${world.length} world + ${lazy.length} lazy vs ${ASSET_NAMES.length}`);
+      && new Set([...boot, ...world, ...lazy, ...kit]).size === ASSET_NAMES.length,
+    `${boot.length} boot + ${world.length} world + ${lazy.length} lazy + ${kit.length} kit vs ${ASSET_NAMES.length}`);
   expect('the boot set is small enough to be worth splitting for (<= 12 files)',
     boot.length <= 12, `${boot.length} boot assets: ${boot.join(', ')}`);
 

@@ -55,11 +55,13 @@ const all = new Set(Lib.ASSET_NAMES);
 const boot = new Set(Lib.BOOT_ASSET_NAMES);
 const world = new Set(Lib.WORLD_ASSET_NAMES);
 const lazy = new Set(Lib.LAZY_ASSET_NAMES ?? []);
+// b4.3c: the ship kit is its own streamed set (ShipRenderer.kitReady -> ensure).
+const kit = new Set(Lib.SHIP_KIT_ASSET_NAMES ?? []);
 expect('fifteen story scenes are declared lazy', lazy.size === 15, `got ${lazy.size}`);
 const leaked = [...lazy].filter((n) => world.has(n) || boot.has(n));
 expect('preloadWorld/preloadBoot name no story scene', leaked.length === 0, `leaked: ${leaked.join(', ')}`);
-const union = new Set([...boot, ...world, ...lazy]);
-expect('boot + world + lazy = the whole library',
+const union = new Set([...boot, ...world, ...lazy, ...kit]);
+expect('boot + world + lazy + ship kit = the whole library',
   union.size === all.size && [...all].every((n) => union.has(n)),
   `library ${all.size}, covered ${union.size}`);
 expect('every lazy name is a real asset', [...lazy].every((n) => all.has(n)));
