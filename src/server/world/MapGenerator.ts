@@ -33,6 +33,7 @@ import { getIslandLandforms } from '../../shared/landforms.js';
 import { placeCliffKitWorld } from './placement/cliffKit.js';
 import { placeClimbsWorld } from './placement/climbs.js';
 import { placePoisWorld } from './placement/pois.js';
+import { placeCanopyWorld } from './placement/canopy.js';
 
 const SHIP_TYPES = ['sloop', 'brigantine', 'galleon'] as const;
 
@@ -662,6 +663,8 @@ export class MapGenerator {
     placeCliffKitWorld(islands);
     // b4.7c: POIs (own per-island stream, stamps + loot/trail hooks) clear of the kit, before the climbs.
     placePoisWorld(islands);
+    // b4.7d: the canopy layers (own per-island stream) after the POIs, before the climbs (routes keep clear of trunks).
+    placeCanopyWorld(islands);
     // b4.7b: ladders, ropes and scramble corridors (pure geometry, no rng draw).
     placeClimbsWorld(islands);
     return islands;
