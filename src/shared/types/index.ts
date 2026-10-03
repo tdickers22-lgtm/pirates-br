@@ -419,6 +419,9 @@ export type IslandBiome = 'lush' | 'palm_atoll' | 'volcanic' | 'highland' | 'bon
 /** Exact GLB asset names in public/assets/models (see its README manifest). */
 export type IslandPropType =
   | 'palm_a' | 'palm_b' | 'palm_c' | 'palm_tall' | 'palm_ground'
+  // b4.7d canopy flora kit (build_flora_canopy.py): canopy/shore/snag trees + understory + ground layer.
+  | 'tree_broadleaf_a' | 'tree_broadleaf_b' | 'tree_buttress' | 'tree_mangrove' | 'tree_dead_a' | 'tree_dead_b'
+  | 'banana_plant' | 'fern_giant' | 'tall_grass'
   | 'boulder_a' | 'boulder_b' | 'boulder_c'
   | 'barrel' | 'crate' | 'campfire' | 'lantern_post'
   | 'watchtower' | 'shipwreck' | 'standing_stones' | 'fort'

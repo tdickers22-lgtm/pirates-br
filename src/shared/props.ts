@@ -90,6 +90,17 @@ export const PROP_COLLIDERS: Record<IslandPropType, PropCollider> = {
   palm_c: { shape: 'capsule', radius: 0.42, height: 5.0 },
   palm_tall: { shape: 'capsule', radius: 0.3, height: 13.5 },
   palm_ground: { shape: 'capsule', radius: 0.5, height: 2.0 },
+  // b4.7d canopy kit: TRUNK capsules only (crowns never block; you walk under the canopy). Radii are the
+  // built GLB trunk at chest height; the buttress capsule spans the plank-root fins' inner third.
+  tree_broadleaf_a: { shape: 'capsule', radius: 0.42, height: 11 },
+  tree_broadleaf_b: { shape: 'capsule', radius: 0.4, height: 9.5 },
+  tree_buttress: { shape: 'capsule', radius: 1.1, height: 13 },
+  tree_mangrove: { shape: 'capsule', radius: 0.3, height: 5.5 },
+  tree_dead_a: { shape: 'capsule', radius: 0.3, height: 7 },
+  tree_dead_b: { shape: 'capsule', radius: 0.3, height: 5.5 },
+  banana_plant: { shape: 'none', radius: 0, height: 2.8 },
+  fern_giant: { shape: 'none', radius: 0, height: 1.5 },
+  tall_grass: { shape: 'none', radius: 0, height: 1.4 },
   // GLB XZ half-extents are 1.29 × 1.21 on a rounded mesh — 1.6 ringed every
   // boulder with ~0.3 m of invisible blocking ground.
   boulder_a: { shape: 'sphere', radius: 1.35, height: 2.4 },
