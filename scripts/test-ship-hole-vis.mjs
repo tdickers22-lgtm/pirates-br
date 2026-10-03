@@ -190,6 +190,15 @@ const R = FLOODING.HOLE_VISUAL_RADIUS;
     if (obj === vis.marker || obj.parent === vis.decal) return;
     if (obj.userData.isPlankPatch || obj.parent?.userData?.isPlankPatch) return;
     if (obj.position.lengthSq() > 1e-8 || obj.quaternion.w < 0.999999) return; // not hull-local
+    // b4.gate: an identity LOCAL transform is not enough. b4 hangs furled-sail
+    // bundles (ship-sail-canvas) at the origin of a yard-trim-pivot 10+ m up the
+    // mast, and their local x +-4.7 / y -0.69..0.30 read as 0.059 m from a breach
+    // at (3.35, 0.275, 0). Hull-local means the whole chain up to detailRoot.
+    let chainLocal = true;
+    for (let p = obj.parent; p && p !== mesh.detailRoot; p = p.parent) {
+      if (p.position.lengthSq() > 1e-8 || p.quaternion.w < 0.999999 || Math.abs(p.scale.x - 1) + Math.abs(p.scale.y - 1) + Math.abs(p.scale.z - 1) > 1e-6) { chainLocal = false; break; }
+    }
+    if (!chainLocal) return;
     const { d, along } = nearestTriangleDistance(obj);
     if (d > R) return;
     const name = obj.material?.name || obj.name || 'unnamed';
