@@ -93,9 +93,11 @@ export const ASSET_NAMES = [
   'poi_skeleton_camp_lods', 'poi_overlook_platform_lods', 'poi_small_lighthouse_lods',
   'poi_jungle_shrine_lods', 'poi_grotto_landing_lods',
   // Canopy flora kit (b4.7d, build_flora_canopy.py): trees, understory and grass placed as island props by
-  // placement/canopy.ts; WORLD tier like the palms. No <key>_lods chain yet (open leaf blades hold their
-  // boundary loops through build_lods.py; the chain needs leaf-cluster proxies, lane report b4.7d-rest).
+  // placement/canopy.ts; WORLD tier like the palms. <key>_lods chains from the leaf-cluster / blade-subset
+  // proxies build_flora_canopy.py writes to lod_proxies/ (open leaf blades defeat build_lods.py Collapse).
   'tree_broadleaf_a', 'tree_broadleaf_b', 'tree_buttress', 'tree_mangrove', 'tree_dead_a', 'tree_dead_b', 'banana_plant', 'fern_giant', 'tall_grass',
+  'tree_broadleaf_a_lods', 'tree_broadleaf_b_lods', 'tree_buttress_lods', 'tree_mangrove_lods', 'tree_dead_a_lods',
+  'tree_dead_b_lods', 'banana_plant_lods', 'fern_giant_lods', 'tall_grass_lods',
 ] as const;
 
 export type AssetName = (typeof ASSET_NAMES)[number];
