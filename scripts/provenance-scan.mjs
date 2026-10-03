@@ -65,6 +65,10 @@ export const OVERRIDES = {
     script: 'scripts/blender/build_fauna_v2.py',
     reason: 'shipped shark.glb is skinned (1 skin) = build_shark_hero/export_skinned in build_fauna_v2.py; build_animals.py build_shark() is the superseded rigid version (c0f262fb)',
   },
+  'gull.glb': {
+    script: 'scripts/blender/build_fauna_v2.py',
+    reason: 'shipped gull.glb is the rigged 6-bone gull (flap/glide/idle clips) = build_gull in build_fauna_v2.py (b5.2a, bdfee57a); build_animals.py build_gull() is the superseded unrigged 700-tri version',
+  },
   // b4.5a: the rock kit v2 build writes its own far rocks (_rock.decimated_copy: gate-safe weld, area kept);
   // build_far_lods.py still names the rocks in its legacy list but no longer builds them.
   ...Object.fromEntries(['boulder_a', 'boulder_b', 'boulder_c', 'searock_a', 'searock_b', 'searock_c'].map((k) => [`${k}_far.glb`, {

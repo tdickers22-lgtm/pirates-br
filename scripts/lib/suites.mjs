@@ -165,6 +165,11 @@ export const LOGIC = [
   // NOT quick: the wardrobe II / R2 rows (ray clearance, rim spikes, eyelid covers on three bodies) grew
   // it from ~0.3 s to 58-77 s, alone past the quick tier's 60 s ceiling. Logic tier + every batch gate.
   tsx('test-character-asset.mjs'),
+  // b5.2a: the creature section alone (shark 8-12k + 9 bones + swim/bite + counter-shading + thick lofted
+  // fins; gull 2.5-4k + 6 bones + flap/glide/idle; UV0, skinned, baseColor/normal/ORM), ~0.15 s, so the
+  // pre-commit tier sees it. The full entry above also runs it. Kept AFTER the full entry: run-batch-gate
+  // resolves `test-character-asset` to the first match. Red: --creatures-dir on the pre-b5.2a GLBs (9/13).
+  quick({ ...tsx('test-character-asset.mjs'), cmd: [...tsx('test-character-asset.mjs').cmd, '--creatures'] }),
   // test-anim-rig-anatomy (b3.2b): every pirate_clips.glb clip at 21 phases, FK on the GLB nodes: knees
   // about the thigh hinge, elbows about the shoulder-frame clinical hinge (humeral rotation ext <= 145,
   // int <= 90, bend <= 150 deg; negative controls prove a backward fold fails), head pitch raises the gaze,
