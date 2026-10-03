@@ -84,6 +84,14 @@ export const ASSET_NAMES = [
   // Climb kit (b4.7b, build_poi_kit.py): rail/rung/rope/knot/stake nodes Landmarks.buildRopeLadder
   // instances along island.climbs. WORLD tier: the routes are mountable from tick 0.
   'climb_kit',
+  // POI kit (b4.7c2, build_poi_kit.py): one GLB per placed kind/variant + its <key>_lods chain, instanced by
+  // Landmarks.buildPois at island.pois (src/server/world/placement/pois.ts). WORLD tier: the static world.
+  'poi_ruin_temple', 'poi_ruin_wall_a', 'poi_ruin_wall_b', 'poi_ruin_wall_c', 'poi_ruin_arch',
+  'poi_stilt_outpost', 'poi_skeleton_camp', 'poi_overlook_platform', 'poi_small_lighthouse',
+  'poi_jungle_shrine', 'poi_grotto_landing', 'poi_ruin_temple_lods', 'poi_ruin_wall_a_lods',
+  'poi_ruin_wall_b_lods', 'poi_ruin_wall_c_lods', 'poi_ruin_arch_lods', 'poi_stilt_outpost_lods',
+  'poi_skeleton_camp_lods', 'poi_overlook_platform_lods', 'poi_small_lighthouse_lods',
+  'poi_jungle_shrine_lods', 'poi_grotto_landing_lods',
 ] as const;
 
 export type AssetName = (typeof ASSET_NAMES)[number];
